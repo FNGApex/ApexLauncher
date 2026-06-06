@@ -24,3 +24,4 @@ src-tauri/gen/
 
 # App runtime data (if ever run from repo)
 /appdata/
+.claude/.scratchpad/
