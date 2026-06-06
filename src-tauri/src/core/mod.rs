@@ -7,7 +7,9 @@
 //! - `meta`      — TTL'd disk-cached HTTP helper for the metadata fetchers.
 //! - `versions`  — Minecraft release list (Mojang piston-meta).
 //! - `loaders`   — per-MC mod-loader version lists (Forge/Fabric/Quilt/NeoForge).
+//! - `download`  — concurrent, hash-verified download engine (Phase 2).
 
+pub mod download;
 pub mod instances;
 pub mod loaders;
 pub mod meta;
