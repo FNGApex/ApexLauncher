@@ -18,7 +18,7 @@ the create-instance flow can pick real MC versions and loader builds.
 | TTL'd disk-cached HTTP helper (6h) | ✅ | `core/meta.rs` |
 | Client query cache + startup prefetch | ✅ | `src/lib/query.ts`, `src/lib/prefetch.ts` |
 | Create-instance modal (live versions/loaders) | ✅ | `src/components/NewInstanceModal.tsx` |
-| Download engine | ⬜ | Phase 2 |
+| Download engine | ✅ | `core/download.rs` (Phase 2 slice A) |
 | Java manager (Temurin) | ⬜ | Phase 2 |
 | Launch (vanilla → modded) | ⬜ | Phase 2/4 |
 | Auth (MS device-code) | ⬜ | Phase 3 |

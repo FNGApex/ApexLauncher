@@ -24,13 +24,15 @@ Done early so the create-instance flow picks real versions/builds:
 - `core/meta.rs` — TTL'd (6h) disk-cached HTTP helper backing both.
 - Frontend: `lib/query.ts` (shared query client, 6h meta stale-time), `lib/prefetch.ts`
   (warm cache on startup), `components/NewInstanceModal.tsx` (live dropdowns).
-- **Still ⬜ for Phase 2:** libraries, asset index, natives, download engine, Java manager,
-  and the actual launch — none of these exist yet.
+- **Still ⬜ for Phase 2:** libraries, asset index, natives, Java manager, and the actual
+  launch. (Download engine ✅ — see below.)
 
 ## Phase 2 — Minecraft install + launch (vanilla)
 - Mojang piston-meta client: versions ✅ (release list done), libraries/asset index/natives ⬜.
 - Java manager: detect system JREs, download Temurin per required major.
-- Download engine: concurrent, hash-verified, content-addressed.
+- Download engine: concurrent, hash-verified, content-addressed. ✅ (`core/download.rs` —
+  Semaphore-bounded executor over a `DownloadPlan`, sha1/sha512 verify, content dedupe,
+  Range resume, `download://progress` events. See `docs/spec/download-engine.md`.)
 - Launch a **vanilla** instance; live log console; playtime tracking.
 - **Done when:** a vanilla instance launches and reaches the main menu.
 

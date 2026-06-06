@@ -88,3 +88,33 @@ Evidence:
 ## Change log
 
 <!-- Populated on first amendment after approval. -->
+
+## Implementation log
+
+### shipped (slice A complete) — 2026-06-06
+
+Built across 4 checkpoints + 1 polish pass via /subagent-implementation. Commits (chronological):
+
+- `0f94c7c` — docs: plan (design + this spec)
+- `8fe0acc` — CP-1 engine types + module skeleton (ExpectedHash, DownloadItem/Plan, DownloadError, ProgressSink)
+- `bf34020` — CP-2 incremental hashing (sha1/sha512) + content dedupe (verify, needs_download)
+- `f5157af` — CP-3 single-file download: stream→.part, atomic rename, Range 206-resume/200-restart, I/O-vs-mismatch distinction
+- `f766e4c` — CP-4 concurrent executor (Semaphore + buffer_unordered), per-item PlanResult, ProgressSink + TauriEventSink (`download://progress`), `execute_download_plan` command + ipc.ts mirror
+- `e6a6471` — polish: harden tests + TOCTOU resume guard + verify→pub(crate)
+
+Final state: 31 Rust tests pass (hand-rolled tokio TcpListener mock, Range-aware + concurrency-tracking), 0 warnings, `npm run build` clean.
+
+**Out-of-scope work performed during this build:**
+- Major dev-environment setup (the build was un-runnable at start): installed rustup + Rust 1.96 in WSL (system cargo 1.75 too old for Tauri 2's `edition2024`); user installed the native Windows toolchain (VS 2022, rustup-msvc, Node); established the build path = native Windows cargo over the `\\wsl.localhost\Ubuntu\...` UNC source, driven by `C:\Users\drgor\apex-build.bat`. See project memory `windows-build-toolchain`.
+
+**Unforeseens — surprises that emerged during implementation:**
+- WSL-native build blocked twice: cargo 1.75 < edition2024 (1.85), then missing GTK/WebKit libs for the Tauri Linux target. Pivoted to native Windows build (WebView2, no GTK).
+- Env vars (`CARGO_TARGET_DIR`) do NOT propagate WSL→Windows processes → drive cargo via a `.bat` with `set`.
+- The 9p UNC filesystem can't service incremental-compilation lock files (`os error -2147024895`) → build with `CARGO_INCREMENTAL=0`.
+
+**Deferred / accepted risks (still open):**
+- F-10 (🟡, accepted): F-5 TOCTOU test correctness depends on `pool_max_idle_per_host(0)` to defeat keep-alive reuse. Works; fragile if that builder option is removed.
+- F-11 (🟡, accepted): concurrency-bound test (`observed_max >= 2`) is tokio-scheduler-dependent via a cooperative `sleep`; could false-fail under extreme single-threaded CI load. Revisit when Phase 7 CI lands — consider `#[tokio::test(flavor = "multi_thread")]` or a barrier-based proof.
+- F-1/F-4/F-5/F-6/F-8/F-9: all fixed in `e6a6471` (closed).
+
+**Next slices (Phase 2, per docs/design/vanilla-launch.md):** B (vanilla piston-meta resolver → DownloadPlan), C (Java manager), D (launch). The engine here is the executor those feed.
