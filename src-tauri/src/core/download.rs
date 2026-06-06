@@ -7,6 +7,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 // `sha1::Digest` and `sha2::Digest` are re-exports of the same `digest::Digest`
 // trait; import once via sha1 and it covers both hasher types.
@@ -240,6 +241,201 @@ pub fn needs_download(dest: &Path, expected: &Option<ExpectedHash>) -> bool {
         Some(hash) => !verify(dest, hash),
         None => true,
     }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP client builder
+// ---------------------------------------------------------------------------
+
+/// Build a `reqwest::Client` with the same user-agent as `core/meta.rs`.
+///
+/// Callers that already hold a client pass it in; this is provided so tests
+/// and the eventual executor can share one instance.
+pub fn build_client() -> Result<reqwest::Client, DownloadError> {
+    reqwest::Client::builder()
+        .user_agent(concat!("modloader/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| DownloadError::Network(e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Single-file download
+// ---------------------------------------------------------------------------
+
+/// Download a single [`DownloadItem`], stream-hashing its bytes, and write
+/// the result to disk atomically.
+///
+/// # Behaviour
+///
+/// 1. **Dedupe**: if `needs_download` returns false the function returns
+///    immediately with no network call.
+/// 2. **Resume**: if `<dest>.part` already exists with N bytes, sends
+///    `Range: bytes=N-`.  A `206 Partial Content` response resumes
+///    (existing bytes are fed through the hasher first); a `200 OK`
+///    truncates and restarts.
+/// 3. **Atomic rename**: on hash match, `<dest>.part` is renamed to `<dest>`.
+///    On mismatch, `.part` is deleted and `DownloadError::HashMismatch` is
+///    returned.
+/// 4. **Error distinction (F-3)**: all I/O failures surface as
+///    `DownloadError::Io`, never as `HashMismatch`.
+pub async fn download_item(
+    client: &reqwest::Client,
+    item: &DownloadItem,
+    sink: &dyn ProgressSink,
+) -> Result<(), DownloadError> {
+    // --- Dedupe ---
+    if !needs_download(&item.dest, &item.expected_hash) {
+        return Ok(());
+    }
+
+    // --- Determine .part path and any existing resume offset ---
+    let part_path = part_path_for(&item.dest);
+
+    let resume_offset: u64 = if part_path.exists() {
+        std::fs::metadata(&part_path)
+            .map_err(|e| DownloadError::Io(e.to_string()))?
+            .len()
+    } else {
+        0
+    };
+
+    // --- Issue HTTP request, optionally with Range header ---
+    let mut req = client.get(&item.url);
+    if resume_offset > 0 {
+        req = req.header("Range", format!("bytes={}-", resume_offset));
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| DownloadError::Network(e.to_string()))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(DownloadError::Network(format!(
+            "HTTP {status} for {}",
+            item.url
+        )));
+    }
+
+    // Ensure the destination parent directory exists before creating .part.
+    if let Some(parent) = item.dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| DownloadError::Io(e.to_string()))?;
+    }
+
+    // --- Decide resume vs restart based on server response ---
+    let (mut file, mut hasher, mut bytes_done) =
+        if status == reqwest::StatusCode::PARTIAL_CONTENT && resume_offset > 0 {
+            // 206: server will send bytes[resume_offset..]. Seed the hasher
+            // by reading the existing partial bytes through it first.
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&part_path)
+                .map_err(|e| DownloadError::Io(e.to_string()))?;
+
+            let hasher = if let Some(expected) = &item.expected_hash {
+                let mut h = IncrementalHasher::for_expected(expected);
+                seed_hasher_from_file(&part_path, resume_offset, &mut h)?;
+                Some(h)
+            } else {
+                None
+            };
+
+            (f, hasher, resume_offset)
+        } else {
+            // 200 or any non-206: restart from scratch; truncate .part.
+            let f = std::fs::File::create(&part_path)
+                .map_err(|e| DownloadError::Io(e.to_string()))?;
+
+            let hasher = item
+                .expected_hash
+                .as_ref()
+                .map(IncrementalHasher::for_expected);
+
+            (f, hasher, 0u64)
+        };
+
+    // --- Stream body: write to .part and feed hasher ---
+    let total = item
+        .size
+        .or_else(|| resp.content_length().map(|l| l + resume_offset));
+
+    let mut stream = resp.bytes_stream();
+    use std::io::Write;
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|e| DownloadError::Network(e.to_string()))?;
+        file.write_all(&chunk)
+            .map_err(|e| DownloadError::Io(e.to_string()))?;
+        if let Some(h) = hasher.as_mut() {
+            h.update(&chunk);
+        }
+        bytes_done += chunk.len() as u64;
+        sink.report(ProgressUpdate {
+            url: item.url.clone(),
+            bytes_done,
+            bytes_total: total,
+        });
+    }
+
+    // Flush and close the file before renaming.
+    file.flush().map_err(|e| DownloadError::Io(e.to_string()))?;
+    drop(file);
+
+    // --- Verify hash ---
+    if let (Some(h), Some(expected)) = (hasher, &item.expected_hash) {
+        let actual = h.finalize();
+        let expected_hex = match expected {
+            ExpectedHash::Sha1(s) | ExpectedHash::Sha512(s) => s,
+        };
+        if !actual.eq_ignore_ascii_case(expected_hex) {
+            // Cleanup .part — best-effort, ignore secondary I/O errors.
+            let _ = std::fs::remove_file(&part_path);
+            return Err(DownloadError::HashMismatch {
+                expected: expected.clone(),
+                got: actual,
+            });
+        }
+    }
+
+    // --- Atomic rename (.part → dest; parent already created above) ---
+    std::fs::rename(&part_path, &item.dest).map_err(|e| DownloadError::Io(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Returns the `.part` path for a given destination path.
+fn part_path_for(dest: &Path) -> PathBuf {
+    let mut p = dest.as_os_str().to_os_string();
+    p.push(".part");
+    PathBuf::from(p)
+}
+
+/// Reads `len` bytes from `path` and feeds them into `hasher`.
+///
+/// Used to seed the hasher when resuming a partial download (the bytes
+/// already on disk must be included in the final digest). Surfaces I/O
+/// failures as `DownloadError::Io`.
+fn seed_hasher_from_file(
+    path: &Path,
+    len: u64,
+    hasher: &mut IncrementalHasher,
+) -> Result<(), DownloadError> {
+    let file = std::fs::File::open(path).map_err(|e| DownloadError::Io(e.to_string()))?;
+    let mut reader = std::io::BufReader::with_capacity(VERIFY_CHUNK, file);
+    let mut buf = vec![0u8; VERIFY_CHUNK];
+    let mut remaining = len as usize;
+    while remaining > 0 {
+        let to_read = remaining.min(VERIFY_CHUNK);
+        let n = reader
+            .read(&mut buf[..to_read])
+            .map_err(|e| DownloadError::Io(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        remaining -= n;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +680,291 @@ mod tests {
         std::fs::write(&path, b"anything").unwrap();
         assert!(needs_download(&path, &None), "no hash → always download");
         let _ = std::fs::remove_file(&path);
+    }
+
+    // -----------------------------------------------------------------------
+    // CP-3 tests: single-file download, resume, mismatch, I/O error, dedupe
+    // -----------------------------------------------------------------------
+
+    /// Spawn a minimal HTTP/1.1 server on a random port using a raw tokio
+    /// `TcpListener`. Supports:
+    ///   - `Range` header → `206 Partial Content` with the requested slice.
+    ///   - `no_range = true` → always reply `200` (simulates a server that
+    ///     ignores Range).
+    ///   - `body` is the full file bytes the server "has".
+    ///   - `bad_body` overrides what the server sends (so hash will mismatch).
+    #[cfg(test)]
+    struct MockServer {
+        addr: std::net::SocketAddr,
+    }
+
+    #[cfg(test)]
+    impl MockServer {
+        async fn start(body: Vec<u8>, no_range: bool, bad_body: Option<Vec<u8>>) -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::net::TcpListener;
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            tokio::spawn(async move {
+                // Accept exactly one connection, serve one request, then exit.
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut req_buf = vec![0u8; 4096];
+                let n = stream.read(&mut req_buf).await.unwrap();
+                let req_str = String::from_utf8_lossy(&req_buf[..n]);
+
+                // Parse Range header if present.
+                let range_start: Option<u64> = if !no_range {
+                    req_str
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                        .and_then(|l| l.split_once(':'))
+                        .map(|(_, v)| v.trim())
+                        .and_then(|v| v.strip_prefix("bytes="))
+                        .and_then(|v| v.trim_end_matches('-').parse().ok())
+                } else {
+                    None
+                };
+
+                let send_body = bad_body.as_deref().unwrap_or(&body);
+
+                let response = if let Some(start) = range_start {
+                    let slice = &body[start as usize..];
+                    let send_slice = if bad_body.is_some() {
+                        send_body
+                    } else {
+                        slice
+                    };
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\n\r\n",
+                        send_slice.len(),
+                        start,
+                        body.len() - 1,
+                        body.len()
+                    )
+                    .into_bytes()
+                    .into_iter()
+                    .chain(send_slice.iter().copied())
+                    .collect::<Vec<u8>>()
+                } else {
+                    let send_slice = send_body;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                        send_slice.len()
+                    )
+                    .into_bytes()
+                    .into_iter()
+                    .chain(send_slice.iter().copied())
+                    .collect::<Vec<u8>>()
+                };
+
+                stream.write_all(&response).await.unwrap();
+            });
+
+            MockServer { addr }
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+    }
+
+    /// Compute SHA-1 hex of a byte slice (test helper).
+    fn sha1_hex(data: &[u8]) -> String {
+        let mut h = IncrementalHasher::for_expected(&ExpectedHash::Sha1(String::new()));
+        h.update(data);
+        h.finalize()
+    }
+
+    /// Create a unique temp directory for a test (no external dep).
+    fn test_tmp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cp3_test_{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Full download: file lands at dest with correct content and hash.
+    #[tokio::test]
+    async fn cp3_full_download_lands_at_dest() {
+        let body = b"hello download world".to_vec();
+        let hash = sha1_hex(&body);
+        let server = MockServer::start(body.clone(), false, None).await;
+
+        let dir = test_tmp_dir("full_download");
+        // Use a subdir to exercise parent-dir creation.
+        let dest = dir.join("subdir").join("file.bin");
+
+        let client = build_client().unwrap();
+        let item = DownloadItem {
+            url: server.url(),
+            dest: dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha1(hash)),
+            size: None,
+        };
+
+        download_item(&client, &item, &NoOpSink).await.unwrap();
+
+        let on_disk = std::fs::read(&dest).unwrap();
+        assert_eq!(on_disk, body, "file content must match what the server sent");
+        assert!(!part_path_for(&dest).exists(), ".part must not remain after success");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hash mismatch: .part deleted, DownloadError::HashMismatch returned, no dest.
+    #[tokio::test]
+    async fn cp3_hash_mismatch_errors_and_cleans_up() {
+        let real_body = b"real content".to_vec();
+        let bad_body = b"tampered!!  ".to_vec();
+        let hash = sha1_hex(&real_body);
+        let server = MockServer::start(real_body.clone(), false, Some(bad_body)).await;
+
+        let dir = test_tmp_dir("hash_mismatch");
+        let dest = dir.join("file.bin");
+
+        let client = build_client().unwrap();
+        let item = DownloadItem {
+            url: server.url(),
+            dest: dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha1(hash.clone())),
+            size: None,
+        };
+
+        let err = download_item(&client, &item, &NoOpSink).await.unwrap_err();
+        match err {
+            DownloadError::HashMismatch { .. } => {}
+            other => panic!("expected HashMismatch, got {other:?}"),
+        }
+        assert!(!dest.exists(), "dest must not exist after mismatch");
+        assert!(!part_path_for(&dest).exists(), ".part must be deleted after mismatch");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Resume (206): seeded .part + 206-capable server → correct final file.
+    #[tokio::test]
+    async fn cp3_resume_206_produces_correct_file() {
+        let body = b"first part second part".to_vec();
+        let hash = sha1_hex(&body);
+        let seed_len = 10usize;
+        let seed = body[..seed_len].to_vec();
+
+        let server = MockServer::start(body.clone(), false, None).await;
+
+        let dir = test_tmp_dir("resume_206");
+        let dest = dir.join("resume.bin");
+        let part = part_path_for(&dest);
+
+        std::fs::write(&part, &seed).unwrap();
+
+        let client = build_client().unwrap();
+        let item = DownloadItem {
+            url: server.url(),
+            dest: dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha1(hash)),
+            size: None,
+        };
+
+        download_item(&client, &item, &NoOpSink).await.unwrap();
+
+        let on_disk = std::fs::read(&dest).unwrap();
+        assert_eq!(on_disk, body, "resumed file must equal full body");
+        assert!(!part.exists(), ".part must be gone after success");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Resume restart (200): server ignores Range → file restarted cleanly.
+    #[tokio::test]
+    async fn cp3_resume_200_restarts_cleanly() {
+        let body = b"clean restart content here".to_vec();
+        let hash = sha1_hex(&body);
+        let seed = b"stale partial data".to_vec();
+
+        // no_range = true: server always returns 200
+        let server = MockServer::start(body.clone(), true, None).await;
+
+        let dir = test_tmp_dir("resume_200");
+        let dest = dir.join("restart.bin");
+        let part = part_path_for(&dest);
+
+        std::fs::write(&part, &seed).unwrap();
+
+        let client = build_client().unwrap();
+        let item = DownloadItem {
+            url: server.url(),
+            dest: dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha1(hash)),
+            size: None,
+        };
+
+        download_item(&client, &item, &NoOpSink).await.unwrap();
+
+        let on_disk = std::fs::read(&dest).unwrap();
+        assert_eq!(on_disk, body, "restarted file must equal full body");
+        assert!(!part.exists(), ".part must be gone after success");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Dedupe: valid dest → no network call (server not even started listening).
+    #[tokio::test]
+    async fn cp3_dedupe_skips_network() {
+        let body = b"already here".to_vec();
+        let hash = sha1_hex(&body);
+
+        let dir = test_tmp_dir("dedupe");
+        let dest = dir.join("cached.bin");
+        std::fs::write(&dest, &body).unwrap();
+
+        let client = build_client().unwrap();
+        // URL points at a port nothing is listening on — would fail if network hit.
+        let item = DownloadItem {
+            url: "http://127.0.0.1:1".to_owned(),
+            dest: dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha1(hash)),
+            size: None,
+        };
+
+        download_item(&client, &item, &NoOpSink).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-3: I/O error creating .part → DownloadError::Io, not HashMismatch.
+    ///
+    /// Places a regular *file* at the path where the .part *directory* would
+    /// need to be created.  `File::create` on `<file>/file.bin.part` fails with
+    /// "not a directory" (Unix) / "not a valid path" (Windows) before any hash
+    /// computation can occur.  The error must surface as `DownloadError::Io`,
+    /// never `DownloadError::HashMismatch` (F-3).
+    #[tokio::test]
+    async fn cp3_io_error_surfaces_as_io_not_mismatch() {
+        let body = b"some data".to_vec();
+        let hash = sha1_hex(&body);
+        let server = MockServer::start(body.clone(), false, None).await;
+
+        let dir = test_tmp_dir("io_error_f3");
+        // Place a regular file at what would be the dest's parent path.
+        // File::create("<that_file>/file.bin.part") fails cross-platform.
+        let blocker = dir.join("not_a_dir");
+        std::fs::write(&blocker, b"I am a file, not a dir").unwrap();
+        let dest = blocker.join("file.bin");
+
+        let client = build_client().unwrap();
+        let item = DownloadItem {
+            url: server.url(),
+            dest: dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha1(hash)),
+            size: None,
+        };
+
+        let err = download_item(&client, &item, &NoOpSink).await.unwrap_err();
+        match err {
+            DownloadError::Io(_) => {}
+            DownloadError::HashMismatch { .. } => {
+                panic!("I/O error must not be reported as HashMismatch (F-3)")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------
