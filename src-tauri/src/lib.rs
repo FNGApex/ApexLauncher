@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 mod core;
+use core::download::{self, DownloadPlan, PlanResult, ProgressSink, ProgressUpdate};
 use core::instances::{self, CreateInstanceReq, Instance, InstanceDetail};
 use core::loaders::{self, LoaderOption};
 use core::settings::{self, Settings};
@@ -76,6 +77,66 @@ fn app_paths(app: tauri::AppHandle) -> Result<AppPaths, String> {
     })
 }
 
+// --- Phase 2: download engine. ---
+
+/// Payload emitted on the `download://progress` Tauri event channel.
+///
+/// Mirrors [`ProgressUpdate`] with serde rename so the TypeScript side
+/// receives camelCase field names.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProgressPayload {
+    /// Source URL of the item currently downloading.
+    url: String,
+    /// Bytes received so far for this item.
+    bytes_done: u64,
+    /// Total expected bytes for this item; `null` when `Content-Length` was absent.
+    bytes_total: Option<u64>,
+}
+
+/// A [`ProgressSink`] that emits [`ProgressPayload`] on the `download://progress`
+/// Tauri event channel.
+///
+/// Throttle/coalesce policy lives here (not in the core loop). Currently emits
+/// every chunk — a future iteration may coalesce by byte-interval or time-interval.
+struct TauriEventSink {
+    app: tauri::AppHandle,
+}
+
+impl ProgressSink for TauriEventSink {
+    fn report(&self, update: ProgressUpdate) {
+        use tauri::Emitter as _;
+        // Consume url and bytes_total explicitly so the compiler sees the fields
+        // as used (resolves F-2 dead-code warning from CP-1).
+        let payload = ProgressPayload {
+            url: update.url,
+            bytes_done: update.bytes_done,
+            bytes_total: update.bytes_total,
+        };
+        // Best-effort emit: if the webview is gone, ignore the error.
+        let _ = self.app.emit("download://progress", payload);
+    }
+}
+
+/// Execute a [`DownloadPlan`] concurrently, emitting per-chunk progress on
+/// the `download://progress` Tauri event channel.
+///
+/// # Parameters
+/// - `plan` — the list of files to download.
+/// - `concurrency` — maximum simultaneous downloads (clamped to 1..=32).
+///   Pass `null` / omit from TS to use the default (8).
+#[tauri::command]
+async fn execute_download_plan(
+    app: tauri::AppHandle,
+    plan: DownloadPlan,
+    concurrency: Option<usize>,
+) -> Result<PlanResult, String> {
+    let n = concurrency.unwrap_or(8).clamp(1, 32);
+    let client = download::build_client().map_err(|e| e.to_string())?;
+    let sink = TauriEventSink { app };
+    Ok(download::execute_plan(&client, &plan, &sink, n).await)
+}
+
 // --- Version & loader metadata (Mojang / Forge / Fabric / Quilt / NeoForge). ---
 
 #[tauri::command]
@@ -102,7 +163,8 @@ pub fn run() {
             save_settings,
             app_paths,
             list_minecraft_versions,
-            get_loaders
+            get_loaders,
+            execute_download_plan
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

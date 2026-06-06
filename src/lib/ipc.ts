@@ -147,3 +147,68 @@ export function listMinecraftVersions(): Promise<McVersion[]> {
 export function getLoaders(minecraft: string): Promise<LoaderOption[]> {
   return invoke<LoaderOption[]>("get_loaders", { minecraft });
 }
+
+// --- Phase 2: download engine. Mirrors core/download.rs. ---
+
+/** A single file to download as part of a plan. */
+export interface DownloadItem {
+  url: string;
+  /** Absolute destination path on disk. */
+  dest: string;
+  /** Expected hash for verification; null disables hash-checking (not recommended). */
+  expectedHash: { type: "sha1"; value: string } | { type: "sha512"; value: string } | null;
+  /** Expected file size in bytes; null if unknown. */
+  size: number | null;
+}
+
+/** An ordered list of items to download as a unit. */
+export interface DownloadPlan {
+  items: DownloadItem[];
+}
+
+/** Per-item outcome status returned by executeDownloadPlan. */
+export type ItemStatus =
+  | { kind: "ok" }
+  | { kind: "skipped" }
+  | { kind: "failed"; error: string };
+
+/** The outcome of a single item within an executed plan. */
+export interface ItemOutcome {
+  url: string;
+  status: ItemStatus;
+}
+
+/** Aggregated result returned by executeDownloadPlan. */
+export interface PlanResult {
+  outcomes: ItemOutcome[];
+}
+
+/**
+ * Payload emitted on the `download://progress` Tauri event channel.
+ * Subscribe with `listen("download://progress", handler)`.
+ */
+export interface DownloadProgressPayload {
+  /** Source URL of the item currently downloading. */
+  url: string;
+  /** Bytes received so far for this item. */
+  bytesDone: number;
+  /** Total expected bytes; null when Content-Length was absent. */
+  bytesTotal: number | null;
+}
+
+/**
+ * Execute a DownloadPlan concurrently.
+ *
+ * Progress is emitted on the `download://progress` event channel —
+ * subscribe with `listen("download://progress", handler)` to receive
+ * DownloadProgressPayload updates.
+ *
+ * @param plan       The files to download.
+ * @param concurrency Max simultaneous downloads (1–32). Defaults to 8 when null.
+ */
+export function executeDownloadPlan(
+  plan: DownloadPlan,
+  concurrency?: number | null,
+): Promise<PlanResult> {
+  return invoke<PlanResult>("execute_download_plan", { plan, concurrency: concurrency ?? null });
+}
