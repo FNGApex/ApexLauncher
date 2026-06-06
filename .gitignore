@@ -1,0 +1,23 @@
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/gen/
+
+# Editor / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Secrets / local config
+.env
+.env.local
+*.key
+
+# App runtime data (if ever run from repo)
+/appdata/
