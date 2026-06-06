@@ -19,5 +19,8 @@ src-tauri/gen/
 .env.local
 *.key
 
+# Claude — local-only settings (permissions); signals under .claude/project/ are committed
+.claude/settings.local.json
+
 # App runtime data (if ever run from repo)
 /appdata/

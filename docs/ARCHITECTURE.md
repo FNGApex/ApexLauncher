@@ -1,5 +1,32 @@
 # Architecture
 
+> **Status legend:** ✅ built · 🚧 partial · ⬜ planned. This doc describes the *target*
+> architecture; the status section below tracks what actually exists today.
+
+## 0. Implementation status (current)
+
+Phases 0–1 are complete; version/loader metadata (normally Phase 2/4) was pulled forward so
+the create-instance flow can pick real MC versions and loader builds.
+
+| Subsystem | State | Where |
+|-----------|-------|-------|
+| App shell, routing, typed IPC | ✅ | `src/main.tsx`, `src/router.tsx`, `src/lib/ipc.ts` |
+| Instance model + CRUD + folder reconciliation | ✅ | `core/instances.rs`, `core/store.rs` |
+| Global settings (+ CF key field) | ✅ | `core/settings.rs`, `routes/Settings.tsx` |
+| MC version list (Mojang piston-meta) | ✅ | `core/versions.rs` |
+| Loader builds (Fabric/Quilt/Forge/NeoForge) | ✅ | `core/loaders.rs` |
+| TTL'd disk-cached HTTP helper (6h) | ✅ | `core/meta.rs` |
+| Client query cache + startup prefetch | ✅ | `src/lib/query.ts`, `src/lib/prefetch.ts` |
+| Create-instance modal (live versions/loaders) | ✅ | `src/components/NewInstanceModal.tsx` |
+| Download engine | ⬜ | Phase 2 |
+| Java manager (Temurin) | ⬜ | Phase 2 |
+| Launch (vanilla → modded) | ⬜ | Phase 2/4 |
+| Auth (MS device-code) | ⬜ | Phase 3 |
+| Providers (Modrinth/CF), browse, pack import | ⬜ | Phase 5/6 |
+
+Routes `Browse.tsx` and `Accounts.tsx` are UI stubs with no backend wiring yet. Zustand is
+installed but unused (TanStack Query covers current state needs).
+
 ## 1. High-level shape
 
 ```
@@ -33,6 +60,11 @@ The frontend never talks to the network for *game* data (downloads, auth, launch
 of that lives in Rust where we have real concurrency, filesystem, and process control.
 Provider **search/browse** calls can go either way; we'll route them through Rust too so
 the CF API key never touches the webview and we get one caching layer.
+
+> **Current shape:** the thin IPC layer is `src-tauri/src/lib.rs` (one `#[tauri::command]`
+> per call), not yet a `commands/` module. `core/` today holds `instances`, `settings`,
+> `store`, `meta`, `versions`, `loaders` — the `providers`/`packs`/`minecraft`/`java`/
+> `download`/`launch`/`auth` modules are planned (see §0).
 
 ## 2. On-disk layout
 
@@ -144,23 +176,31 @@ Supports multiple accounts; offline/demo mode gated behind a setting.
 
 ## 8. Frontend structure
 
-```
+Current (✅) vs planned (⬜):
+
+```text
 src/
-  main.tsx, App.tsx, router.tsx
-  lib/ipc.ts            # typed wrappers over Tauri invoke + event subscriptions
-  lib/providers.ts      # TanStack Query hooks for search/browse
-  stores/               # Zustand stores (instances, downloads, accounts)
+  main.tsx, router.tsx          ✅ entry + route table
+  lib/ipc.ts                    ✅ typed wrappers over Tauri invoke
+  lib/query.ts                  ✅ shared TanStack Query client + META_STALE_TIME
+  lib/prefetch.ts               ✅ startup cache warm (instances, versions, latest loaders)
+  lib/utils.ts                  ✅ misc helpers
+  lib/providers.ts              ⬜ search/browse query hooks (Phase 5)
+  stores/                       ⬜ Zustand stores — installed, not yet used
+  components/
+    AppShell.tsx, Sidebar.tsx   ✅ nav shell
+    NewInstanceModal.tsx        ✅ create-instance dialog (live versions/loaders)
   routes/
-    Home.tsx            # instance grid, play buttons
-    Browse.tsx          # unified CF+Modrinth search w/ provider filter
-    Instance.tsx        # detail: mods, versions, settings, logs
-    Settings.tsx
-    Accounts.tsx
-  components/ui/        # shadcn/ui primitives
+    Home.tsx                    ✅ instance grid + create entry
+    InstanceDetail.tsx          ✅ detail: reconciled mods list, settings
+    Settings.tsx                ✅ paths + global settings
+    Browse.tsx                  ⬜ unified CF+Modrinth search (stub)
+    Accounts.tsx                ⬜ account list (stub)
 ```
 
-Types shared across the IPC boundary are generated from Rust (via `ts-rs` or `specta`)
-so the command signatures can't silently drift.
+Types crossing the IPC boundary are currently **hand-mirrored** in `lib/ipc.ts` (camelCase
+via serde `rename_all`); generating them from Rust (`ts-rs`/`specta`) is planned so the
+command signatures can't silently drift.
 
 ## 9. Testing strategy
 

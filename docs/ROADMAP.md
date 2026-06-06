@@ -9,15 +9,26 @@ hard parts (launch + auth) before polishing UI.
 - Typed IPC layer; `app_info` round-trip working end to end (Home "Connected" pill).
 - **Done:** `npm run tauri dev` opens the app with working navigation. ✔
 
-## Phase 1 — Instances & local management
-- `instance.json` model + on-disk layout, content-addressed cache dirs.
-- Create/list/delete instances from the UI; instance detail page (read-only mods list
-  reconciled from the folder).
-- Settings store (memory, java args, dirs).
-- **Done when:** you can create an empty instance and see it on Home.
+## Phase 1 — Instances & local management ✅ DONE
+- `instance.json` model + on-disk layout, content-addressed cache dirs. ✔
+- Create/list/get/delete instances from the UI; instance detail page (read-only mods list
+  reconciled from the folder). ✔
+- Settings store (memory, java args, dirs) + read-only data/instances paths on Settings. ✔
+- **Done:** create an instance from the New Instance modal and see it on Home. ✔
+
+### Pulled forward (from Phase 2/4) — version & loader metadata ✅
+Done early so the create-instance flow picks real versions/builds:
+- `core/versions.rs` — Mojang piston-meta release list.
+- `core/loaders.rs` — per-MC loader builds (Fabric/Quilt/Forge/NeoForge), filtered to what
+  each MC version supports.
+- `core/meta.rs` — TTL'd (6h) disk-cached HTTP helper backing both.
+- Frontend: `lib/query.ts` (shared query client, 6h meta stale-time), `lib/prefetch.ts`
+  (warm cache on startup), `components/NewInstanceModal.tsx` (live dropdowns).
+- **Still ⬜ for Phase 2:** libraries, asset index, natives, download engine, Java manager,
+  and the actual launch — none of these exist yet.
 
 ## Phase 2 — Minecraft install + launch (vanilla)
-- Mojang piston-meta client: versions, libraries, asset index, natives.
+- Mojang piston-meta client: versions ✅ (release list done), libraries/asset index/natives ⬜.
 - Java manager: detect system JREs, download Temurin per required major.
 - Download engine: concurrent, hash-verified, content-addressed.
 - Launch a **vanilla** instance; live log console; playtime tracking.
@@ -34,6 +45,9 @@ hard parts (launch + auth) before polishing UI.
 - **Done when:** a Fabric/NeoForge instance launches.
 
 ## Phase 5 — Providers: browse & add mods
+- ⚠️ **Apply for the free CurseForge API key now** (<https://console.curseforge.com>) — it's
+  the first phase that calls the CF API. Store it backend-side (env/Tauri secret), never in
+  the frontend bundle; keep it out of git. Modrinth needs no key.
 - Modrinth + CurseForge clients behind the `ModProvider` trait.
 - Unified Browse page (search, provider filter, MC/loader facets, infinite scroll).
 - Add a mod to an instance with dependency resolution; enable/disable/update; surface
@@ -60,5 +74,6 @@ hard parts (launch + auth) before polishing UI.
 ---
 
 ### Suggested next action
-Install Rust (`rustup`) and finish Phase 0 to a running app, then tackle Phase 2's
-launch path early — it's the riskiest piece and everything else hangs off a real launch.
+Phases 0–1 run; version/loader metadata is wired into create-instance. Tackle the rest of
+**Phase 2** next — download engine + Java manager + the vanilla launch path. It's the
+riskiest piece and everything else (auth, loaders, packs) hangs off a real launch.
