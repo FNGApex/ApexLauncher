@@ -208,7 +208,7 @@ const VERIFY_CHUNK: usize = 64 * 1024;
 /// digest differs.
 ///
 /// Reads in [`VERIFY_CHUNK`]-byte chunks — never loads the whole file.
-pub fn verify(path: &Path, expected: &ExpectedHash) -> bool {
+pub(crate) fn verify(path: &Path, expected: &ExpectedHash) -> bool {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return false,
@@ -323,25 +323,64 @@ pub async fn download_item(
     }
 
     // --- Decide resume vs restart based on server response ---
-    let (mut file, mut hasher, mut bytes_done) =
+    //
+    // F-5 TOCTOU guard: after opening the .part file in append mode, re-read
+    // its actual length. If it diverged from `resume_offset` (another writer
+    // modified the file between the first `metadata()` call and the open), the
+    // Range request we sent used a stale offset. We must abort this response,
+    // issue a fresh full GET (no Range header), and restart from byte 0 rather
+    // than producing a guaranteed HashMismatch on otherwise-valid data.
+    let (mut file, mut hasher, mut bytes_done, resp) =
         if status == reqwest::StatusCode::PARTIAL_CONTENT && resume_offset > 0 {
-            // 206: server will send bytes[resume_offset..]. Seed the hasher
-            // by reading the existing partial bytes through it first.
+            // 206: server will send bytes[resume_offset..].
             let f = std::fs::OpenOptions::new()
                 .write(true)
                 .append(true)
                 .open(&part_path)
                 .map_err(|e| DownloadError::Io(e.to_string()))?;
 
-            let hasher = if let Some(expected) = &item.expected_hash {
-                let mut h = IncrementalHasher::for_expected(expected);
-                seed_hasher_from_file(&part_path, resume_offset, &mut h)?;
-                Some(h)
-            } else {
-                None
-            };
+            let actual_offset = f
+                .metadata()
+                .map_err(|e| DownloadError::Io(e.to_string()))?
+                .len();
 
-            (f, hasher, resume_offset)
+            if actual_offset != resume_offset {
+                // Offset diverged — the 206 body starts at the wrong position.
+                // Drop the stale handle and the stale response; truncate .part;
+                // issue a fresh unconditional GET and stream from byte 0.
+                drop(f);
+                drop(resp);
+                let f2 = std::fs::File::create(&part_path)
+                    .map_err(|e| DownloadError::Io(e.to_string()))?;
+                let hasher = item
+                    .expected_hash
+                    .as_ref()
+                    .map(IncrementalHasher::for_expected);
+                // Re-issue the request without a Range header.
+                let resp2 = client
+                    .get(&item.url)
+                    .send()
+                    .await
+                    .map_err(|e| DownloadError::Network(e.to_string()))?;
+                if !resp2.status().is_success() {
+                    return Err(DownloadError::Network(format!(
+                        "HTTP {} on restart for {}",
+                        resp2.status(),
+                        item.url
+                    )));
+                }
+                (f2, hasher, 0u64, resp2)
+            } else {
+                // Seed the hasher by reading the existing partial bytes through it.
+                let hasher = if let Some(expected) = &item.expected_hash {
+                    let mut h = IncrementalHasher::for_expected(expected);
+                    seed_hasher_from_file(&part_path, resume_offset, &mut h)?;
+                    Some(h)
+                } else {
+                    None
+                };
+                (f, hasher, resume_offset, resp)
+            }
         } else {
             // 200 or any non-206: restart from scratch; truncate .part.
             let f = std::fs::File::create(&part_path)
@@ -352,13 +391,17 @@ pub async fn download_item(
                 .as_ref()
                 .map(IncrementalHasher::for_expected);
 
-            (f, hasher, 0u64)
+            (f, hasher, 0u64, resp)
         };
 
     // --- Stream body: write to .part and feed hasher ---
+    // On a 206 response, `content_length()` is bytes-REMAINING (what the server
+    // will send), not the full-file size. Adding `resume_offset` reconstructs
+    // the full-file total. On a 200, `resume_offset` is 0 so the addition is
+    // a no-op.
     let total = item
         .size
-        .or_else(|| resp.content_length().map(|l| l + resume_offset));
+        .or_else(|| resp.content_length().map(|l| l + bytes_done));
 
     let mut stream = resp.bytes_stream();
     use std::io::Write;
@@ -604,7 +647,11 @@ mod tests {
 
         // Spot-check camelCase field names appear in the output.
         assert!(json.contains("\"expectedHash\""), "expectedHash missing from JSON");
-        assert!(json.contains("\"bytes_done\"") == false, "snake_case leaked");
+        // Confirm rename_all = "camelCase" actually fired: no snake_case field names
+        // may appear. If the attribute were removed, "expected_hash" would appear
+        // instead of "expectedHash".
+        assert!(!json.contains("\"expected_hash\""), "snake_case 'expected_hash' leaked — rename_all missing?");
+        assert!(!json.contains("\"bytes_done\""), "snake_case 'bytes_done' leaked — rename_all missing?");
 
         let round_tripped: DownloadPlan =
             serde_json::from_str(&json).expect("deserialize failed");
@@ -1115,7 +1162,11 @@ mod tests {
         ///
         /// Each connection receives `body` (same body for every request).
         /// A 404 is returned for any request whose URL path contains "bad".
-        async fn start(body: Vec<u8>) -> Self {
+        ///
+        /// `delay_ms`: milliseconds to hold each connection open before sending
+        /// the response body. A non-zero value makes concurrent requests overlap
+        /// so the high-water mark can reach ≥ 2 in the concurrency bound test.
+        async fn start(body: Vec<u8>, delay_ms: u64) -> Self {
             use std::sync::atomic::{AtomicUsize, Ordering};
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             use tokio::net::TcpListener;
@@ -1170,6 +1221,12 @@ mod tests {
                             }
                         }
                         let req_str = String::from_utf8_lossy(&req_bytes);
+
+                        // Hold the connection open so concurrent requests overlap and
+                        // the high-water mark can reach ≥ 2 (F-8 anti-vacuousness).
+                        if delay_ms > 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        }
 
                         // Return 404 for paths containing "bad".
                         let is_bad = req_str.lines().next().map_or(false, |l| l.contains("bad"));
@@ -1231,7 +1288,7 @@ mod tests {
     async fn cp4_multi_item_plan_all_succeed() {
         let body = b"cp4 test content".to_vec();
         let hash = sha1_hex(&body);
-        let server = MultiMockServer::start(body.clone()).await;
+        let server = MultiMockServer::start(body.clone(), 0).await;
 
         let dir = test_tmp_dir("cp4_multi");
         let client = build_client().unwrap();
@@ -1275,7 +1332,7 @@ mod tests {
     async fn cp4_failing_item_does_not_abort_plan() {
         let body = b"good content here".to_vec();
         let hash = sha1_hex(&body);
-        let server = MultiMockServer::start(body.clone()).await;
+        let server = MultiMockServer::start(body.clone(), 0).await;
 
         let dir = test_tmp_dir("cp4_partial_fail");
         let client = build_client().unwrap();
@@ -1339,15 +1396,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Concurrency bound: in-flight connections never exceed the semaphore limit.
-    ///
-    /// Uses the MultiMockServer's atomic high-water mark to assert the bound
-    /// is not vacuous (F-7: mock tracks real concurrent connections).
+    /// Concurrency bound: in-flight connections never exceed the semaphore limit,
+    /// and the test is non-vacuous: ≥ 2 connections are observed in flight at once
+    /// (F-8). The mock holds each connection for 20 ms so requests overlap.
     #[tokio::test]
     async fn cp4_concurrency_bound_not_exceeded() {
         let body = b"bound test content".to_vec();
         let hash = sha1_hex(&body);
-        let server = MultiMockServer::start(body.clone()).await;
+        // 20 ms hold per connection: long enough for ≥ 2 to overlap, short enough
+        // that the test completes in well under a second (8 items × 20 ms / 3 = ~54 ms).
+        let server = MultiMockServer::start(body.clone(), 20).await;
 
         let dir = test_tmp_dir("cp4_bound");
         let client = build_client().unwrap();
@@ -1382,8 +1440,13 @@ mod tests {
             observed_max <= concurrency,
             "max concurrent connections {observed_max} exceeded bound {concurrency}"
         );
-        // Verify the test was not vacuous: at least 1 connection was seen.
-        assert!(observed_max >= 1, "no connections were tracked — test is vacuous");
+        // Verify the test is non-vacuous: ≥ 2 connections were in flight simultaneously,
+        // proving the executor ran concurrently (F-8). The 20 ms mock delay guarantees
+        // overlap when concurrency > 1.
+        assert!(
+            observed_max >= 2,
+            "max concurrent connections {observed_max} < 2 — concurrent execution not proven (F-8)"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1436,11 +1499,151 @@ mod tests {
             ],
         };
         let json = serde_json::to_string(&result).expect("serialize");
-        assert!(json.contains("\"ok\"") || json.contains("\"Ok\""), "ok variant missing");
-        assert!(json.contains("\"skipped\"") || json.contains("\"Skipped\""), "skipped variant missing");
-        assert!(json.contains("\"failed\"") || json.contains("\"Failed\""), "failed variant missing");
+        // rename_all = "camelCase" on ItemStatus produces deterministic lowercase tags.
+        // Asserting exact form so removing the attribute would fail this test.
+        assert!(json.contains("\"ok\""), "expected lowercase \"ok\" tag — rename_all = \"camelCase\" missing?");
+        assert!(!json.contains("\"Ok\""), "\"Ok\" must not appear — rename_all must produce \"ok\"");
+        assert!(json.contains("\"skipped\""), "expected lowercase \"skipped\" tag");
+        assert!(!json.contains("\"Skipped\""), "\"Skipped\" must not appear — rename_all must produce \"skipped\"");
+        assert!(json.contains("\"failed\""), "expected lowercase \"failed\" tag");
+        assert!(!json.contains("\"Failed\""), "\"Failed\" must not appear — rename_all must produce \"failed\"");
         let rt: PlanResult = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(rt.outcomes.len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // F-5 test: TOCTOU guard on .part resume
+    // -----------------------------------------------------------------------
+
+    /// F-5 TOCTOU guard: if the `.part` file grows between the first `metadata()`
+    /// call and the append-mode open, `download_item` detects the divergence,
+    /// issues a fresh full GET, and produces the correct final file.
+    ///
+    /// Design: two `Arc<Notify>` gates make the race deterministic —
+    ///   1. Mock reads the Range request, notifies `req1_received`, then waits
+    ///      for `continue_req1` before sending the 206.
+    ///   2. This task: on `req1_received`, appends GARBAGE to `.part`, then
+    ///      signals `continue_req1` so the mock can proceed.
+    ///
+    /// Sequence:
+    ///   A. `download_item` calls metadata() → resume_offset=5; sends Range GET.
+    ///   B. Mock receives GET, fires `req1_received`, suspends.
+    ///   C. This task appends GARBAGE → .part is now 12 bytes, then fires `continue_req1`.
+    ///   D. Mock sends 206 headers + body; `send().await` returns.
+    ///   E. `download_item` opens .part in append mode → actual_offset=12 ≠ 5 → guard fires.
+    ///   F. Guard truncates .part, issues fresh GET → mock serves 200 + full body.
+    ///   G. Final file = full body, hash passes.
+    #[tokio::test]
+    async fn f5_toctou_part_grows_triggers_clean_restart() {
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::Notify;
+
+        let full_body = b"abcdefghijklmnopqrstuvwxyz".to_vec(); // 26 bytes
+        let hash = sha1_hex(&full_body);
+        let seed_len: usize = 5;
+
+        // Coordination gates.
+        let req1_received = Arc::new(Notify::new());
+        let continue_req1 = Arc::new(Notify::new());
+        let req1_rx = Arc::clone(&req1_received);
+        let cont_tx = Arc::clone(&continue_req1);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body_arc = Arc::new(full_body.clone());
+
+        // Mock: serves request 1 (206, gated) then request 2 (200, immediate).
+        tokio::spawn({
+            let body_arc = Arc::clone(&body_arc);
+            async move {
+                // --- Request 1: Range ---
+                if let Ok((mut s, _)) = listener.accept().await {
+                    let body = Arc::clone(&body_arc);
+                    let req1_notify = Arc::clone(&req1_rx);
+                    let cont_notify = Arc::clone(&cont_tx);
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 4096];
+                        let _ = s.read(&mut buf).await;
+                        // Signal test: request received, .part can be corrupted now.
+                        req1_notify.notify_one();
+                        // Wait: test signals us to proceed.
+                        cont_notify.notified().await;
+                        // Respond 206. Connection: close prevents socket reuse.
+                        let sl = seed_len;
+                        let slice = &body[sl..];
+                        let hdr = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\n\
+                             Content-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                            slice.len(), sl, body.len() - 1, body.len()
+                        );
+                        let mut out = hdr.into_bytes();
+                        out.extend_from_slice(slice);
+                        let _ = s.write_all(&out).await;
+                    });
+                }
+                // --- Request 2: full GET (restart) ---
+                if let Ok((mut s, _)) = listener.accept().await {
+                    let body = Arc::clone(&body_arc);
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 4096];
+                        let _ = s.read(&mut buf).await;
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let mut out = hdr.into_bytes();
+                        out.extend_from_slice(&body);
+                        let _ = s.write_all(&out).await;
+                    });
+                }
+            }
+        });
+
+        let dir = test_tmp_dir("f5_toctou");
+        let dest = dir.join("toctou.bin");
+        let part = part_path_for(&dest);
+        std::fs::write(&part, &full_body[..seed_len]).unwrap();
+
+        // No idle-pool: ensures restart GET opens a fresh TCP connection.
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
+
+        let item = DownloadItem {
+            url: format!("http://{addr}"),
+            dest: dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha1(hash.clone())),
+            size: None,
+        };
+
+        // Concurrently corrupt .part AFTER req1 is received, BEFORE mock responds.
+        let part_clone = part.clone();
+        let corruptor = tokio::spawn(async move {
+            req1_received.notified().await;
+            tokio::task::spawn_blocking(move || {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&part_clone)
+                    .unwrap();
+                f.write_all(b"GARBAGE").unwrap();
+            })
+            .await
+            .unwrap();
+            continue_req1.notify_one();
+        });
+
+        // Must succeed: guard detects actual_offset(12) ≠ resume_offset(5), restarts.
+        download_item(&client, &item, &NoOpSink).await.unwrap();
+        corruptor.await.unwrap();
+
+        let on_disk = std::fs::read(&dest).unwrap();
+        assert_eq!(on_disk, full_body, "final file must match full body after TOCTOU restart");
+        assert!(!part.exists(), ".part must be gone after success");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------
