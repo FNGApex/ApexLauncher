@@ -25,3 +25,4 @@ src-tauri/gen/
 # App runtime data (if ever run from repo)
 /appdata/
 .claude/.scratchpad/
+.claude/project/.deterministic-signals.prev.md
