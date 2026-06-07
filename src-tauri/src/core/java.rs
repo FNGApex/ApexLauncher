@@ -7,7 +7,13 @@
 //!   - [`probe_installation`] — given a JRE home dir, returns a [`JavaInstallation`] or `None`.
 //!   - [`detect`] — takes an injectable candidate list + target OS, returns first match.
 //!
-//! CP3 (Adoptium provisioning) and CP4 (extraction / `ensure_java` / command) are NOT here yet.
+//! CP3: Adoptium provisioning plan.
+//!   - [`ArchiveKind`] — TarGz or Zip, derived from package name extension.
+//!   - [`adoptium_query_url`] — builds the Adoptium API URL for a given major/os/arch.
+//!   - [`parse_adoptium_response`] — parses the JSON array into a `(DownloadItem, ArchiveKind)`.
+//!   - [`provision_java`] — async; fetches, parses, and executes the download plan.
+//!
+//! CP4 (extraction / `ensure_java` / Tauri command) is NOT here yet.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -247,6 +253,216 @@ pub fn default_candidates(os: TargetOs, data_dir: &Path) -> Vec<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// CP3 — Adoptium provisioning plan
+// ---------------------------------------------------------------------------
+
+/// The archive format of a downloaded Temurin package.
+///
+/// Derived from the package filename extension: `.tar.gz` → [`TarGz`], `.zip` → [`Zip`].
+/// CP4 extraction consumes this to pick the right unpacker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveKind {
+    TarGz,
+    Zip,
+}
+
+// ---------------------------------------------------------------------------
+// OS / arch mapping
+// ---------------------------------------------------------------------------
+
+impl TargetOs {
+    /// Maps our [`TargetOs`] to the Adoptium API `os` parameter.
+    ///
+    /// Adoptium uses `linux`, `mac` (NOT `osx`), `windows`.
+    pub fn adoptium_os(&self) -> &'static str {
+        match self {
+            TargetOs::Linux => "linux",
+            // Adoptium uses "mac", NOT "osx" (gotcha — matches Mojang's naming).
+            TargetOs::MacOs => "mac",
+            TargetOs::Windows => "windows",
+        }
+    }
+}
+
+/// Maps `std::env::consts::ARCH` values to the Adoptium `architecture` parameter.
+///
+/// Returns `None` for unsupported architectures.
+pub fn adoptium_arch(arch: &str) -> Option<&'static str> {
+    match arch {
+        "x86_64" => Some("x64"),
+        "aarch64" => Some("aarch64"),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Query URL builder
+// ---------------------------------------------------------------------------
+
+/// Build the Adoptium `/v3/assets/latest/<major>/hotspot` query URL.
+///
+/// Pure function — no I/O. Testable without network.
+///
+/// `os` should be the Adoptium os string (e.g. `"linux"`, `"mac"`, `"windows"`).
+/// `arch` should be the Adoptium arch string (e.g. `"x64"`, `"aarch64"`).
+pub fn adoptium_query_url(major: u32, os: &str, arch: &str) -> String {
+    format!(
+        "https://api.adoptium.net/v3/assets/latest/{major}/hotspot\
+         ?architecture={arch}&image_type=jre&os={os}&vendor=eclipse"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Adoptium JSON response shape
+// ---------------------------------------------------------------------------
+
+/// Top-level asset entry from `/v3/assets/latest`.
+#[derive(Debug, Deserialize)]
+struct AdoptiumAsset {
+    binary: AdoptiumBinary,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdoptiumBinary {
+    os: String,
+    architecture: String,
+    image_type: String,
+    package: AdoptiumPackage,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdoptiumPackage {
+    /// Direct download URL.
+    link: String,
+    /// SHA-256 hex digest.
+    checksum: String,
+    /// Archive filename, e.g. `OpenJDK17U-jre_x64_linux_hotspot_17.0.19_10.tar.gz`.
+    name: String,
+    /// Uncompressed size in bytes.
+    size: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Response parser
+// ---------------------------------------------------------------------------
+
+/// Parse the Adoptium `/v3/assets/latest` JSON array into a `(DownloadItem, ArchiveKind)`.
+///
+/// `data_dir_java` — the `<data>/java/` base path; the file lands at
+/// `<data>/java/<major>/<package.name>`.
+///
+/// Selects the first asset whose `image_type` is `"jre"`. Returns an error if the
+/// array is empty or contains no `jre` entry.
+pub fn parse_adoptium_response(
+    json: &str,
+    major: u32,
+    data_dir_java: &Path,
+) -> Result<(crate::core::download::DownloadItem, ArchiveKind), String> {
+    use crate::core::download::{DownloadItem, ExpectedHash};
+
+    let assets: Vec<AdoptiumAsset> =
+        serde_json::from_str(json).map_err(|e| format!("adoptium JSON parse error: {e}"))?;
+
+    // Prefer an asset whose image_type is "jre".
+    let asset = assets
+        .into_iter()
+        .find(|a| a.binary.image_type == "jre")
+        .ok_or_else(|| {
+            format!("no jre asset found in Adoptium response for major {major}")
+        })?;
+
+    let pkg = asset.binary.package;
+
+    // Derive archive kind from filename extension.
+    let kind = if pkg.name.ends_with(".tar.gz") {
+        ArchiveKind::TarGz
+    } else if pkg.name.ends_with(".zip") {
+        ArchiveKind::Zip
+    } else {
+        return Err(format!(
+            "unrecognised archive extension for package '{}'",
+            pkg.name
+        ));
+    };
+
+    let dest = data_dir_java.join(major.to_string()).join(&pkg.name);
+
+    let item = DownloadItem {
+        url: pkg.link,
+        dest,
+        expected_hash: Some(ExpectedHash::Sha256(pkg.checksum)),
+        size: Some(pkg.size),
+    };
+
+    Ok((item, kind))
+}
+
+// ---------------------------------------------------------------------------
+// Async provision orchestration
+// ---------------------------------------------------------------------------
+
+/// Fetch the Adoptium metadata, build a single-item [`DownloadPlan`], and execute it
+/// through the download engine.
+///
+/// This function issues a real HTTP request and is not called in unit tests.
+/// The pure sub-functions (`adoptium_query_url`, `parse_adoptium_response`) are
+/// tested via fixture instead.
+///
+/// `data_dir_java` — `<data>/java/` base path (see `store::java_dir`).
+/// `os` / `arch` — Adoptium-style strings (use `TargetOs::adoptium_os()` +
+/// `adoptium_arch(std::env::consts::ARCH)`).
+pub async fn provision_java(
+    major: u32,
+    os: &str,
+    arch: &str,
+    data_dir_java: &Path,
+    sink: &(impl crate::core::download::ProgressSink + Sync),
+) -> Result<(PathBuf, ArchiveKind), String> {
+    use crate::core::download::{execute_plan, DownloadPlan};
+
+    let url = adoptium_query_url(major, os, arch);
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!(
+            "modloader/",
+            env!("CARGO_PKG_VERSION"),
+            " (https://github.com/; minecraft launcher)"
+        ))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("adoptium request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("adoptium returned {}: {url}", resp.status()));
+    }
+
+    let json = resp
+        .text()
+        .await
+        .map_err(|e| format!("failed to read adoptium response: {e}"))?;
+
+    let (item, kind) = parse_adoptium_response(&json, major, data_dir_java)?;
+    let dest = item.dest.clone();
+
+    let plan = DownloadPlan::new(vec![item]);
+    let result = execute_plan(&client, &plan, sink, 1).await;
+
+    // execute_plan runs all items and collects outcomes; check for failures.
+    for outcome in &result.outcomes {
+        if let crate::core::download::ItemStatus::Failed { error } = &outcome.status {
+            return Err(format!("download failed for {}: {error}", outcome.url));
+        }
+    }
+
+    Ok((dest, kind))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -441,5 +657,186 @@ mod tests {
         let result = detect(17, &candidates, TargetOs::Linux).unwrap();
         assert_eq!(result.major, 17);
         assert_eq!(result.path, home17.join("bin").join("java"));
+    }
+
+    // ------------------------------------------------------------------
+    // CP3 — Adoptium query URL + OS/arch mapping
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn adoptium_os_linux() {
+        assert_eq!(TargetOs::Linux.adoptium_os(), "linux");
+    }
+
+    #[test]
+    fn adoptium_os_macos_is_mac_not_osx() {
+        // Adoptium uses "mac", NOT "osx" — must not regress.
+        let os = TargetOs::MacOs.adoptium_os();
+        assert_eq!(os, "mac");
+        assert_ne!(os, "osx");
+    }
+
+    #[test]
+    fn adoptium_os_windows() {
+        assert_eq!(TargetOs::Windows.adoptium_os(), "windows");
+    }
+
+    #[test]
+    fn adoptium_arch_x86_64() {
+        assert_eq!(adoptium_arch("x86_64"), Some("x64"));
+    }
+
+    #[test]
+    fn adoptium_arch_aarch64() {
+        assert_eq!(adoptium_arch("aarch64"), Some("aarch64"));
+    }
+
+    #[test]
+    fn adoptium_arch_unknown_returns_none() {
+        assert_eq!(adoptium_arch("mips"), None);
+    }
+
+    #[test]
+    fn query_url_linux_x64_major17() {
+        let url = adoptium_query_url(17, "linux", "x64");
+        assert_eq!(
+            url,
+            "https://api.adoptium.net/v3/assets/latest/17/hotspot\
+             ?architecture=x64&image_type=jre&os=linux&vendor=eclipse"
+        );
+    }
+
+    #[test]
+    fn query_url_mac_aarch64_major21() {
+        let url = adoptium_query_url(21, "mac", "aarch64");
+        assert!(url.contains("/21/hotspot"));
+        assert!(url.contains("os=mac"));
+        assert!(url.contains("architecture=aarch64"));
+        assert!(url.contains("image_type=jre"));
+    }
+
+    #[test]
+    fn query_url_windows_x64() {
+        let url = adoptium_query_url(17, "windows", "x64");
+        assert!(url.contains("os=windows"));
+        assert!(url.contains("architecture=x64"));
+    }
+
+    // ------------------------------------------------------------------
+    // CP3 — parse_adoptium_response (fixture-based)
+    // ------------------------------------------------------------------
+
+    const ADOPTIUM_FIXTURE: &str =
+        include_str!("fixtures/adoptium_latest.json");
+
+    #[test]
+    fn parse_fixture_produces_correct_download_item() {
+        use crate::core::download::ExpectedHash;
+        use std::path::Path;
+
+        let java_dir = Path::new("/data/java");
+        let (item, kind) = parse_adoptium_response(ADOPTIUM_FIXTURE, 17, java_dir).unwrap();
+
+        // URL is the package link.
+        assert_eq!(
+            item.url,
+            "https://github.com/adoptium/temurin17-binaries/releases/download/\
+             jdk-17.0.19%2B10/OpenJDK17U-jre_x64_linux_hotspot_17.0.19_10.tar.gz"
+        );
+
+        // dest is under <data>/java/<major>/<name>.
+        assert_eq!(
+            item.dest,
+            Path::new("/data/java/17/OpenJDK17U-jre_x64_linux_hotspot_17.0.19_10.tar.gz")
+        );
+
+        // SHA-256 checksum from fixture.
+        assert_eq!(
+            item.expected_hash,
+            Some(ExpectedHash::Sha256(
+                "adb5a2364baa51de1ef91bb9911f5a61d24b045fe1d6647cb8050272a3a8ee75".to_string()
+            ))
+        );
+
+        // Size from fixture.
+        assert_eq!(item.size, Some(46671975));
+
+        // .tar.gz → TarGz.
+        assert_eq!(kind, ArchiveKind::TarGz);
+    }
+
+    #[test]
+    fn parse_fixture_zip_name_gives_zip_kind() {
+        // Construct a minimal JSON with a .zip package name (Windows shape).
+        let json = r#"[{
+            "binary": {
+                "architecture": "x64",
+                "image_type": "jre",
+                "jvm_impl": "hotspot",
+                "os": "windows",
+                "package": {
+                    "checksum": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                    "link": "https://example.com/temurin17-jre.zip",
+                    "name": "OpenJDK17U-jre_x64_windows_hotspot_17.0.19_10.zip",
+                    "size": 12345678
+                }
+            }
+        }]"#;
+        use std::path::Path;
+        let (item, kind) = parse_adoptium_response(json, 17, Path::new("/data/java")).unwrap();
+        assert_eq!(kind, ArchiveKind::Zip);
+        assert_eq!(
+            item.dest,
+            Path::new("/data/java/17/OpenJDK17U-jre_x64_windows_hotspot_17.0.19_10.zip")
+        );
+    }
+
+    #[test]
+    fn parse_empty_array_returns_error() {
+        use std::path::Path;
+        let result = parse_adoptium_response("[]", 17, Path::new("/data/java"));
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("no jre asset"));
+    }
+
+    #[test]
+    fn parse_skips_non_jre_entries_and_finds_jre() {
+        // Two entries: first is jdk, second is jre — should pick the jre.
+        let json = r#"[
+            {
+                "binary": {
+                    "architecture": "x64",
+                    "image_type": "jdk",
+                    "jvm_impl": "hotspot",
+                    "os": "linux",
+                    "package": {
+                        "checksum": "aaaa",
+                        "link": "https://example.com/jdk.tar.gz",
+                        "name": "OpenJDK17U-jdk.tar.gz",
+                        "size": 99999999
+                    }
+                }
+            },
+            {
+                "binary": {
+                    "architecture": "x64",
+                    "image_type": "jre",
+                    "jvm_impl": "hotspot",
+                    "os": "linux",
+                    "package": {
+                        "checksum": "bbbb",
+                        "link": "https://example.com/jre.tar.gz",
+                        "name": "OpenJDK17U-jre.tar.gz",
+                        "size": 55555555
+                    }
+                }
+            }
+        ]"#;
+        use crate::core::download::ExpectedHash;
+        use std::path::Path;
+        let (item, _) = parse_adoptium_response(json, 17, Path::new("/data/java")).unwrap();
+        assert_eq!(item.url, "https://example.com/jre.tar.gz");
+        assert_eq!(item.expected_hash, Some(ExpectedHash::Sha256("bbbb".to_string())));
     }
 }

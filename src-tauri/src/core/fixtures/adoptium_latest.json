@@ -1,0 +1,36 @@
+[
+    {
+        "binary": {
+            "architecture": "x64",
+            "download_count": 148980,
+            "heap_size": "normal",
+            "image_type": "jre",
+            "jvm_impl": "hotspot",
+            "os": "linux",
+            "package": {
+                "checksum": "adb5a2364baa51de1ef91bb9911f5a61d24b045fe1d6647cb8050272a3a8ee75",
+                "checksum_link": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.19%2B10/OpenJDK17U-jre_x64_linux_hotspot_17.0.19_10.tar.gz.sha256.txt",
+                "download_count": 148980,
+                "link": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.19%2B10/OpenJDK17U-jre_x64_linux_hotspot_17.0.19_10.tar.gz",
+                "metadata_link": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.19%2B10/OpenJDK17U-jre_x64_linux_hotspot_17.0.19_10.tar.gz.json",
+                "name": "OpenJDK17U-jre_x64_linux_hotspot_17.0.19_10.tar.gz",
+                "signature_link": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.19%2B10/OpenJDK17U-jre_x64_linux_hotspot_17.0.19_10.tar.gz.sig",
+                "size": 46671975
+            },
+            "project": "jdk",
+            "scm_ref": "jdk-17.0.19+10_adopt",
+            "updated_at": "2026-04-22T16:14:55Z"
+        },
+        "release_link": "https://github.com/adoptium/temurin17-binaries/releases/tag/jdk-17.0.19%2B10",
+        "release_name": "jdk-17.0.19+10",
+        "vendor": "eclipse",
+        "version": {
+            "build": 10,
+            "major": 17,
+            "minor": 0,
+            "openjdk_version": "17.0.19+10",
+            "security": 19,
+            "semver": "17.0.19+10"
+        }
+    }
+]
