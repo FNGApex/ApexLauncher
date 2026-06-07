@@ -6,12 +6,12 @@ Concurrent, hash-verified download engine that executes a `DownloadPlan` (list o
 
 ## CLI code
 
-- `src-tauri/src/core/download.rs` — entire engine: `ExpectedHash` (Sha1/Sha512 variants), `DownloadItem`, `DownloadPlan`, `DownloadError` (Network/HashMismatch/Io), `ProgressUpdate`, `ProgressSink` trait, `NoOpSink`, `IncrementalHasher`, `verify`, `needs_download`, `download_item`, `execute_plan`, `build_client`; 31 unit tests via hand-rolled `tokio::net::TcpListener` mock (no `httpmock` dep); `CapturingSink` (test-only) collects progress updates
+- `src-tauri/src/core/download.rs` — entire engine: `ExpectedHash` (Sha1/Sha256/Sha512 variants), `DownloadItem`, `DownloadPlan`, `DownloadError` (Network/HashMismatch/Io), `ProgressUpdate`, `ProgressSink` trait, `NoOpSink`, `IncrementalHasher`, `verify`, `needs_download`, `download_item`, `execute_plan`, `build_client`; 31 unit tests via hand-rolled `tokio::net::TcpListener` mock (no `httpmock` dep); `CapturingSink` (test-only) collects progress updates
 - `src-tauri/src/lib.rs` — `TauriEventSink` (emits `download://progress` Tauri event); `execute_download_plan` async Tauri command (takes `DownloadPlan` + optional `concurrency: usize`, clamps 1–32, default 8)
 
 ## Artifacts
 
-- `src/lib/ipc.ts` — `DownloadItem`, `DownloadPlan`, `ItemStatus`, `ItemOutcome`, `PlanResult`, `DownloadProgressPayload` interfaces; `executeDownloadPlan` wrapper
+- `src/lib/ipc.ts` — `DownloadItem` (expectedHash union includes sha256), `DownloadPlan`, `ItemStatus`, `ItemOutcome`, `PlanResult`, `DownloadProgressPayload` interfaces; `executeDownloadPlan` wrapper
 
 ## Docs
 
@@ -23,6 +23,7 @@ Concurrent, hash-verified download engine that executes a `DownloadPlan` (list o
 - `src/lib/ipc.ts` hand-mirrors Rust structs with camelCase rename; `DownloadItem.dest` is typed `string` (not `PathBuf`) — any Rust field rename requires manual `ipc.ts` update (no specta/ts-rs yet).
 - `meta.rs` (metadata domain) builds a new `reqwest::Client` per `cached_text` call; `download.rs` uses `build_client()` for a separate shared client — two separate clients coexist.
 - Slice B (vanilla resolver, `core/resolver.rs`) produces `DownloadPlan` inputs for this engine; `assemble()` constructs `DownloadItem` values using `download::DownloadItem` and `download::ExpectedHash` directly. Changes to those types require updates in `resolver.rs`.
+- Slice C (java domain, `core/java.rs`) uses `DownloadItem`, `ExpectedHash::Sha256`, `DownloadPlan`, `execute_plan`, and `NoOpSink` directly. Breaking changes to these types cascade to `java.rs`.
 - `execute_download_plan` command registered in `lib.rs` alongside all other domain commands — adding new IPC commands requires editing `lib.rs` across domains.
 
 ## Conventions worth knowing
@@ -32,4 +33,4 @@ Concurrent, hash-verified download engine that executes a `DownloadPlan` (list o
 - `execute_plan` uses `tokio::sync::Semaphore` bounding `futures::stream::iter(plan).buffer_unordered(n)`; failed items produce `ItemStatus::Failed`, not panics.
 - `CapturingSink` is `#[cfg(test)]` only — not available in production builds.
 - Deps added for this module: `sha1 = "0.10"`, `sha2 = "0.10"`, `hex = "0.4"`, `futures-util = "0.3"`, `tokio = { features = ["sync"] }`; dev: `tokio = { features = ["rt", "macros", "net", "io-util"] }`.
-- CurseForge fingerprint hashing is out of scope until Phase 5; only SHA-1 (Mojang assets) and SHA-512 (Modrinth) are supported now.
+- CurseForge fingerprint hashing is out of scope until Phase 5; SHA-1 (Mojang assets), SHA-256 (Adoptium Temurin JREs), and SHA-512 (Modrinth) are the three hash variants now supported.
