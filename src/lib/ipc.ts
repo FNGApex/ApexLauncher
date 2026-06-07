@@ -156,7 +156,11 @@ export interface DownloadItem {
   /** Absolute destination path on disk. */
   dest: string;
   /** Expected hash for verification; null disables hash-checking (not recommended). */
-  expectedHash: { type: "sha1"; value: string } | { type: "sha512"; value: string } | null;
+  expectedHash:
+    | { type: "sha1"; value: string }
+    | { type: "sha256"; value: string }
+    | { type: "sha512"; value: string }
+    | null;
   /** Expected file size in bytes; null if unknown. */
   size: number | null;
 }

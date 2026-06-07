@@ -19,14 +19,16 @@ use sha1::Digest;
 
 /// The expected hash for a single download item.
 ///
-/// The engine supports SHA-1 (used by Mojang asset objects) and SHA-512
-/// (used by Modrinth files). CurseForge fingerprints are out of scope until
-/// Phase 5.
+/// The engine supports SHA-1 (used by Mojang asset objects), SHA-512
+/// (used by Modrinth files), and SHA-256 (used by Adoptium/Temurin JRE
+/// checksums). CurseForge fingerprints are out of scope until Phase 5.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum ExpectedHash {
     /// SHA-1 hex digest.
     Sha1(String),
+    /// SHA-256 hex digest.
+    Sha256(String),
     /// SHA-512 hex digest.
     Sha512(String),
 }
@@ -154,7 +156,7 @@ impl ProgressSink for CapturingSink {
 // Incremental hashing
 // ---------------------------------------------------------------------------
 
-/// An incremental hasher that wraps either a SHA-1 or SHA-512 computation.
+/// An incremental hasher that wraps a SHA-1, SHA-256, or SHA-512 computation.
 ///
 /// Call [`update`](Self::update) with successive byte slices (e.g. network
 /// chunks or read-buffer chunks), then [`finalize`](Self::finalize) to obtain
@@ -162,6 +164,7 @@ impl ProgressSink for CapturingSink {
 /// chunks as they arrive from the network — no second file read needed.
 pub enum IncrementalHasher {
     Sha1(sha1::Sha1),
+    Sha256(sha2::Sha256),
     Sha512(sha2::Sha512),
 }
 
@@ -170,6 +173,7 @@ impl IncrementalHasher {
     pub fn for_expected(expected: &ExpectedHash) -> Self {
         match expected {
             ExpectedHash::Sha1(_) => IncrementalHasher::Sha1(sha1::Sha1::new()),
+            ExpectedHash::Sha256(_) => IncrementalHasher::Sha256(sha2::Sha256::new()),
             ExpectedHash::Sha512(_) => IncrementalHasher::Sha512(sha2::Sha512::new()),
         }
     }
@@ -178,6 +182,7 @@ impl IncrementalHasher {
     pub fn update(&mut self, data: &[u8]) {
         match self {
             IncrementalHasher::Sha1(h) => h.update(data),
+            IncrementalHasher::Sha256(h) => h.update(data),
             IncrementalHasher::Sha512(h) => h.update(data),
         }
     }
@@ -186,6 +191,7 @@ impl IncrementalHasher {
     pub fn finalize(self) -> String {
         match self {
             IncrementalHasher::Sha1(h) => hex::encode(h.finalize()),
+            IncrementalHasher::Sha256(h) => hex::encode(h.finalize()),
             IncrementalHasher::Sha512(h) => hex::encode(h.finalize()),
         }
     }
@@ -225,7 +231,7 @@ pub(crate) fn verify(path: &Path, expected: &ExpectedHash) -> bool {
     }
     let actual = hasher.finalize();
     let expected_hex = match expected {
-        ExpectedHash::Sha1(h) | ExpectedHash::Sha512(h) => h,
+        ExpectedHash::Sha1(h) | ExpectedHash::Sha256(h) | ExpectedHash::Sha512(h) => h,
     };
     // Case-insensitive comparison in case the caller stored an uppercase digest.
     actual.eq_ignore_ascii_case(expected_hex)
@@ -428,7 +434,7 @@ pub async fn download_item(
     if let (Some(h), Some(expected)) = (hasher, &item.expected_hash) {
         let actual = h.finalize();
         let expected_hex = match expected {
-            ExpectedHash::Sha1(s) | ExpectedHash::Sha512(s) => s,
+            ExpectedHash::Sha1(s) | ExpectedHash::Sha256(s) | ExpectedHash::Sha512(s) => s,
         };
         if !actual.eq_ignore_ascii_case(expected_hex) {
             // Cleanup .part — best-effort, ignore secondary I/O errors.
@@ -853,6 +859,115 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // CP-1 SHA-256 tests: serde tag, incremental hasher, verify, mock-server
+    // -----------------------------------------------------------------------
+
+    /// `Sha256` variant serializes with `"type":"sha256"` tag and round-trips.
+    #[test]
+    fn expected_hash_sha256_tag() {
+        let h = ExpectedHash::Sha256("abcd1234".to_owned());
+        let json = serde_json::to_string(&h).unwrap();
+        assert!(json.contains("\"sha256\""), "sha256 tag missing: {json}");
+        assert!(json.contains("abcd1234"));
+        let rt: ExpectedHash = serde_json::from_str(&json).unwrap();
+        assert_eq!(h, rt);
+    }
+
+    /// SHA-256 of "abc" must equal the well-known test vector.
+    #[test]
+    fn incremental_sha256_abc() {
+        let mut h = IncrementalHasher::for_expected(&ExpectedHash::Sha256(String::new()));
+        h.update(b"abc");
+        assert_eq!(
+            h.finalize(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// SHA-256 produces the same result whether data arrives in one shot or in
+    /// two chunks.
+    #[test]
+    fn incremental_sha256_chunked_equals_oneshot() {
+        let data = b"hello sha256 world";
+        let mut h_one = IncrementalHasher::for_expected(&ExpectedHash::Sha256(String::new()));
+        h_one.update(data);
+        let expected = h_one.finalize();
+
+        let mut h_two = IncrementalHasher::for_expected(&ExpectedHash::Sha256(String::new()));
+        h_two.update(&data[..8]);
+        h_two.update(&data[8..]);
+        assert_eq!(h_two.finalize(), expected);
+    }
+
+    /// `verify` returns true when the file content matches the expected SHA-256.
+    #[test]
+    fn verify_sha256_match() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("cp1_verify_sha256_match.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let expected = ExpectedHash::Sha256(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_owned(),
+        );
+        assert!(verify(&path, &expected), "expected verify to return true");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Full sha256 download: file lands at dest with correct content.
+    #[tokio::test]
+    async fn cp1_sha256_full_download_lands_at_dest() {
+        let body = b"sha256 download body".to_vec();
+        let hash = sha256_hex(&body);
+        let server = MockServer::start(body.clone(), false, None).await;
+
+        let dir = test_tmp_dir("cp1_sha256_full");
+        let dest = dir.join("file.bin");
+
+        let client = build_client().unwrap();
+        let item = DownloadItem {
+            url: server.url(),
+            dest: dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha256(hash)),
+            size: None,
+        };
+
+        download_item(&client, &item, &NoOpSink).await.unwrap();
+
+        let on_disk = std::fs::read(&dest).unwrap();
+        assert_eq!(on_disk, body, "file content must match what the server sent");
+        assert!(!part_path_for(&dest).exists(), ".part must not remain after success");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sha256 mismatch: .part deleted, HashMismatch returned, no dest.
+    #[tokio::test]
+    async fn cp1_sha256_hash_mismatch_errors_and_cleans_up() {
+        let real_body = b"correct sha256 content".to_vec();
+        let bad_body  = b"tampered sha256 content".to_vec();
+        let hash = sha256_hex(&real_body);
+        let server = MockServer::start(real_body.clone(), false, Some(bad_body)).await;
+
+        let dir = test_tmp_dir("cp1_sha256_mismatch");
+        let dest = dir.join("file.bin");
+
+        let client = build_client().unwrap();
+        let item = DownloadItem {
+            url: server.url(),
+            dest: dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha256(hash)),
+            size: None,
+        };
+
+        let err = download_item(&client, &item, &NoOpSink).await.unwrap_err();
+        match err {
+            DownloadError::HashMismatch { .. } => {}
+            other => panic!("expected HashMismatch, got {other:?}"),
+        }
+        assert!(!dest.exists(), "dest must not exist after mismatch");
+        assert!(!part_path_for(&dest).exists(), ".part must be deleted after mismatch");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
     // CP-3 tests: single-file download, resume, mismatch, I/O error, dedupe
     // -----------------------------------------------------------------------
 
@@ -943,6 +1058,13 @@ mod tests {
     /// Compute SHA-1 hex of a byte slice (test helper).
     fn sha1_hex(data: &[u8]) -> String {
         let mut h = IncrementalHasher::for_expected(&ExpectedHash::Sha1(String::new()));
+        h.update(data);
+        h.finalize()
+    }
+
+    /// Compute SHA-256 hex of a byte slice (test helper).
+    fn sha256_hex(data: &[u8]) -> String {
+        let mut h = IncrementalHasher::for_expected(&ExpectedHash::Sha256(String::new()));
         h.update(data);
         h.finalize()
     }
