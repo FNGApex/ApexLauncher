@@ -28,11 +28,16 @@ Done early so the create-instance flow picks real versions/builds:
   launch. (Download engine ✅ — see below.)
 
 ## Phase 2 — Minecraft install + launch (vanilla)
-- Mojang piston-meta client: versions ✅ (release list done), libraries/asset index/natives ⬜.
+- Mojang piston-meta client: versions ✅ (release list done), libraries/asset index/natives ✅
+  (slice B resolver — see below).
 - Java manager: detect system JREs, download Temurin per required major.
 - Download engine: concurrent, hash-verified, content-addressed. ✅ (`core/download.rs` —
   Semaphore-bounded executor over a `DownloadPlan`, sha1/sha512 verify, content dedupe,
   Range resume, `download://progress` events. See `docs/spec/download-engine.md`.)
+- Vanilla resolver (slice B): piston-meta version manifest + asset index → one `DownloadPlan`
+  + `LaunchMeta`. ✅ (`core/resolver.rs` — typed parse, OS library-rule eval, classpath/natives
+  selection, asset-object mapping, `resolve_vanilla` command. 33 tests. See
+  `docs/spec/vanilla-resolver.md`.)
 - Launch a **vanilla** instance; live log console; playtime tracking.
 - **Done when:** a vanilla instance launches and reaches the main menu.
 

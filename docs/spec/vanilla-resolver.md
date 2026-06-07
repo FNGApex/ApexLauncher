@@ -102,3 +102,26 @@ list it is handed (`docs/design/vanilla-launch.md:124`); no chunking in B.
 ## Change log
 
 <!-- Populated on first amendment after approval. -->
+
+## Implementation log
+
+### shipped — 2026-06-06
+
+Built across 4 checkpoints (+ 1 polish pass) of /subagent-implementation on branch `vanilla-resolver`. Commits (chronological):
+
+- `b75ae84` — CP-1 parse piston-meta version manifest (typed structs, cache by version id, 7 tests)
+- `6327dc4` — CP-2 library rule eval + classpath/natives (OS-parametrized, Maven dest paths, 15 tests)
+- `a6a4106` — CP-3 asset index resolution (object→DownloadItem, index-file item, assets_legacy, 8 tests)
+- `2688a69` — CP-4 assemble DownloadPlan + LaunchMeta + `resolve_vanilla` command + ipc.ts mirror (2 e2e tests)
+- `3f282f8` — polish: F-1 asset-hash panic guard + F-2 redundant-binding cleanup (1 test)
+
+Final: 64 Rust tests pass (31 download baseline + 33 resolver); `npm run build` clean.
+
+**Out-of-scope work performed during this build:**
+- CP-1 review flagged the artifact struct missing its Maven `path` field; folded into CP-2 (its consumer) rather than a separate fix.
+
+**Unforeseens — surprises that emerged during implementation:**
+- WSL-native `cargo`/`cargo test` fails here (Tauri Linux target needs GTK/WebKit libs, `libsoup-3.0`, absent). All Rust build/test ran via the **Windows** cargo toolchain over the WSL UNC path, sharing the main-tree `target/` dep cache (`CARGO_TARGET_DIR`). The CLAUDE.md `source $HOME/.cargo/env && cargo` instruction is wrong for this machine. (Recorded in project memory `windows-build-toolchain`.)
+
+**Deferred items still open:**
+- None. Both ledger findings (F-1 hash guard, F-2 binding) fixed in `3f282f8`.
