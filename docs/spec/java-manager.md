@@ -104,3 +104,29 @@ Caption: ensure_java detects a matching JRE or provisions Temurin via the engine
 ## Change log
 
 <!-- Populated on first amendment after approval. -->
+
+## Implementation log
+
+### shipped — 2026-06-07
+
+Built across 4 checkpoints (+ 1 polish pass) of /subagent-implementation on branch `java-manager`. Commits (chronological):
+
+- `e4eda8a` — CP-1 engine `ExpectedHash::Sha256` + hasher arm + ipc.ts (6 tests)
+- `c39e188` — CP-2 system JRE detection: release-file parse, injectable candidates+OS, `store::java_dir` (16 tests)
+- `568bfa7` — CP-3 Adoptium provisioning plan: os/arch mapping, query build, parse → sha256 DownloadItem + ArchiveKind, async provision (13 tests + fixture)
+- `5aa6f06` — CP-4 traversal-safe tar.gz/zip extraction, locate nested bin/java, `ensure_java` + Tauri command + ipc.ts; folded F-1/F-2/F-3 (8 tests)
+- `e053394` — polish: F-4 explicit major-scoped extract dest + test, F-5 zip write via validated path (2 tests)
+
+Final: 109 Rust tests pass (31 download + 33 resolver + 45 java/sha256); `npm run build` clean.
+
+**Out-of-scope work performed during this build:**
+- CP-1 is a download-domain change (engine `Sha256`), pulled in as a prerequisite for Temurin verification — in spec scope by design, not drift.
+- `tempfile` added as a dev-dependency (CP-2) for hermetic detection fixtures.
+
+**Unforeseens — surprises that emerged during implementation:**
+- Adoptium uses OS name `mac`, not Mojang's `osx` — caught + curl-verified at CP-3; explicit test guards it. The spec's "API shape assumed" risk was retired by confirming the real response shape during CP-3.
+- `.tar.gz` archive-kind detection must use `ends_with`, not `Path::extension()` (which returns `gz`).
+- WSL-native cargo fails on GTK libs → all Rust build/test ran via the Windows toolchain over the WSL UNC path (project memory `windows-build-toolchain`).
+
+**Deferred items still open:**
+- None. F-1 through F-5 all closed (F-1/F-2/F-3 in `5aa6f06`, F-4/F-5 in `e053394`).
