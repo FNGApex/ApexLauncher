@@ -125,3 +125,5 @@ Final: 64 Rust tests pass (31 download baseline + 33 resolver); `npm run build` 
 
 **Deferred items still open:**
 - None. Both ledger findings (F-1 hash guard, F-2 binding) fixed in `3f282f8`.
+
+**Merged into main as 0926f4f — 2026-06-06.**
