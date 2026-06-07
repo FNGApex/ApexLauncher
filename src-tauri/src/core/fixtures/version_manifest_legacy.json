@@ -1,0 +1,124 @@
+{
+  "id": "1.12.2",
+  "type": "release",
+  "mainClass": "net.minecraft.client.main.Main",
+  "minecraftArguments": "--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${assets_root} --assetIndex ${assets_index_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --userType ${user_type}",
+  "downloads": {
+    "client": {
+      "sha1": "1122aabb1122aabb1122aabb1122aabb1122aabb",
+      "size": 10000000,
+      "url": "https://piston-data.mojang.com/v1/objects/1122aabb1122aabb1122aabb1122aabb1122aabb/client.jar"
+    }
+  },
+  "assetIndex": {
+    "id": "1.12",
+    "sha1": "aabbccddeeff00112233445566778899aabbccdd",
+    "size": 150000,
+    "totalSize": 300000000,
+    "url": "https://piston-meta.mojang.com/v1/packages/aabbccddeeff00112233445566778899aabbccdd/1.12.json"
+  },
+  "libraries": [
+    {
+      "name": "com.mojang:authlib:1.5.25",
+      "downloads": {
+        "artifact": {
+          "path": "com/mojang/authlib/1.5.25/authlib-1.5.25.jar",
+          "sha1": "aaaa0001aaaa0001aaaa0001aaaa0001aaaa0001",
+          "size": 85000,
+          "url": "https://libraries.minecraft.net/com/mojang/authlib/1.5.25/authlib-1.5.25.jar"
+        }
+      }
+    },
+    {
+      "name": "org.lwjgl.lwjgl:lwjgl:2.9.4-nightly-20150209",
+      "downloads": {
+        "artifact": {
+          "path": "org/lwjgl/lwjgl/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209.jar",
+          "sha1": "bbbb0002bbbb0002bbbb0002bbbb0002bbbb0002",
+          "size": 920000,
+          "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209.jar"
+        },
+        "classifiers": {
+          "natives-linux": {
+            "path": "org/lwjgl/lwjgl/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209-natives-linux.jar",
+            "sha1": "cccc0003cccc0003cccc0003cccc0003cccc0003",
+            "size": 580000,
+            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209-natives-linux.jar"
+          },
+          "natives-osx": {
+            "path": "org/lwjgl/lwjgl/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209-natives-osx.jar",
+            "sha1": "dddd0004dddd0004dddd0004dddd0004dddd0004",
+            "size": 400000,
+            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209-natives-osx.jar"
+          },
+          "natives-windows": {
+            "path": "org/lwjgl/lwjgl/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209-natives-windows.jar",
+            "sha1": "eeee0005eeee0005eeee0005eeee0005eeee0005",
+            "size": 610000,
+            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209-natives-windows.jar"
+          }
+        }
+      },
+      "natives": {
+        "linux": "natives-linux",
+        "osx": "natives-osx",
+        "windows": "natives-windows"
+      },
+      "rules": [
+        {
+          "action": "allow"
+        }
+      ]
+    },
+    {
+      "name": "org.lwjgl.lwjgl:lwjgl_util:2.9.4-nightly-20150209",
+      "downloads": {
+        "artifact": {
+          "path": "org/lwjgl/lwjgl/lwjgl_util/2.9.4-nightly-20150209/lwjgl_util-2.9.4-nightly-20150209.jar",
+          "sha1": "ffff0006ffff0006ffff0006ffff0006ffff0006",
+          "size": 173000,
+          "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl_util/2.9.4-nightly-20150209/lwjgl_util-2.9.4-nightly-20150209.jar"
+        }
+      },
+      "rules": [
+        {
+          "action": "allow"
+        }
+      ]
+    },
+    {
+      "name": "ca.weblite:java-objc-bridge:1.1",
+      "downloads": {
+        "artifact": {
+          "path": "ca/weblite/java-objc-bridge/1.1/java-objc-bridge-1.1.jar",
+          "sha1": "aaaa0007aaaa0007aaaa0007aaaa0007aaaa0007",
+          "size": 40000,
+          "url": "https://libraries.minecraft.net/ca/weblite/java-objc-bridge/1.1/java-objc-bridge-1.1.jar"
+        }
+      },
+      "rules": [
+        {
+          "action": "allow",
+          "os": { "name": "osx" }
+        }
+      ]
+    },
+    {
+      "name": "com.ibm.icu:icu4j-core-mojang:51.2",
+      "downloads": {
+        "artifact": {
+          "path": "com/ibm/icu/icu4j-core-mojang/51.2/icu4j-core-mojang-51.2.jar",
+          "sha1": "bbbb0008bbbb0008bbbb0008bbbb0008bbbb0008",
+          "size": 1600000,
+          "url": "https://libraries.minecraft.net/com/ibm/icu/icu4j-core-mojang/51.2/icu4j-core-mojang-51.2.jar"
+        }
+      },
+      "rules": [
+        {
+          "action": "allow",
+          "os": { "name": "windows" }
+        }
+      ]
+    }
+  ]
+}
