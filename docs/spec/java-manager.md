@@ -130,3 +130,5 @@ Final: 109 Rust tests pass (31 download + 33 resolver + 45 java/sha256); `npm ru
 
 **Deferred items still open:**
 - None. F-1 through F-5 all closed (F-1/F-2/F-3 in `5aa6f06`, F-4/F-5 in `e053394`).
+
+**Merged into main as 711e840 — 2026-06-07.**
