@@ -22,7 +22,7 @@ Concurrent, hash-verified download engine that executes a `DownloadPlan` (list o
 
 - `src/lib/ipc.ts` hand-mirrors Rust structs with camelCase rename; `DownloadItem.dest` is typed `string` (not `PathBuf`) — any Rust field rename requires manual `ipc.ts` update (no specta/ts-rs yet).
 - `meta.rs` (metadata domain) builds a new `reqwest::Client` per `cached_text` call; `download.rs` uses `build_client()` for a separate shared client — two separate clients coexist.
-- Future slice B (vanilla piston-meta resolver) will produce `DownloadPlan` inputs for this engine; resolver lives in the metadata domain.
+- Slice B (vanilla resolver, `core/resolver.rs`) produces `DownloadPlan` inputs for this engine; `assemble()` constructs `DownloadItem` values using `download::DownloadItem` and `download::ExpectedHash` directly. Changes to those types require updates in `resolver.rs`.
 - `execute_download_plan` command registered in `lib.rs` alongside all other domain commands — adding new IPC commands requires editing `lib.rs` across domains.
 
 ## Conventions worth knowing

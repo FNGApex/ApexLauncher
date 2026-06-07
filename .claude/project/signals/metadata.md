@@ -29,7 +29,7 @@ Fetches and disk-caches Minecraft version lists (Mojang piston-meta) and per-ver
 
 - `NewInstanceModal` (instances domain) reads from this domain's query cache; `McVersion`/`LoaderOption` IPC type changes require updating `src/lib/ipc.ts` and the modal.
 - `src/lib/query.ts` exports `META_STALE_TIME = 6h` used in both `NewInstanceModal` and `prefetch.ts`; changing the Rust TTL (currently `6 * 3600` in both `versions.rs` and `loaders.rs`) should be mirrored here.
-- `meta.rs` builds a new `reqwest::Client` per `cached_text` call — no shared client. Phase 2+ download engine will need a separate shared client.
+- `meta.rs` builds a new `reqwest::Client` per `cached_text` call — no shared client. `download.rs` (`build_client()`) and `resolver.rs` (via `meta::cached_text`) each use separate clients; three independent reqwest clients coexist at runtime.
 
 ## Conventions worth knowing
 
