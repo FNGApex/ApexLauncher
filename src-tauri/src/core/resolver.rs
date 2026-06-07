@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use crate::core::meta;
@@ -186,6 +186,11 @@ pub struct VersionSpec {
     /// `javaVersion` may be absent on old manifests; defaults to major 8.
     #[serde(default)]
     pub java_version: Option<JavaVersion>,
+
+    /// Optional `logging.client` block (log4j2 config for the JVM).
+    /// Absent on older manifests and some modern ones — treated as optional.
+    #[serde(default)]
+    pub logging: Option<Logging>,
 }
 
 impl VersionSpec {
@@ -458,6 +463,234 @@ pub async fn fetch_asset_index(
     let body = meta::cached_text(app, &asset_index.url, &key, ASSET_INDEX_TTL).await?;
     serde_json::from_str(&body)
         .map_err(|e| format!("bad asset index '{}': {e}", asset_index.id))
+}
+
+// ---------------------------------------------------------------------------
+// LaunchMeta + assemble (CP4)
+// ---------------------------------------------------------------------------
+
+/// Logging config file reference (from `logging.client.file`).
+#[derive(Debug, Deserialize)]
+pub(crate) struct LoggingFile {
+    pub id: String,
+    pub sha1: String,
+    pub size: u64,
+    pub url: String,
+}
+
+/// The `logging.client` block (Mojang injects a log4j2 config).
+#[derive(Debug, Deserialize)]
+pub(crate) struct LoggingClient {
+    pub file: LoggingFile,
+}
+
+/// The `logging` object at the top level of the per-version manifest.
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct Logging {
+    pub client: Option<LoggingClient>,
+}
+
+/// Accumulated metadata that slice D (launch) needs to build the JVM argv.
+///
+/// All `${...}` placeholders in `jvm_args` and `game_args` are left intact —
+/// substitution is slice D's responsibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchMeta {
+    pub version_id: String,
+    pub main_class: String,
+    /// JVM argument templates (modern `arguments.jvm` entries, OS-filtered).
+    /// Empty for legacy manifests — slice D provides defaults.
+    pub jvm_args: Vec<String>,
+    /// Game argument templates (modern `arguments.game` or legacy split).
+    pub game_args: Vec<String>,
+    pub asset_index_id: String,
+    pub assets_legacy: bool,
+    pub java_major: u32,
+    /// Ordered list of dest paths (as strings) for classpath: all libs + client jar.
+    pub classpath: Vec<String>,
+    /// Dest paths of native jars — slice D extracts these before launch.
+    pub natives: Vec<String>,
+    /// Path to the logging config file, if present in the manifest.
+    pub logging_config: Option<String>,
+}
+
+/// Returned by `resolve_vanilla`: the download plan + launch metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveResult {
+    pub plan: crate::core::download::DownloadPlan,
+    pub launch: LaunchMeta,
+}
+
+/// Flatten a single `ArgumentEntry` into a list of plain strings.
+///
+/// `ConditionalArgument` entries are included only when their `rules` pass for
+/// `target_os`. Feature-gated entries (demo mode, custom-resolution — identified
+/// by the `is_demo_user` / `has_custom_resolution` feature keys) are excluded
+/// because those features are off by default.
+fn flatten_arg_entry(entry: &ArgumentEntry, target_os: &str) -> Vec<String> {
+    match entry {
+        ArgumentEntry::Plain(s) => vec![s.clone()],
+        ArgumentEntry::Conditional(cond) => {
+            // Skip feature-gated entries.
+            for rule_val in &cond.rules {
+                if let Some(features) = rule_val.get("features") {
+                    // Any feature-gated entry → skip (all non-default features excluded).
+                    let _ = features; // bind to suppress warning
+                    return vec![];
+                }
+            }
+            if !eval_rules(&cond.rules, target_os) {
+                return vec![];
+            }
+            match &cond.value {
+                ArgumentValue::Single(s) => vec![s.clone()],
+                ArgumentValue::Many(v) => v.clone(),
+            }
+        }
+    }
+}
+
+/// Pure assembly: combine the parsed manifest + asset index into a `DownloadPlan`
+/// and `LaunchMeta`.  No network calls, no `AppHandle`.
+///
+/// `target_os` is a Mojang OS name (`"linux"`, `"windows"`, `"osx"`).
+/// `data_dir` is the app data directory (all dest paths are anchored here).
+pub fn assemble(
+    spec: &VersionSpec,
+    assets: &AssetIndexData,
+    target_os: &str,
+    data_dir: &std::path::Path,
+) -> (crate::core::download::DownloadPlan, LaunchMeta) {
+    use crate::core::download::{DownloadItem, DownloadPlan, ExpectedHash};
+
+    let mut items: Vec<DownloadItem> = Vec::new();
+
+    // 1. Client jar.
+    let client_dest = data_dir
+        .join("versions")
+        .join(&spec.id)
+        .join(format!("{}.jar", spec.id));
+    items.push(DownloadItem {
+        url: spec.downloads.client.url.clone(),
+        dest: client_dest.clone(),
+        expected_hash: Some(ExpectedHash::Sha1(spec.downloads.client.sha1.clone())),
+        size: Some(spec.downloads.client.size),
+    });
+
+    // 2. Libraries (classpath).
+    let cp = select_classpath(&spec.libraries, target_os);
+    for entry in &cp {
+        items.push(DownloadItem {
+            url: entry.url.clone(),
+            dest: data_dir.join("libraries").join(&entry.maven_path),
+            expected_hash: Some(ExpectedHash::Sha1(entry.sha1.clone())),
+            size: Some(entry.size),
+        });
+    }
+
+    // 3. Natives.
+    let nat = select_natives(&spec.libraries, target_os);
+    for entry in &nat {
+        items.push(DownloadItem {
+            url: entry.url.clone(),
+            dest: data_dir.join("libraries").join(&entry.maven_path),
+            expected_hash: Some(ExpectedHash::Sha1(entry.sha1.clone())),
+            size: Some(entry.size),
+        });
+    }
+
+    // 4. Asset index file.
+    items.push(asset_index_file_item(&spec.asset_index, data_dir));
+
+    // 5. Asset objects.
+    items.extend(asset_objects_to_items(&assets.objects, data_dir));
+
+    // 6. Logging config (optional).
+    let logging_config_path: Option<String> = if let Some(logging) = &spec.logging {
+        if let Some(client) = &logging.client {
+            let dest = data_dir
+                .join("assets")
+                .join("log_configs")
+                .join(&client.file.id);
+            items.push(DownloadItem {
+                url: client.file.url.clone(),
+                dest: dest.clone(),
+                expected_hash: Some(ExpectedHash::Sha1(client.file.sha1.clone())),
+                size: Some(client.file.size),
+            });
+            Some(dest.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Build classpath: lib dest paths (in select_classpath order) + client jar last.
+    let mut classpath: Vec<String> = cp
+        .iter()
+        .map(|e| {
+            data_dir
+                .join("libraries")
+                .join(&e.maven_path)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    classpath.push(client_dest.to_string_lossy().into_owned());
+
+    // Natives dest paths.
+    let natives: Vec<String> = nat
+        .iter()
+        .map(|e| {
+            data_dir
+                .join("libraries")
+                .join(&e.maven_path)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    // Build jvm_args + game_args from modern arguments or legacy minecraftArguments.
+    let (jvm_args, game_args) = if let Some(args) = &spec.arguments {
+        let jvm: Vec<String> = args
+            .jvm
+            .iter()
+            .flat_map(|e| flatten_arg_entry(e, target_os))
+            .collect();
+        let game: Vec<String> = args
+            .game
+            .iter()
+            .flat_map(|e| flatten_arg_entry(e, target_os))
+            .collect();
+        (jvm, game)
+    } else if let Some(legacy) = &spec.minecraft_arguments {
+        // Split on ASCII whitespace; leave placeholders intact.
+        let game: Vec<String> = legacy
+            .split_ascii_whitespace()
+            .map(str::to_owned)
+            .collect();
+        (vec![], game)
+    } else {
+        (vec![], vec![])
+    };
+
+    let launch = LaunchMeta {
+        version_id: spec.id.clone(),
+        main_class: spec.main_class.clone(),
+        jvm_args,
+        game_args,
+        asset_index_id: spec.asset_index.id.clone(),
+        assets_legacy: assets.assets_legacy(),
+        java_major: spec.java_major(),
+        classpath,
+        natives,
+        logging_config: logging_config_path,
+    };
+
+    (DownloadPlan::new(items), launch)
 }
 
 // ---------------------------------------------------------------------------
@@ -990,5 +1223,92 @@ mod tests {
             ))
         );
         assert_eq!(item.size, Some(447030));
+    }
+
+    // -----------------------------------------------------------------------
+    // CP4: end-to-end assemble test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn assemble_modern_fixture_plan_item_count_and_launch_meta() {
+        // Inputs: modern version manifest + sample asset index.
+        let spec: VersionSpec = serde_json::from_str(MODERN_FIXTURE)
+            .expect("modern fixture must deserialize");
+        let asset_data: AssetIndexData = serde_json::from_str(ASSET_INDEX_FIXTURE)
+            .expect("asset index fixture must deserialize");
+        let base = std::path::Path::new("/data");
+
+        let (plan, launch) = assemble(&spec, &asset_data, "linux", base);
+
+        // Modern fixture libraries (linux):
+        //   select_classpath("linux") → 3 (authlib, lwjgl, slf4j — all have artifacts, no rules)
+        //   select_natives("linux") → 1 (lwjgl natives-linux)
+        // Asset items: 4 objects + 1 index file
+        // Client jar: 1
+        // Total: 3 + 1 + 4 + 1 + 1 = 10
+        assert_eq!(plan.items.len(), 10, "expected 10 plan items");
+
+        // LaunchMeta fields.
+        assert_eq!(launch.main_class, "net.minecraft.client.main.Main");
+        assert_eq!(launch.java_major, 21);
+        assert_eq!(launch.asset_index_id, "17");
+        assert!(!launch.assets_legacy);
+        assert_eq!(launch.version_id, "1.21.1");
+
+        // Classpath contains client jar path.
+        let client_jar = base
+            .join("versions")
+            .join("1.21.1")
+            .join("1.21.1.jar")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            launch.classpath.contains(&client_jar),
+            "classpath must contain client jar: {:?}",
+            launch.classpath
+        );
+
+        // Natives non-empty for linux.
+        assert!(!launch.natives.is_empty(), "linux natives must be non-empty");
+        assert!(
+            launch.natives[0].contains("natives-linux"),
+            "native path must reference natives-linux: {}",
+            launch.natives[0]
+        );
+
+        // Modern args: game_args include ${auth_player_name}, jvm_args include -cp.
+        assert!(
+            launch.game_args.iter().any(|a| a.contains("${auth_player_name}")),
+            "game_args must contain auth_player_name template"
+        );
+        assert!(
+            launch.jvm_args.iter().any(|a| a == "-cp"),
+            "jvm_args must contain -cp"
+        );
+
+        // No logging config (not in modern fixture).
+        assert!(launch.logging_config.is_none());
+    }
+
+    #[test]
+    fn assemble_legacy_fixture_game_args_from_minecraft_arguments() {
+        // Legacy manifest: minecraftArguments whitespace-split into game_args; jvm_args empty.
+        let spec: VersionSpec = serde_json::from_str(LEGACY_FIXTURE)
+            .expect("legacy fixture must deserialize");
+        // Minimal asset index (empty objects — we just need it to not panic).
+        let asset_data: AssetIndexData = serde_json::from_str(r#"{"objects":{}}"#)
+            .expect("empty asset index must deserialize");
+        let base = std::path::Path::new("/data");
+
+        let (_plan, launch) = assemble(&spec, &asset_data, "linux", base);
+
+        // Legacy: game_args come from minecraftArguments whitespace split.
+        assert!(!launch.game_args.is_empty());
+        assert!(
+            launch.game_args.iter().any(|a| a.contains("${auth_player_name}")),
+            "legacy game_args must contain auth_player_name"
+        );
+        // jvm_args left empty for legacy (slice D provides defaults).
+        assert!(launch.jvm_args.is_empty(), "legacy jvm_args must be empty");
     }
 }

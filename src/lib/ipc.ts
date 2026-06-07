@@ -212,3 +212,44 @@ export function executeDownloadPlan(
 ): Promise<PlanResult> {
   return invoke<PlanResult>("execute_download_plan", { plan, concurrency: concurrency ?? null });
 }
+
+// --- Phase 2: vanilla resolver. Mirrors core/resolver.rs LaunchMeta + ResolveResult. ---
+
+/**
+ * Metadata slice D (launch) needs to build the JVM argv.
+ * All `${...}` placeholders are left intact — substitution is slice D's job.
+ */
+export interface LaunchMeta {
+  versionId: string;
+  mainClass: string;
+  /** JVM arg templates (OS-filtered modern entries). Empty for legacy manifests. */
+  jvmArgs: string[];
+  /** Game arg templates (modern entries or legacy whitespace-split). */
+  gameArgs: string[];
+  assetIndexId: string;
+  assetsLegacy: boolean;
+  javaMajor: number;
+  /** Ordered classpath dest paths: all libs + client jar last. */
+  classpath: string[];
+  /** Native jar dest paths — slice D extracts before launch. */
+  natives: string[];
+  /** Path to the logging config file; null when absent in the manifest. */
+  loggingConfig: string | null;
+}
+
+/** Returned by resolveVanilla: the download plan + launch metadata. */
+export interface ResolveResult {
+  plan: DownloadPlan;
+  launch: LaunchMeta;
+}
+
+/**
+ * Resolve a vanilla Minecraft version into a DownloadPlan + LaunchMeta.
+ *
+ * Fetches and caches the per-version manifest and asset index (no live HTTP
+ * in tests — the backend handles caching). Returns every file needed before
+ * launch plus the metadata required to build the JVM argv.
+ */
+export function resolveVanilla(versionId: string): Promise<ResolveResult> {
+  return invoke<ResolveResult>("resolve_vanilla", { versionId });
+}

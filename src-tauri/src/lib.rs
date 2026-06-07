@@ -4,6 +4,7 @@ mod core;
 use core::download::{self, DownloadPlan, PlanResult, ProgressSink, ProgressUpdate};
 use core::instances::{self, CreateInstanceReq, Instance, InstanceDetail};
 use core::loaders::{self, LoaderOption};
+use core::resolver::{self, ResolveResult};
 use core::settings::{self, Settings};
 use core::versions::{self, McVersion};
 
@@ -137,6 +138,27 @@ async fn execute_download_plan(
     Ok(download::execute_plan(&client, &plan, &sink, n).await)
 }
 
+// --- Phase 2: vanilla resolver. ---
+
+/// Resolve a vanilla Minecraft version into a `DownloadPlan` + `LaunchMeta`.
+///
+/// Fetches + caches the per-version manifest (via `piston-meta`) and asset
+/// index; assembles every file that must be present before launch (client jar,
+/// libraries, natives, asset objects, asset index, logging config) into a
+/// single `DownloadPlan`, and computes `LaunchMeta` for slice D.
+#[tauri::command]
+async fn resolve_vanilla(
+    app: tauri::AppHandle,
+    version_id: String,
+) -> Result<ResolveResult, String> {
+    let spec = resolver::fetch_version_spec(&app, &version_id).await?;
+    let asset_data = resolver::fetch_asset_index(&app, &spec.asset_index).await?;
+    let data_dir = core::store::data_dir(&app)?;
+    let target_os = resolver::host_os_name();
+    let (plan, launch) = resolver::assemble(&spec, &asset_data, target_os, &data_dir);
+    Ok(ResolveResult { plan, launch })
+}
+
 // --- Version & loader metadata (Mojang / Forge / Fabric / Quilt / NeoForge). ---
 
 #[tauri::command]
@@ -164,7 +186,8 @@ pub fn run() {
             app_paths,
             list_minecraft_versions,
             get_loaders,
-            execute_download_plan
+            execute_download_plan,
+            resolve_vanilla
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
