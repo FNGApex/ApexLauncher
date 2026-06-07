@@ -415,20 +415,21 @@ pub fn asset_objects_to_items(
 
     objects
         .values()
-        .map(|obj| {
-            let prefix = &obj.hash[..2];
+        .filter_map(|obj| {
+            // hash must be at least 2 chars to form the objects/<2hex>/<sha1> path.
+            let prefix = obj.hash.get(..2)?;
             let url = format!("{}/{}/{}", ASSET_BASE_URL, prefix, obj.hash);
             let dest = data_dir
                 .join("assets")
                 .join("objects")
                 .join(prefix)
                 .join(&obj.hash);
-            DownloadItem {
+            Some(DownloadItem {
                 url,
                 dest,
                 expected_hash: Some(ExpectedHash::Sha1(obj.hash.clone())),
                 size: Some(obj.size),
-            }
+            })
         })
         .collect()
 }
@@ -535,9 +536,8 @@ fn flatten_arg_entry(entry: &ArgumentEntry, target_os: &str) -> Vec<String> {
         ArgumentEntry::Conditional(cond) => {
             // Skip feature-gated entries.
             for rule_val in &cond.rules {
-                if let Some(features) = rule_val.get("features") {
-                    // Any feature-gated entry → skip (all non-default features excluded).
-                    let _ = features; // bind to suppress warning
+                // Any feature-gated entry → skip (all non-default features excluded).
+                if rule_val.get("features").is_some() {
                     return vec![];
                 }
             }
@@ -1288,6 +1288,43 @@ mod tests {
 
         // No logging config (not in modern fixture).
         assert!(launch.logging_config.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // F-1: asset_objects_to_items skips objects with short/invalid hash
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn asset_objects_to_items_skips_too_short_hash() {
+        // One valid object (hash len >= 2) and one invalid (hash = "a", len 1).
+        // The function must not panic and must exclude the invalid object.
+        let mut objects = std::collections::HashMap::new();
+        objects.insert(
+            "valid-object".to_string(),
+            AssetObject {
+                hash: "bdf48ef6b5d0d23bbb02e17d04865216179f510a".to_string(),
+                size: 1234,
+            },
+        );
+        objects.insert(
+            "bad-object".to_string(),
+            AssetObject {
+                hash: "a".to_string(), // too short — would panic on [..2]
+                size: 99,
+            },
+        );
+
+        let base = std::path::Path::new("/data");
+        let items = asset_objects_to_items(&objects, base);
+
+        // Only the valid object should produce an item; the short-hash one is skipped.
+        assert_eq!(items.len(), 1, "expected 1 item (short-hash object skipped)");
+        assert!(
+            items[0]
+                .url
+                .ends_with("bdf48ef6b5d0d23bbb02e17d04865216179f510a"),
+            "surviving item must be the valid-hash object"
+        );
     }
 
     #[test]
