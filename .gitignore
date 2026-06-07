@@ -26,3 +26,6 @@ src-tauri/gen/
 /appdata/
 .claude/.scratchpad/
 .claude/project/.deterministic-signals.prev.md
+
+# Worktrees
+.worktrees/
