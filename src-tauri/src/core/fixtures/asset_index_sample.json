@@ -1,0 +1,20 @@
+{
+  "objects": {
+    "icons/icon_16x16.png": {
+      "hash": "bdf48ef6b5d0d23bbb02e17d04865216179f510a",
+      "size": 3665
+    },
+    "minecraft/sounds/ambient/cave/cave1.ogg": {
+      "hash": "b7e4cc500e8b3aa15f2b2aedee7dcc8b45e7a0c1",
+      "size": 107196
+    },
+    "minecraft/textures/gui/title/minecraft.png": {
+      "hash": "01d8b7aff4e4cb4b7e18a22d6a5e16f9d5a4c2b1",
+      "size": 9791
+    },
+    "minecraft/lang/en_us.json": {
+      "hash": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+      "size": 52301
+    }
+  }
+}

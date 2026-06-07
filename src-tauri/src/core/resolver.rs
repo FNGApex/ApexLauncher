@@ -362,6 +362,105 @@ pub fn select_natives(libs: &[Library], target_os: &str) -> Vec<NativeEntry> {
 }
 
 // ---------------------------------------------------------------------------
+// Asset index (CP3)
+// ---------------------------------------------------------------------------
+
+const ASSET_BASE_URL: &str = "https://resources.download.minecraft.net";
+
+/// Long TTL for asset indexes — they are content-addressed by sha1 and immutable.
+const ASSET_INDEX_TTL: Duration = Duration::from_secs(365 * 24 * 3600);
+
+/// A single entry in the `objects` map of an asset index JSON.
+#[derive(Debug, Deserialize)]
+pub struct AssetObject {
+    pub hash: String,
+    pub size: u64,
+}
+
+/// Parsed asset index JSON (`assets/indexes/<id>.json`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetIndexData {
+    pub objects: std::collections::HashMap<String, AssetObject>,
+    /// Pre-1.7 virtual layout flag.
+    #[serde(default)]
+    pub r#virtual: bool,
+    /// Pre-1.7 `map_to_resources` flag (very old packs).
+    #[serde(default)]
+    pub map_to_resources: bool,
+}
+
+impl AssetIndexData {
+    /// True when this index uses the legacy virtual/resource-pack layout.
+    /// The modern `objects/<2hex>/<sha1>` layout is used when this returns false.
+    pub fn assets_legacy(&self) -> bool {
+        self.r#virtual || self.map_to_resources
+    }
+}
+
+/// Map the parsed `objects` map to a flat list of [`DownloadItem`]s.
+///
+/// `data_dir` is the app data directory (e.g. `~/.local/share/modloader/`).
+/// Each object is placed at `<data_dir>/assets/objects/<2hex>/<sha1>`.
+pub fn asset_objects_to_items(
+    objects: &std::collections::HashMap<String, AssetObject>,
+    data_dir: &std::path::Path,
+) -> Vec<crate::core::download::DownloadItem> {
+    use crate::core::download::{DownloadItem, ExpectedHash};
+
+    objects
+        .values()
+        .map(|obj| {
+            let prefix = &obj.hash[..2];
+            let url = format!("{}/{}/{}", ASSET_BASE_URL, prefix, obj.hash);
+            let dest = data_dir
+                .join("assets")
+                .join("objects")
+                .join(prefix)
+                .join(&obj.hash);
+            DownloadItem {
+                url,
+                dest,
+                expected_hash: Some(ExpectedHash::Sha1(obj.hash.clone())),
+                size: Some(obj.size),
+            }
+        })
+        .collect()
+}
+
+/// Emit the [`DownloadItem`] for the asset index file itself.
+///
+/// dest = `<data_dir>/assets/indexes/<id>.json`
+pub fn asset_index_file_item(
+    asset_index: &AssetIndex,
+    data_dir: &std::path::Path,
+) -> crate::core::download::DownloadItem {
+    use crate::core::download::{DownloadItem, ExpectedHash};
+
+    DownloadItem {
+        url: asset_index.url.clone(),
+        dest: data_dir
+            .join("assets")
+            .join("indexes")
+            .join(format!("{}.json", asset_index.id)),
+        expected_hash: Some(ExpectedHash::Sha1(asset_index.sha1.clone())),
+        size: Some(asset_index.size),
+    }
+}
+
+/// Fetch + cache the asset index for the given [`AssetIndex`] descriptor,
+/// returning the parsed [`AssetIndexData`].
+pub async fn fetch_asset_index(
+    app: &AppHandle,
+    asset_index: &AssetIndex,
+) -> Result<AssetIndexData, String> {
+    let key = format!("asset-index-{}.json", asset_index.id);
+    let body = meta::cached_text(app, &asset_index.url, &key, ASSET_INDEX_TTL).await?;
+    serde_json::from_str(&body)
+        .map_err(|e| format!("bad asset index '{}': {e}", asset_index.id))
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -748,5 +847,148 @@ mod tests {
                 entry.maven_path
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // CP3: asset index resolution
+    // -----------------------------------------------------------------------
+
+    const ASSET_INDEX_FIXTURE: &str =
+        include_str!("fixtures/asset_index_sample.json");
+
+    #[test]
+    fn parse_asset_index_object_count() {
+        let data: AssetIndexData = serde_json::from_str(ASSET_INDEX_FIXTURE)
+            .expect("asset index fixture must deserialize");
+        assert_eq!(data.objects.len(), 4);
+    }
+
+    #[test]
+    fn asset_objects_to_items_url_and_dest() {
+        let data: AssetIndexData = serde_json::from_str(ASSET_INDEX_FIXTURE)
+            .expect("asset index fixture must deserialize");
+        let base = std::path::Path::new("/data");
+        let items = asset_objects_to_items(&data.objects, base);
+
+        // Should produce one item per object.
+        assert_eq!(items.len(), 4);
+
+        // Find the specific object we know the hash for.
+        let known_hash = "bdf48ef6b5d0d23bbb02e17d04865216179f510a";
+        let item = items
+            .iter()
+            .find(|i| i.url.ends_with(known_hash))
+            .expect("item for known hash must be present");
+
+        assert_eq!(
+            item.url,
+            format!("https://resources.download.minecraft.net/bd/{}", known_hash)
+        );
+        assert_eq!(
+            item.dest,
+            std::path::PathBuf::from(format!("/data/assets/objects/bd/{}", known_hash))
+        );
+        assert_eq!(
+            item.expected_hash,
+            Some(crate::core::download::ExpectedHash::Sha1(known_hash.to_string()))
+        );
+        assert_eq!(item.size, Some(3665));
+    }
+
+    #[test]
+    fn asset_objects_to_items_two_hex_prefix() {
+        // Verify prefix is always the first two chars of the hash.
+        let data: AssetIndexData = serde_json::from_str(ASSET_INDEX_FIXTURE)
+            .expect("asset index fixture must deserialize");
+        let base = std::path::Path::new("/tmp/mc");
+        let items = asset_objects_to_items(&data.objects, base);
+
+        for item in &items {
+            // URL format: …/<2hex>/<sha1>
+            let url_parts: Vec<&str> = item.url.rsplitn(3, '/').collect();
+            let sha1 = url_parts[0];
+            let prefix = url_parts[1];
+            assert_eq!(prefix, &sha1[..2], "URL prefix must be first 2 chars of hash");
+
+            // dest last two path components must be <2hex> then <sha1>.
+            // Use Path components to avoid OS path-separator differences.
+            let components: Vec<_> = item.dest.components().collect();
+            let n = components.len();
+            assert!(n >= 2, "dest must have at least 2 components: {:?}", item.dest);
+            let last = components[n - 1].as_os_str().to_str().unwrap();
+            let second_last = components[n - 2].as_os_str().to_str().unwrap();
+            assert_eq!(last, sha1, "last dest component must be the sha1 hash");
+            assert_eq!(second_last, &sha1[..2], "second-last dest component must be the 2-char prefix");
+        }
+    }
+
+    #[test]
+    fn asset_index_file_item_correct() {
+        // Build a synthetic AssetIndex descriptor (like the one inside VersionSpec).
+        let ai = AssetIndex {
+            id: "17".to_string(),
+            sha1: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            size: 447030,
+            total_size: 799786602,
+            url: "https://piston-meta.mojang.com/v1/packages/deadbeef.../17.json".to_string(),
+        };
+        let base = std::path::Path::new("/data");
+        let item = asset_index_file_item(&ai, base);
+
+        assert_eq!(item.url, ai.url);
+        assert_eq!(
+            item.dest,
+            std::path::PathBuf::from("/data/assets/indexes/17.json")
+        );
+        assert_eq!(
+            item.expected_hash,
+            Some(crate::core::download::ExpectedHash::Sha1(
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string()
+            ))
+        );
+        assert_eq!(item.size, Some(447030));
+    }
+
+    #[test]
+    fn assets_legacy_false_for_modern_index() {
+        // Modern index: no `virtual`, no `map_to_resources` → legacy = false.
+        let data: AssetIndexData = serde_json::from_str(ASSET_INDEX_FIXTURE)
+            .expect("asset index fixture must deserialize");
+        assert!(!data.assets_legacy());
+    }
+
+    #[test]
+    fn assets_legacy_true_when_virtual_set() {
+        let json = r#"{"objects": {}, "virtual": true}"#;
+        let data: AssetIndexData =
+            serde_json::from_str(json).expect("must deserialize");
+        assert!(data.assets_legacy());
+    }
+
+    #[test]
+    fn assets_legacy_true_when_map_to_resources_set() {
+        let json = r#"{"objects": {}, "mapToResources": true}"#;
+        let data: AssetIndexData =
+            serde_json::from_str(json).expect("must deserialize");
+        assert!(data.assets_legacy());
+    }
+
+    #[test]
+    fn asset_index_file_item_from_modern_fixture() {
+        // Confirm the AssetIndex from the already-parsed modern version fixture
+        // produces the correct index-file DownloadItem.
+        let spec: VersionSpec = serde_json::from_str(MODERN_FIXTURE)
+            .expect("modern fixture must deserialize");
+        let base = std::path::Path::new("/data");
+        let item = asset_index_file_item(&spec.asset_index, base);
+
+        assert_eq!(item.dest, std::path::PathBuf::from("/data/assets/indexes/17.json"));
+        assert_eq!(
+            item.expected_hash,
+            Some(crate::core::download::ExpectedHash::Sha1(
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string()
+            ))
+        );
+        assert_eq!(item.size, Some(447030));
     }
 }
