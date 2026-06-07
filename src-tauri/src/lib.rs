@@ -3,6 +3,7 @@ use serde::Serialize;
 mod core;
 use core::download::{self, DownloadPlan, PlanResult, ProgressSink, ProgressUpdate};
 use core::instances::{self, CreateInstanceReq, Instance, InstanceDetail};
+use core::java::JavaInstallation;
 use core::loaders::{self, LoaderOption};
 use core::resolver::{self, ResolveResult};
 use core::settings::{self, Settings};
@@ -159,6 +160,17 @@ async fn resolve_vanilla(
     Ok(ResolveResult { plan, launch })
 }
 
+// --- Phase 2, slice C: Java manager. ---
+
+/// Detect or provision a JRE matching `major`.
+///
+/// Probes system installs + the launcher cache first; downloads and extracts
+/// Temurin from Adoptium only on a cache miss.
+#[tauri::command]
+async fn ensure_java(app: tauri::AppHandle, major: u32) -> Result<JavaInstallation, String> {
+    core::java::ensure_java(&app, major).await
+}
+
 // --- Version & loader metadata (Mojang / Forge / Fabric / Quilt / NeoForge). ---
 
 #[tauri::command]
@@ -187,7 +199,8 @@ pub fn run() {
             list_minecraft_versions,
             get_loaders,
             execute_download_plan,
-            resolve_vanilla
+            resolve_vanilla,
+            ensure_java
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

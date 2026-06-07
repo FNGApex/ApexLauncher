@@ -13,9 +13,14 @@
 //!   - [`parse_adoptium_response`] — parses the JSON array into a `(DownloadItem, ArchiveKind)`.
 //!   - [`provision_java`] — async; fetches, parses, and executes the download plan.
 //!
-//! CP4 (extraction / `ensure_java` / Tauri command) is NOT here yet.
+//! CP4: extraction + ensure_java + Tauri command.
+//!   - [`extract_archive`] — in-process `.tar.gz`/`.zip` extraction with traversal guard.
+//!   - [`locate_java_bin`] — walks extracted dir tree for `bin/java[.exe]`.
+//!   - [`ensure_java_core`] — injectable detect-or-provision core; testable without network.
+//!   - [`ensure_java`] — thin `AppHandle` wrapper over `ensure_java_core`.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -156,14 +161,25 @@ pub fn probe_installation(
 ///
 /// `candidates` is an ordered list of JRE home directories to probe.
 /// `os` controls which binary name is expected (`java` vs `java.exe`).
+/// `cache_prefix` — if a candidate's path starts with this prefix it is labelled
+/// [`JavaSource::Downloaded`]; all others are [`JavaSource::Detected`].
 ///
 /// Fully injectable — no env reads, no filesystem side-effects beyond reading
 /// the candidate dirs themselves — so unit tests can pass fixture dirs.
-pub fn detect(want_major: u32, candidates: &[PathBuf], os: TargetOs) -> Option<JavaInstallation> {
+pub fn detect(
+    want_major: u32,
+    candidates: &[PathBuf],
+    os: TargetOs,
+    cache_prefix: Option<&Path>,
+) -> Option<JavaInstallation> {
     for home in candidates {
-        // Downloaded installs under <data>/java/<major>/ are recognised here too —
-        // they're just candidate dirs like any other.
-        if let Some(inst) = probe_installation(home, os, JavaSource::Detected) {
+        // F-2 fix: JREs under the launcher's own cache dir are labelled Downloaded,
+        // not Detected — they were put there by the launcher, not found on the system.
+        let source = match cache_prefix {
+            Some(prefix) if home.starts_with(prefix) => JavaSource::Downloaded,
+            _ => JavaSource::Detected,
+        };
+        if let Some(inst) = probe_installation(home, os, source) {
             if inst.major == want_major {
                 return Some(inst);
             }
@@ -206,7 +222,13 @@ pub fn default_candidates(os: TargetOs, data_dir: &Path) -> Vec<PathBuf> {
     }
 
     // 2. PATH — find dirs containing `java`/`java.exe`, walk up to the JRE home.
-    //    e.g. `/usr/bin/java` → parent = `/usr/bin` → grandparent `/usr` (the home).
+    //    Assumption: the binary sits in `<home>/bin/java[.exe]`, so ascending one level
+    //    from the PATH entry gives the JRE home.  This covers the common case of
+    //    `/usr/bin/java` (symlink aside) and `<home>/bin` entries added by sdkman/jabba.
+    //    It does NOT cover wrappers that live directly in a PATH dir without a `bin/`
+    //    subdirectory (e.g. some `/usr/bin/java` OS wrapper symlinks point into
+    //    `/etc/alternatives` rather than a JRE home).  Those cases fall through to the
+    //    per-OS dir scan below.
     if let Ok(path_env) = std::env::var("PATH") {
         let sep = if os == TargetOs::Windows { ';' } else { ':' };
         for dir in path_env.split(sep) {
@@ -324,8 +346,8 @@ struct AdoptiumAsset {
 
 #[derive(Debug, Deserialize)]
 struct AdoptiumBinary {
-    os: String,
-    architecture: String,
+    // F-3: `os` and `architecture` were deserialized but never read; dropped to
+    // eliminate dead-code noise. serde ignores unknown JSON fields by default.
     image_type: String,
     package: AdoptiumPackage,
 }
@@ -460,6 +482,265 @@ pub async fn provision_java(
     }
 
     Ok((dest, kind))
+}
+
+// ---------------------------------------------------------------------------
+// CP4 — Archive extraction (traversal-safe)
+// ---------------------------------------------------------------------------
+
+/// Extract a `.tar.gz` or `.zip` archive into `dest`.
+///
+/// Every entry is checked: if its resolved path would escape `dest` (zip-slip /
+/// `../` attack), the entry is refused and an error is returned — nothing is
+/// written to disk beyond that point.
+pub fn extract_archive(archive_path: &Path, kind: ArchiveKind, dest: &Path) -> Result<(), String> {
+    // Canonicalize dest so we get a consistent prefix for the escape check.
+    // dest may not exist yet — create it first.
+    fs::create_dir_all(dest)
+        .map_err(|e| format!("failed to create dest dir {}: {e}", dest.display()))?;
+    let dest_canon = dest
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize dest {}: {e}", dest.display()))?;
+
+    match kind {
+        ArchiveKind::TarGz => extract_tar_gz(archive_path, &dest_canon),
+        ArchiveKind::Zip => extract_zip(archive_path, &dest_canon),
+    }
+}
+
+fn extract_tar_gz(archive_path: &Path, dest_canon: &Path) -> Result<(), String> {
+    use flate2::read::GzDecoder;
+    use tar::Archive;
+
+    let file = fs::File::open(archive_path)
+        .map_err(|e| format!("failed to open archive {}: {e}", archive_path.display()))?;
+    let gz = GzDecoder::new(io::BufReader::new(file));
+    let mut archive = Archive::new(gz);
+    // Do not preserve ownership on platforms where we can't (Windows) or don't
+    // need to — avoids permission errors.
+    archive.set_preserve_permissions(false);
+    archive.set_preserve_mtime(false);
+
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("failed to read tar entries: {e}"))?
+    {
+        let mut entry =
+            entry.map_err(|e| format!("failed to read tar entry: {e}"))?;
+
+        // Read the path — the tar crate may reject `..` components itself; if
+        // so, treat it as a traversal attempt just like our own check would.
+        let entry_path = match entry.path() {
+            Ok(p) => p.into_owned(),
+            Err(_) => {
+                return Err(
+                    "traversal refused: tar entry has an unsafe path component".to_string(),
+                );
+            }
+        };
+
+        // Explicit traversal guard: normalize and prefix-check before any write.
+        let target = dest_canon.join(&entry_path);
+        let target_canon = normalize_path(&target);
+        if !target_canon.starts_with(dest_canon) {
+            return Err(format!(
+                "traversal refused: entry '{}' would escape dest",
+                entry_path.display()
+            ));
+        }
+
+        // `unpack_in` unpacks the entry relative to `dest_canon`, handling
+        // platform path differences (including Windows extended-length paths).
+        entry
+            .unpack_in(dest_canon)
+            .map_err(|e| format!("failed to unpack '{}': {e}", entry_path.display()))?;
+    }
+    Ok(())
+}
+
+fn extract_zip(archive_path: &Path, dest_canon: &Path) -> Result<(), String> {
+    use zip::ZipArchive;
+
+    let file = fs::File::open(archive_path)
+        .map_err(|e| format!("failed to open archive {}: {e}", archive_path.display()))?;
+    let mut zip =
+        ZipArchive::new(io::BufReader::new(file))
+            .map_err(|e| format!("failed to read zip archive: {e}"))?;
+
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("failed to read zip entry {i}: {e}"))?;
+
+        let entry_name = entry.name().to_owned();
+
+        let target = dest_canon.join(&entry_name);
+        let target_canon = normalize_path(&target);
+        if !target_canon.starts_with(dest_canon) {
+            return Err(format!(
+                "traversal refused: entry '{entry_name}' would escape dest"
+            ));
+        }
+
+        if entry_name.ends_with('/') {
+            // Directory entry.
+            fs::create_dir_all(&target)
+                .map_err(|e| format!("failed to create dir '{entry_name}': {e}"))?;
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create parent for '{entry_name}': {e}"))?;
+            }
+            let mut out = fs::File::create(&target)
+                .map_err(|e| format!("failed to create file '{entry_name}': {e}"))?;
+            io::copy(&mut entry, &mut out)
+                .map_err(|e| format!("failed to write '{entry_name}': {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Normalize a path without requiring the path to exist on disk.
+///
+/// Resolves `..` and `.` components lexically.  Used for the traversal check
+/// before writing entries (we can't `canonicalize()` a path that doesn't exist yet).
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// CP4 — Locate java binary after extraction
+// ---------------------------------------------------------------------------
+
+/// Walk `search_root` recursively for `bin/java` (Unix) or `bin/java.exe` (Windows).
+///
+/// Temurin archives nest under a versioned top dir (e.g. `jdk-17.0.8+7-jre/bin/java`);
+/// we do not assume a fixed depth — we find the first match anywhere under the tree.
+pub fn locate_java_bin(search_root: &Path, os: TargetOs) -> Option<PathBuf> {
+    locate_java_recursive(search_root, os.java_bin())
+}
+
+fn locate_java_recursive(dir: &Path, bin_name: &str) -> Option<PathBuf> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            // If this directory is named "bin", look for the binary directly inside.
+            if path.file_name().and_then(|n| n.to_str()) == Some("bin") {
+                let candidate = path.join(bin_name);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+            // Recurse.
+            if let Some(found) = locate_java_recursive(&path, bin_name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// CP4 — ensure_java (injectable core + thin AppHandle wrapper)
+// ---------------------------------------------------------------------------
+
+/// Pure/injectable core: detect-or-provision a JRE matching `want_major`.
+///
+/// Arguments:
+/// - `want_major` — the Java major required.
+/// - `candidates` — ordered list of JRE home dirs to probe (injected; avoids env reads in tests).
+/// - `cache_dir`  — the `<data>/java/` directory; entries under it are labelled `Downloaded`.
+/// - `os`         — target OS (injected for tests).
+/// - `provision`  — async closure called on cache miss; should download + extract and return
+///                  the path to `bin/java[.exe]`.  Injected so tests can skip network.
+///
+/// On detect-hit returns immediately (no network). On miss, calls `provision` then
+/// attempts to locate the binary in `cache_dir/<major>/`.
+pub async fn ensure_java_core<F, Fut>(
+    want_major: u32,
+    candidates: &[PathBuf],
+    cache_dir: &Path,
+    os: TargetOs,
+    provision: F,
+) -> Result<JavaInstallation, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<PathBuf, String>>,
+{
+    // Detect phase — check injected candidates.
+    if let Some(inst) = detect(want_major, candidates, os, Some(cache_dir)) {
+        return Ok(inst);
+    }
+
+    // Provision phase — download + extract via injected closure.
+    let java_bin = provision().await?;
+
+    Ok(JavaInstallation {
+        major: want_major,
+        path: java_bin,
+        source: JavaSource::Downloaded,
+    })
+}
+
+/// Thin `AppHandle` wrapper: gather real candidates + cache dir, then call [`ensure_java_core`].
+///
+/// This function issues real network requests (via `provision_java`) and is not called in
+/// unit tests — tests use `ensure_java_core` with an injected provision closure instead.
+pub async fn ensure_java(
+    app: &tauri::AppHandle,
+    major: u32,
+) -> Result<JavaInstallation, String> {
+    use crate::core::download::NoOpSink;
+
+    let data_dir = crate::core::store::data_dir(app)?;
+    let cache_dir = crate::core::store::java_dir(app)?;
+    let os = TargetOs::current();
+
+    let arch = adoptium_arch(std::env::consts::ARCH)
+        .ok_or_else(|| format!("unsupported architecture: {}", std::env::consts::ARCH))?;
+    let os_str = os.adoptium_os();
+
+    let candidates = default_candidates(os, &data_dir);
+    let cache_dir_clone = cache_dir.clone();
+    let os_str_owned = os_str.to_owned();
+    let arch_owned = arch.to_owned();
+
+    ensure_java_core(
+        major,
+        &candidates,
+        &cache_dir,
+        os,
+        || async move {
+            let (archive_path, kind) =
+                provision_java(major, &os_str_owned, &arch_owned, &cache_dir_clone, &NoOpSink)
+                    .await?;
+
+            let extract_dest = archive_path
+                .parent()
+                .ok_or_else(|| "archive has no parent dir".to_string())?
+                .to_path_buf();
+
+            extract_archive(&archive_path, kind, &extract_dest)?;
+
+            locate_java_bin(&extract_dest, os)
+                .ok_or_else(|| "java binary not found after extraction".to_string())
+        },
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -608,7 +889,7 @@ mod tests {
 
         let candidates = vec![home17.clone(), home21.clone()];
 
-        let result = detect(17, &candidates, TargetOs::Linux).unwrap();
+        let result = detect(17, &candidates, TargetOs::Linux, None).unwrap();
         assert_eq!(result.major, 17);
         assert_eq!(result.path, home17.join("bin").join("java"));
     }
@@ -619,13 +900,13 @@ mod tests {
         let home = make_fake_jre(&tmp, "17.0.8", TargetOs::Linux);
 
         // Looking for Java 21, only have 17.
-        let result = detect(21, &[home], TargetOs::Linux);
+        let result = detect(21, &[home], TargetOs::Linux, None);
         assert!(result.is_none());
     }
 
     #[test]
     fn detect_returns_none_for_empty_candidates() {
-        let result = detect(17, &[], TargetOs::Linux);
+        let result = detect(17, &[], TargetOs::Linux, None);
         assert!(result.is_none());
     }
 
@@ -638,7 +919,7 @@ mod tests {
         let home_b = make_fake_jre(&tmp_b, "17.0.11", TargetOs::Linux);
 
         let candidates = vec![home_a.clone(), home_b];
-        let result = detect(17, &candidates, TargetOs::Linux).unwrap();
+        let result = detect(17, &candidates, TargetOs::Linux, None).unwrap();
         // Should return the first match.
         assert_eq!(result.path, home_a.join("bin").join("java"));
     }
@@ -654,7 +935,7 @@ mod tests {
         let home21 = make_fake_jre(&tmp21, "21.0.3", TargetOs::Linux);
 
         let candidates = vec![home8, home17.clone(), home21];
-        let result = detect(17, &candidates, TargetOs::Linux).unwrap();
+        let result = detect(17, &candidates, TargetOs::Linux, None).unwrap();
         assert_eq!(result.major, 17);
         assert_eq!(result.path, home17.join("bin").join("java"));
     }
@@ -838,5 +1119,339 @@ mod tests {
         let (item, _) = parse_adoptium_response(json, 17, Path::new("/data/java")).unwrap();
         assert_eq!(item.url, "https://example.com/jre.tar.gz");
         assert_eq!(item.expected_hash, Some(ExpectedHash::Sha256("bbbb".to_string())));
+    }
+
+    // ------------------------------------------------------------------
+    // CP4 — extract_archive (tar.gz)
+    // ------------------------------------------------------------------
+
+    /// Build a minimal `.tar.gz` in memory with a `bin/java` entry and a `release` file.
+    ///
+    /// Layout inside the archive:
+    ///   jdk-17.0.8+7-jre/
+    ///   jdk-17.0.8+7-jre/bin/
+    ///   jdk-17.0.8+7-jre/bin/java
+    ///   jdk-17.0.8+7-jre/release
+    fn make_tar_gz(dest_file: &Path) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tar::Builder;
+
+        let file = fs::File::create(dest_file).unwrap();
+        let gz = GzEncoder::new(file, Compression::fast());
+        let mut archive = Builder::new(gz);
+
+        let prefix = "jdk-17.0.8+7-jre";
+
+        // Add bin/java (empty file).
+        let java_content = b"#!/bin/sh\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(java_content.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive
+            .append_data(
+                &mut header,
+                format!("{prefix}/bin/java"),
+                java_content.as_ref(),
+            )
+            .unwrap();
+
+        // Add release file.
+        let release_content = b"JAVA_VERSION=\"17.0.8\"\n";
+        let mut header2 = tar::Header::new_gnu();
+        header2.set_size(release_content.len() as u64);
+        header2.set_mode(0o644);
+        header2.set_cksum();
+        archive
+            .append_data(
+                &mut header2,
+                format!("{prefix}/release"),
+                release_content.as_ref(),
+            )
+            .unwrap();
+
+        archive.finish().unwrap();
+    }
+
+    #[test]
+    fn extract_tar_gz_unpacks_and_locates_java() {
+        let tmp = TempDir::new().unwrap();
+        let archive_path = tmp.path().join("temurin.tar.gz");
+        make_tar_gz(&archive_path);
+
+        let dest = tmp.path().join("extracted");
+        extract_archive(&archive_path, ArchiveKind::TarGz, &dest).unwrap();
+
+        // locate_java_bin should find jdk-17.0.8+7-jre/bin/java.
+        let java = locate_java_bin(&dest, TargetOs::Linux).expect("java binary not found");
+        assert!(java.exists(), "located java path should exist on disk");
+        assert_eq!(java.file_name().unwrap(), "java");
+    }
+
+    #[test]
+    fn extract_tar_gz_traversal_refused() {
+        // The `tar` crate refuses to build an archive with `..` path components via its
+        // safe API.  Build the malicious archive as raw bytes (a minimal POSIX tar block)
+        // so we can test our own traversal guard independent of the builder.
+        //
+        // A POSIX tar entry header is 512 bytes; the name field is bytes 0-99.
+        // We write a single file entry with name `../escape`, size 4, then the
+        // 4-byte content block (padded to 512), then two 512-byte zero blocks (end-of-archive).
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write as _;
+
+        let tmp = TempDir::new().unwrap();
+        let archive_path = tmp.path().join("malicious.tar.gz");
+
+        {
+            let file = fs::File::create(&archive_path).unwrap();
+            let mut gz = GzEncoder::new(file, Compression::fast());
+
+            // Build a minimal tar header block (512 bytes).
+            let mut header = [0u8; 512];
+            // Name: ../escape  (bytes 0..100)
+            let name = b"../escape\0";
+            header[..name.len()].copy_from_slice(name);
+            // Mode: 0644 in octal ASCII (bytes 100..108)
+            header[100..107].copy_from_slice(b"0000644");
+            header[107] = 0;
+            // UID, GID: 0 (bytes 108..124)
+            header[108..115].copy_from_slice(b"0000000");
+            header[116..123].copy_from_slice(b"0000000");
+            // Size: 4 bytes → "0000004" (bytes 124..136)
+            header[124..131].copy_from_slice(b"0000004");
+            header[131] = 0;
+            // mtime: 0 (bytes 136..148)
+            header[136..147].copy_from_slice(b"00000000000");
+            header[147] = 0;
+            // checksum placeholder: 8 spaces (bytes 148..156)
+            header[148..156].copy_from_slice(b"        ");
+            // typeflag: '0' = regular file (byte 156)
+            header[156] = b'0';
+            // magic + version (bytes 257..265): ustar\000
+            header[257..263].copy_from_slice(b"ustar ");
+            header[263] = b' ';
+            header[264] = 0;
+            // Compute checksum (unsigned sum of all header bytes with spaces in 148..156).
+            let cksum: u32 = header.iter().map(|&b| b as u32).sum();
+            // Write checksum as 6-digit octal + \0 + space.
+            let cksum_str = format!("{:06o}\0 ", cksum);
+            header[148..156].copy_from_slice(cksum_str.as_bytes());
+
+            gz.write_all(&header).unwrap();
+
+            // Data block (512 bytes, content = "evil" padded with zeros).
+            let mut data_block = [0u8; 512];
+            data_block[..4].copy_from_slice(b"evil");
+            gz.write_all(&data_block).unwrap();
+
+            // End-of-archive: two zero blocks.
+            gz.write_all(&[0u8; 1024]).unwrap();
+            gz.finish().unwrap();
+        }
+
+        let dest = tmp.path().join("extracted");
+        let result = extract_archive(&archive_path, ArchiveKind::TarGz, &dest);
+
+        assert!(result.is_err(), "traversal entry must be refused");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("traversal refused"),
+            "error message should mention traversal: {msg}"
+        );
+
+        // Nothing should have been written outside dest.
+        let escape_target = tmp.path().join("escape");
+        assert!(
+            !escape_target.exists(),
+            "malicious file must not exist outside dest"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // CP4 — extract_archive (zip)
+    // ------------------------------------------------------------------
+
+    /// Build a minimal `.zip` with `jdk-17.0.8+7-jre/bin/java` and `jdk-17.0.8+7-jre/release`.
+    fn make_zip(dest_file: &Path) {
+        use std::io::Write as _;
+        use zip::write::{FileOptions, ZipWriter};
+        use zip::CompressionMethod;
+
+        let file = fs::File::create(dest_file).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options: FileOptions<'_, ()> =
+            FileOptions::default().compression_method(CompressionMethod::Deflated);
+
+        let prefix = "jdk-17.0.8+7-jre";
+
+        zip.add_directory(format!("{prefix}/"), options).unwrap();
+        zip.add_directory(format!("{prefix}/bin/"), options).unwrap();
+
+        zip.start_file(format!("{prefix}/bin/java"), options).unwrap();
+        zip.write_all(b"#!/bin/sh\n").unwrap();
+
+        zip.start_file(format!("{prefix}/release"), options).unwrap();
+        zip.write_all(b"JAVA_VERSION=\"17.0.8\"\n").unwrap();
+
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn extract_zip_unpacks_and_locates_java() {
+        let tmp = TempDir::new().unwrap();
+        let archive_path = tmp.path().join("temurin.zip");
+        make_zip(&archive_path);
+
+        let dest = tmp.path().join("extracted");
+        extract_archive(&archive_path, ArchiveKind::Zip, &dest).unwrap();
+
+        let java = locate_java_bin(&dest, TargetOs::Linux).expect("java binary not found");
+        assert!(java.exists());
+        assert_eq!(java.file_name().unwrap(), "java");
+    }
+
+    #[test]
+    fn extract_zip_traversal_refused() {
+        use std::io::Write as _;
+        use zip::write::{FileOptions, ZipWriter};
+        use zip::CompressionMethod;
+
+        let tmp = TempDir::new().unwrap();
+        let archive_path = tmp.path().join("malicious.zip");
+
+        {
+            let file = fs::File::create(&archive_path).unwrap();
+            let mut zip = ZipWriter::new(file);
+            let options: FileOptions<'_, ()> =
+                FileOptions::default().compression_method(CompressionMethod::Deflated);
+            // Path that escapes dest.
+            zip.start_file("../escape", options).unwrap();
+            zip.write_all(b"evil").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let dest = tmp.path().join("extracted");
+        let result = extract_archive(&archive_path, ArchiveKind::Zip, &dest);
+
+        assert!(result.is_err(), "zip traversal entry must be refused");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("traversal refused"),
+            "error message should mention traversal: {msg}"
+        );
+
+        let escape_target = tmp.path().join("escape");
+        assert!(
+            !escape_target.exists(),
+            "malicious file must not exist outside dest"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // CP4 — F-2: detect labels cache-dir entries as Downloaded
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn detect_labels_cache_dir_entries_as_downloaded() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("java");
+
+        // JRE home is inside the cache dir.
+        let home = cache_dir.join("17").join("jdk-17.0.8+7-jre");
+        let bin_dir = home.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("java"), b"").unwrap();
+        fs::write(home.join("release"), b"JAVA_VERSION=\"17.0.8\"\n").unwrap();
+
+        let candidates = vec![home];
+        let result = detect(17, &candidates, TargetOs::Linux, Some(&cache_dir)).unwrap();
+
+        assert!(
+            matches!(result.source, JavaSource::Downloaded),
+            "JRE under cache dir must be labelled Downloaded, got {:?}",
+            result.source
+        );
+    }
+
+    #[test]
+    fn detect_labels_non_cache_entries_as_detected() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("java");
+        // JRE home is outside the cache dir.
+        let other_dir = tmp.path().join("system_java");
+        fs::create_dir_all(&other_dir).unwrap();
+        let bin_dir = other_dir.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("java"), b"").unwrap();
+        fs::write(other_dir.join("release"), b"JAVA_VERSION=\"17.0.8\"\n").unwrap();
+
+        let candidates = vec![other_dir];
+        let result = detect(17, &candidates, TargetOs::Linux, Some(&cache_dir)).unwrap();
+
+        assert!(
+            matches!(result.source, JavaSource::Detected),
+            "JRE outside cache dir must be labelled Detected, got {:?}",
+            result.source
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // CP4 — ensure_java_core: detect-hit with injected candidates (no network)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ensure_java_core_detect_hit_no_network() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("java_cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+
+        // Build a fake JRE 17 as a candidate.
+        let home = make_fake_jre(&tmp, "17.0.8", TargetOs::Linux);
+        let candidates = vec![home.clone()];
+
+        let result = ensure_java_core(
+            17,
+            &candidates,
+            &cache_dir,
+            TargetOs::Linux,
+            || async { panic!("provision must not be called on detect hit") },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.major, 17);
+        assert_eq!(result.path, home.join("bin").join("java"));
+    }
+
+    #[tokio::test]
+    async fn ensure_java_core_misses_then_provisions() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("java_cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+
+        // No matching candidates.
+        let candidates: Vec<PathBuf> = vec![];
+
+        // Provision closure returns a fake java path.
+        let fake_java = tmp.path().join("fake_java");
+        fs::write(&fake_java, b"").unwrap();
+        let fake_java_clone = fake_java.clone();
+
+        let result = ensure_java_core(
+            17,
+            &candidates,
+            &cache_dir,
+            TargetOs::Linux,
+            move || async move { Ok(fake_java_clone) },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.major, 17);
+        assert_eq!(result.path, fake_java);
+        assert!(matches!(result.source, JavaSource::Downloaded));
     }
 }

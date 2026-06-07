@@ -257,3 +257,30 @@ export interface ResolveResult {
 export function resolveVanilla(versionId: string): Promise<ResolveResult> {
   return invoke<ResolveResult>("resolve_vanilla", { versionId });
 }
+
+// --- Phase 2, slice C: Java manager. Mirrors core/java.rs. ---
+
+/** How a JavaInstallation was found. */
+export type JavaSource = "detected" | "downloaded";
+
+/**
+ * A located JRE: the Java major version and the absolute path to the
+ * `java` / `java.exe` executable.
+ */
+export interface JavaInstallation {
+  major: number;
+  /** Absolute path to `java` / `java.exe`. */
+  path: string;
+  /** Whether this JRE was found on the system or downloaded by the launcher. */
+  source: JavaSource;
+}
+
+/**
+ * Detect or provision a JRE for the given Java major version.
+ *
+ * Probes system installs and the launcher cache first. Downloads and extracts
+ * Temurin from Adoptium only on a cache miss.
+ */
+export function ensureJava(major: number): Promise<JavaInstallation> {
+  return invoke<JavaInstallation>("ensure_java", { major });
+}
