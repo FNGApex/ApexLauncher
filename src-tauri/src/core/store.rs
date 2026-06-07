@@ -23,3 +23,13 @@ pub fn instances_dir(app: &AppHandle) -> Result<PathBuf, String> {
     fs::create_dir_all(&dir).map_err(|e| format!("could not create instances dir: {e}"))?;
     Ok(dir)
 }
+
+/// `<data>/java/`, created if missing.
+///
+/// Used as the root for downloaded JRE installations and as a detection candidate.
+/// Downloaded JREs are stored at `<data>/java/<major>/`.
+pub fn java_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = data_dir(app)?.join("java");
+    fs::create_dir_all(&dir).map_err(|e| format!("could not create java dir: {e}"))?;
+    Ok(dir)
+}
