@@ -8,11 +8,13 @@
 //! - `versions`  — Minecraft release list (Mojang piston-meta).
 //! - `loaders`   — per-MC mod-loader version lists (Forge/Fabric/Quilt/NeoForge).
 //! - `download`  — concurrent, hash-verified download engine (Phase 2).
+//! - `resolver`  — vanilla manifest fetch + parse, DownloadPlan + LaunchMeta (Phase 2 slice B).
 
 pub mod download;
 pub mod instances;
 pub mod loaders;
 pub mod meta;
+pub mod resolver;
 pub mod settings;
 pub mod store;
 pub mod versions;
