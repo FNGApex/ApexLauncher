@@ -13,7 +13,7 @@ React 19 app entry point, routing, sidebar navigation, IPC wrapper layer, TanSta
 - `src/routes/Browse.tsx` — stub; provider filter tabs (All / Modrinth / CurseForge) + search input; no backend wiring yet (Phase 5/6)
 - `src/routes/Accounts.tsx` — stub placeholder (Phase 3)
 - `src/routes/Settings.tsx` — live: loads/saves `Settings` (defaultMemoryMb, defaultJavaArgs, curseforgeApiKey); displays read-only `AppPaths`; dirty-state save button
-- `src/lib/ipc.ts` — all typed `invoke` wrappers; exports interfaces for `AppInfo`, `Instance`, `InstanceDetail`, `FolderMod`, `CreateInstanceReq`, `Settings`, `AppPaths`, `McVersion`, `LoaderOption`, `LoaderKind`
+- `src/lib/ipc.ts` — all typed `invoke` wrappers; exports interfaces for `AppInfo`, `Instance`, `InstanceDetail`, `FolderMod`, `CreateInstanceReq`, `Settings`, `AppPaths`, `McVersion`, `LoaderOption`, `LoaderKind`, `DownloadItem`, `DownloadPlan`, `ItemStatus`, `ItemOutcome`, `PlanResult`, `DownloadProgressPayload`, `ResolveResult`, `LaunchMeta`, `JavaSource`, `JavaInstallation`; functions: `getAppInfo`, `listInstances`, `createInstance`, `getInstance`, `deleteInstance`, `getSettings`, `saveSettings`, `getAppPaths`, `listMinecraftVersions`, `getLoaders`, `executeDownloadPlan`, `resolveVanilla`, `ensureJava`
 - `src/lib/query.ts` — exports `queryClient` (staleTime=30s, gcTime=24h, retry=1, no refetch-on-focus) and `META_STALE_TIME` (6h)
 - `src/lib/prefetch.ts` — `prefetchStartupData`: prefetches `["instances"]`, `["mc-versions"]`, `["loaders", latest]`
 - `src/lib/utils.ts` — `cn` (clsx + tailwind-merge)
@@ -30,6 +30,7 @@ React 19 app entry point, routing, sidebar navigation, IPC wrapper layer, TanSta
 - `Settings.tsx` is tightly coupled to `src/lib/ipc.ts` `Settings` interface; if `curseforge_api_key` moves from settings to a separate secret store (Phase 5), both files change.
 - `prefetch.ts` imports `META_STALE_TIME` from `query.ts` and IPC fns from `ipc.ts`; changes to query key shapes affect both.
 - `Browse.tsx` and `Accounts.tsx` are stubs — they will be replaced wholesale in Phase 5 and Phase 3 respectively.
+- `JavaInstallation` and `JavaSource` in `ipc.ts` mirror `core/java.rs`; any rename in the Rust struct requires manual update here (java domain coupling).
 
 ## Conventions worth knowing
 
