@@ -4,9 +4,15 @@
 //! offline identity, substitutes all `${...}` placeholders, and produces the
 //! final `Vec<String>` argv for the JVM. No process spawn (CP3).
 //!
-//! CP2 (next): natives extraction.
+//! CP2: natives extraction. Each jar in `LaunchMeta.natives` is unpacked
+//! into a per-instance natives dir. `META-INF/` entries and directory entries
+//! are skipped. Any entry whose resolved path escapes the target dir is refused
+//! (zip-slip / `../` traversal guard).
+//!
 //! CP3 (next): tokio::process spawn + log streaming + running registry + kill.
 
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::core::resolver::LaunchMeta;
@@ -250,6 +256,108 @@ fn default_jvm_args(asset_index_id: &str, natives_dir: &Path, classpath: &str) -
         "-cp".to_string(),
         classpath.to_string(),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// CP2 — Natives extraction
+// ---------------------------------------------------------------------------
+
+/// Unpack native entries from each jar in `native_jars` into `natives_dir`.
+///
+/// For each jar:
+/// - Skip directory entries (name ends with `/`).
+/// - Skip entries under `META-INF/`.
+/// - Refuse (return `Err`) any entry whose resolved path would escape
+///   `natives_dir` (zip-slip / `../` traversal attack).
+/// - Extract everything else flat into `natives_dir`.
+///
+/// `natives_dir` is created if absent. It is keyed per-instance (callers
+/// supply `<instances>/<slug>/natives/`) so concurrent launches of different
+/// instances do not clash.
+pub fn extract_natives(native_jars: &[String], natives_dir: &Path) -> Result<(), String> {
+    use zip::ZipArchive;
+
+    fs::create_dir_all(natives_dir)
+        .map_err(|e| format!("failed to create natives dir {}: {e}", natives_dir.display()))?;
+    let dir_canon = natives_dir
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize natives dir {}: {e}", natives_dir.display()))?;
+
+    for jar_path in native_jars {
+        let jar = Path::new(jar_path);
+        let file = fs::File::open(jar)
+            .map_err(|e| format!("failed to open natives jar {}: {e}", jar.display()))?;
+        let mut archive = ZipArchive::new(io::BufReader::new(file))
+            .map_err(|e| format!("failed to read natives jar {}: {e}", jar.display()))?;
+
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| format!("failed to read entry {i} from {}: {e}", jar.display()))?;
+
+            let entry_name = entry.name().to_owned();
+
+            // Skip directory entries.
+            if entry_name.ends_with('/') {
+                continue;
+            }
+
+            // Skip META-INF/ entries.
+            if entry_name.starts_with("META-INF/") || entry_name == "META-INF" {
+                continue;
+            }
+
+            // Traversal guard: resolve against canon dir (using the basename only —
+            // natives are extracted flat, ignoring any subdirectory structure inside
+            // the jar). We still check the raw entry name for `..` components before
+            // using just the basename.
+            let entry_path = Path::new(&entry_name);
+
+            // Check the full entry path for traversal components first.
+            let full_target = dir_canon.join(entry_path);
+            let full_target_norm = normalize_path_launch(&full_target);
+            if !full_target_norm.starts_with(&dir_canon) {
+                return Err(format!(
+                    "traversal refused: entry '{entry_name}' would escape natives dir"
+                ));
+            }
+
+            // Extract flat: use only the filename component.
+            let file_name = entry_path
+                .file_name()
+                .ok_or_else(|| format!("entry '{entry_name}' has no filename component"))?;
+
+            let out_path = dir_canon.join(file_name);
+
+            let mut out = fs::File::create(&out_path).map_err(|e| {
+                format!("failed to create {}: {e}", out_path.display())
+            })?;
+            io::copy(&mut entry, &mut out)
+                .map_err(|e| format!("failed to write {}: {e}", out_path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Normalize a path without requiring it to exist on disk.
+///
+/// Resolves `..` and `.` components lexically. Used for the traversal guard
+/// before writing (we can't `canonicalize()` a path that doesn't exist yet).
+///
+/// Mirrors the `normalize_path` helper in `java.rs` — copied rather than
+/// shared to avoid coupling modules across domains.
+fn normalize_path_launch(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -633,6 +741,122 @@ mod tests {
         assert!(
             argv.iter().any(|a| a == "snapshot"),
             "snapshot version_type must appear in argv: {argv:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CP2 — extract_natives
+    // -----------------------------------------------------------------------
+
+    /// Build an in-memory zip with three kinds of entries:
+    ///   - a normal native file (`libfoo.so`)
+    ///   - a `META-INF/MANIFEST.MF` entry (must be skipped)
+    ///   - a directory entry `natives/` (must be skipped)
+    ///
+    /// Written to `dest_file` on disk.
+    fn make_natives_jar(dest_file: &std::path::Path) {
+        use std::io::Write as _;
+        use zip::write::{FileOptions, ZipWriter};
+        use zip::CompressionMethod;
+
+        let file = fs::File::create(dest_file).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let opts: FileOptions<'_, ()> =
+            FileOptions::default().compression_method(CompressionMethod::Deflated);
+
+        // Normal native binary.
+        zip.start_file("libfoo.so", opts).unwrap();
+        zip.write_all(b"\x7fELF native content").unwrap();
+
+        // META-INF directory entry.
+        zip.add_directory("META-INF/", opts).unwrap();
+
+        // META-INF/MANIFEST.MF — must be skipped.
+        zip.start_file("META-INF/MANIFEST.MF", opts).unwrap();
+        zip.write_all(b"Manifest-Version: 1.0\n").unwrap();
+
+        // Plain directory entry inside the jar — must be skipped.
+        zip.add_directory("natives/", opts).unwrap();
+
+        zip.finish().unwrap();
+    }
+
+    /// Build a zip with a traversal entry (`../escape.so`).
+    fn make_malicious_natives_jar(dest_file: &std::path::Path) {
+        use std::io::Write as _;
+        use zip::write::{FileOptions, ZipWriter};
+        use zip::CompressionMethod;
+
+        let file = fs::File::create(dest_file).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let opts: FileOptions<'_, ()> =
+            FileOptions::default().compression_method(CompressionMethod::Deflated);
+
+        zip.start_file("../escape.so", opts).unwrap();
+        zip.write_all(b"evil payload").unwrap();
+
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn extract_natives_normal_entry_lands_in_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let jar_path = tmp.path().join("natives.jar");
+        make_natives_jar(&jar_path);
+
+        let natives_dir = tmp.path().join("natives");
+        extract_natives(&[jar_path.to_string_lossy().into_owned()], &natives_dir).unwrap();
+
+        // libfoo.so must be extracted.
+        let extracted = natives_dir.join("libfoo.so");
+        assert!(extracted.exists(), "libfoo.so must be extracted: {:?}", extracted);
+
+        // Content must match.
+        let content = fs::read(&extracted).unwrap();
+        assert_eq!(content, b"\x7fELF native content");
+    }
+
+    #[test]
+    fn extract_natives_meta_inf_skipped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let jar_path = tmp.path().join("natives.jar");
+        make_natives_jar(&jar_path);
+
+        let natives_dir = tmp.path().join("natives");
+        extract_natives(&[jar_path.to_string_lossy().into_owned()], &natives_dir).unwrap();
+
+        // META-INF/MANIFEST.MF must NOT be extracted.
+        assert!(
+            !natives_dir.join("META-INF").exists(),
+            "META-INF dir must not be created"
+        );
+        assert!(
+            !natives_dir.join("MANIFEST.MF").exists(),
+            "MANIFEST.MF must not be extracted even flat"
+        );
+    }
+
+    #[test]
+    fn extract_natives_traversal_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let jar_path = tmp.path().join("malicious.jar");
+        make_malicious_natives_jar(&jar_path);
+
+        let natives_dir = tmp.path().join("natives");
+        let result = extract_natives(&[jar_path.to_string_lossy().into_owned()], &natives_dir);
+
+        assert!(result.is_err(), "traversal entry must be refused");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("traversal refused"),
+            "error must mention 'traversal refused': {msg}"
+        );
+
+        // The file must not have been written outside the target dir.
+        let escape_target = tmp.path().join("escape.so");
+        assert!(
+            !escape_target.exists(),
+            "malicious file must not exist outside natives_dir"
         );
     }
 }
