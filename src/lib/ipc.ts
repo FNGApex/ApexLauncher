@@ -286,3 +286,51 @@ export interface JavaInstallation {
 export function ensureJava(major: number): Promise<JavaInstallation> {
   return invoke<JavaInstallation>("ensure_java", { major });
 }
+
+// --- Phase 2, slice D: vanilla launch. Mirrors lib.rs LaunchLogPayload/LaunchExitPayload. ---
+
+/**
+ * Payload emitted on the `launch://log` Tauri event channel.
+ * Subscribe with `listen("launch://log", handler)`.
+ */
+export interface LaunchLogPayload {
+  /** Slug of the instance emitting this line. */
+  instanceId: string;
+  /** `"stdout"` or `"stderr"`. */
+  stream: string;
+  line: string;
+}
+
+/**
+ * Payload emitted on the `launch://exit` Tauri event channel.
+ * Subscribe with `listen("launch://exit", handler)`.
+ */
+export interface LaunchExitPayload {
+  /** Slug of the instance that exited. */
+  instanceId: string;
+  /** Process exit code; null if the code could not be determined. */
+  code: number | null;
+}
+
+/** Event name constants for the launch channel. */
+export const LAUNCH_LOG_EVENT = "launch://log" as const;
+export const LAUNCH_EXIT_EVENT = "launch://exit" as const;
+
+/**
+ * Launch a vanilla Minecraft instance.
+ *
+ * Returns promptly; the child runs under a background task that streams
+ * stdout+stderr as `launch://log` events and records playtime on exit.
+ */
+export function launchInstance(slug: string): Promise<void> {
+  return invoke<void>("launch_instance", { slug });
+}
+
+/**
+ * Stop (kill) a running Minecraft instance.
+ *
+ * Returns Ok if the signal was sent, Err if the instance is not running.
+ */
+export function killInstance(slug: string): Promise<void> {
+  return invoke<void>("kill_instance", { slug });
+}
