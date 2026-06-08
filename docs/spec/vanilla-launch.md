@@ -147,3 +147,66 @@ Caption: argv assembly + natives extraction feed the spawn; the running registry
 ## Change log
 
 <!-- Populated on first amendment after approval. Do not log drafting/refinement turns. -->
+
+## Implementation log
+
+### shipped — 2026-06-07
+
+Built across 5 iterations (+ 1 polish) of /subagent-implementation on branch `vanilla-launch`
+(worktree). Commits (chronological):
+
+- `865cc64` — CP1 argv assembler (placeholder substitution, OS-separator classpath, offline
+  identity Player + UUIDv3, `${path}`/logging handling) + `version_type` field on `LaunchMeta` +
+  `ipc.ts` mirror. 12 tests.
+- `64cc8f4` — CP2 traversal-safe natives extraction into a per-instance dir (skip META-INF/dirs,
+  zip-slip guard). 3 tests.
+- `0b08aeb` — CP3 `launch_instance` orchestration (resolve → download w/ outcome inspection →
+  ensure_java → extract natives → build argv → `tokio::process` spawn cwd `mc/`), monitor task
+  streaming `launch://log`, slug-keyed `RunningRegistry` managed state (first `.manage()`),
+  `kill_instance`, playtime on both exit paths via `write_manifest`. Tauri-free core behind a
+  `LaunchSink` trait. 5 tests. (Folds the iter-4 review fixes — see Unforeseens.)
+- `6b68280` — CP4 frontend: `launchInstance`/`killInstance` + payload mirrors + event constants
+  (`ipc.ts`); `InstanceDetail.tsx` Launch/Stop toggle, running badge, slug-filtered live log
+  console, playtime row.
+- `bfbdd5e` — polish: guard the launch-event listener effect against the unmount race (F-6) +
+  `.catch` on `listen()` (F-7).
+
+Final: 129 Rust tests pass (Windows toolchain); `npm run build` green.
+
+**Out-of-scope work performed during this build:**
+- `version_type` added to `LaunchMeta`/`VersionSpec` (resolver, slice-B struct) as a CP1
+  prerequisite — the `${version_type}` placeholder had no backing field. In spec scope by design.
+- `tokio` features `process`/`io-util`/`time`/`macros`/`rt` + `uuid` `v3` feature added to
+  `Cargo.toml` (CP1/CP3).
+- First `.manage()` managed state introduced in `lib.rs` (CP3) — none existed before.
+
+**Unforeseens — surprises that emerged during implementation:**
+- CP3 first pass had three defects caught by review and fixed in iter 4: (1) `execute_plan`
+  outcomes were dropped → a failed download would spawn a doomed JVM silently (now inspected,
+  errors before spawn); (2) registry keyed by UUID while commands took a slug → mismatch that
+  would have broken CP4 wiring (standardized on slug); (3) `kill_instance` removed the registry
+  entry before the monitor exited → TOCTOU relaunch window (monitor is now sole deregistrar).
+- The `launch://log` payload field is named `instanceId` (camelCase of Rust `instance_id`) but
+  carries the **slug** value; the TS type documents this and the component filters by slug —
+  consistent, verified end to end.
+- WSL-native cargo is unusable (GTK/WebKit libs) — all Rust build/test ran via the Windows
+  toolchain over the WSL UNC path (project memory `windows-build-toolchain`).
+
+**Deferred items still open:**
+- `vanilla-launch-f-1` (🟡 risk, project follow-up) — materialize the `assets_legacy` virtual tree
+  for pre-1.7 launch; modern versions unaffected.
+- `vanilla-launch-f-2` (🔵 nit, project follow-up) — `-Dminecraft.client.jar=` legacy prop gets
+  the asset index id instead of the jar path. Coupled to f-1.
+
+**Dropped (with reason):**
+- F-4 (natives traversal guard checks full subpath, write uses basename) — the basename write is
+  provably contained (`file_name()` strips separators); not a bug, not worth a comment churn.
+- F-5 (defensive bare-`META-INF` guard) — correct defensive code; reviewer marked no-action.
+
+**Closed during the build:**
+- F-3 (`OFFLINE_PLAYER_NAME` dead-code) — auto-resolved at CP3 when the spawn path began calling
+  `build_argv`.
+
+**Manual verification still pending:** launch-to-main-menu with a real MC version + JRE + display
+is not automated (deterministic parts unit-tested; CP3 smoke uses a trivial process). See project
+memory `windows-launch-test-pending` for the GUI/launch verification path (WSLg vs native Windows).
