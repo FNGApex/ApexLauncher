@@ -9,11 +9,17 @@
 //! are skipped. Any entry whose resolved path escapes the target dir is refused
 //! (zip-slip / `../` traversal guard).
 //!
-//! CP3 (next): tokio::process spawn + log streaming + running registry + kill.
+//! CP3: tokio::process spawn + log streaming + running registry + kill.
+//! The core is Tauri-free and generic over a [`LaunchSink`] trait. Callers in
+//! `lib.rs` supply a `TauriLaunchSink` that emits `launch://log` events; tests
+//! use a `CapturingLaunchSink`.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::core::resolver::LaunchMeta;
 
@@ -361,6 +367,343 @@ fn normalize_path_launch(path: &Path) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// CP3 — Spawn + log streaming + running registry + kill + playtime
+// ---------------------------------------------------------------------------
+
+/// Log/exit sink trait — mirrors `download::ProgressSink`.
+///
+/// Implementations: `TauriLaunchSink` (in `lib.rs`) emits `launch://log` and
+/// `launch://exit` events; `CapturingLaunchSink` (below, test-only) collects
+/// lines into a `Mutex<Vec>` for assertion.
+///
+/// All methods take `&self` (shared ref) so a single sink can be shared across
+/// the stdout and stderr reader tasks.
+pub trait LaunchSink: Send + Sync + 'static {
+    /// Called for each line read from stdout or stderr.
+    /// `stream` is `"stdout"` or `"stderr"`.
+    fn log(&self, instance_id: &str, stream: &str, line: &str);
+
+    /// Called once when the child exits (natural or killed).
+    /// `code` is `None` if the exit code could not be determined.
+    fn exited(&self, instance_id: &str, code: Option<i32>);
+}
+
+
+/// A [`LaunchSink`] that captures log lines and exit events for test assertion.
+#[cfg(test)]
+pub struct CapturingLaunchSink {
+    pub lines: Mutex<Vec<(String, String, String)>>, // (instance_id, stream, line)
+    pub exit_codes: Mutex<Vec<(String, Option<i32>)>>,
+}
+
+#[cfg(test)]
+impl CapturingLaunchSink {
+    pub fn new() -> Self {
+        Self {
+            lines: Mutex::new(Vec::new()),
+            exit_codes: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl LaunchSink for CapturingLaunchSink {
+    fn log(&self, instance_id: &str, stream: &str, line: &str) {
+        self.lines
+            .lock()
+            .unwrap()
+            .push((instance_id.to_owned(), stream.to_owned(), line.to_owned()));
+    }
+    fn exited(&self, instance_id: &str, code: Option<i32>) {
+        self.exit_codes
+            .lock()
+            .unwrap()
+            .push((instance_id.to_owned(), code));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Running registry
+// ---------------------------------------------------------------------------
+
+/// A handle stored per running instance in the registry.
+pub struct KillHandle {
+    /// Fires once to signal the monitor task to kill the child.
+    ///
+    /// Wrapped in `Option` so `kill_instance` can `take` the sender (consuming it
+    /// to send the signal) while **leaving the registry entry in place**. The
+    /// monitor task is the sole owner of registry removal — it removes the entry
+    /// once the child has actually exited, eliminating the TOCTOU window where a
+    /// concurrent `launch_instance` could re-spawn while the old child is still
+    /// terminating.
+    pub kill_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+/// In-process running-instance registry.
+///
+/// Keyed by instance **slug** (the on-disk directory name), which is unique and
+/// stable. Managed as Tauri state.
+/// **Never hold this lock across an `.await` point.**
+pub type RunningRegistry = Mutex<HashMap<String, KillHandle>>;
+
+/// Construct an empty [`RunningRegistry`] for use with `.manage(...)`.
+pub fn new_running_registry() -> RunningRegistry {
+    Mutex::new(HashMap::new())
+}
+
+// ---------------------------------------------------------------------------
+// Core spawn
+// ---------------------------------------------------------------------------
+
+/// Spawn the JVM described by `argv` (first element = the java binary path),
+/// cwd = `game_dir`, piped stdout+stderr.
+///
+/// Inserts a [`KillHandle`] into `registry` keyed by `slug`.
+/// Returns immediately — a background task owns the child and calls
+/// `LaunchSink::log` / `LaunchSink::exited` and records playtime on exit.
+///
+/// # Arguments
+/// - `slug`        — instance slug (on-disk dir name); used as the registry key.
+/// - `inst_dir`    — per-instance directory (`<instances>/<slug>/`); playtime is
+///                   recorded here on exit via `instances::record_playtime`.
+/// - `game_dir`    — cwd for the child process (`<instances>/<slug>/mc/`).
+/// - `java_path`   — absolute path to the `java`/`java.exe` binary.
+/// - `argv`        — full JVM arguments (NOT including the java binary itself).
+/// - `registry`    — the shared [`RunningRegistry`] (e.g. from Tauri managed state).
+/// - `sink`        — log/exit event sink.
+///
+/// Returns `Err` if the instance is already in the registry (already running) or
+/// if `tokio::process::Command::spawn` fails.
+pub async fn spawn_instance<S: LaunchSink>(
+    slug: String,
+    inst_dir: PathBuf,
+    game_dir: PathBuf,
+    java_path: PathBuf,
+    argv: Vec<String>,
+    registry: Arc<RunningRegistry>,
+    sink: Arc<S>,
+) -> Result<(), String> {
+    use tokio::process::Command;
+
+    // Reject if already running — acquire lock, check, release before any await.
+    {
+        let guard = registry.lock().unwrap();
+        if guard.contains_key(&slug) {
+            return Err(format!("instance '{slug}' is already running"));
+        }
+    }
+
+    // Create the kill channel.
+    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Create game dir if it doesn't exist yet (first launch).
+    fs::create_dir_all(&game_dir)
+        .map_err(|e| format!("failed to create game dir {}: {e}", game_dir.display()))?;
+
+    // Spawn the child process.
+    let mut child = Command::new(&java_path)
+        .args(&argv)
+        .current_dir(&game_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn java: {e}"))?;
+
+    // Take stdout/stderr pipes before moving `child` into the task.
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "failed to capture stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "failed to capture stderr".to_string())?;
+
+    let started = Instant::now();
+
+    // Register before spawning the monitor task.
+    {
+        let mut guard = registry.lock().unwrap();
+        guard.insert(slug.clone(), KillHandle { kill_tx: Some(kill_tx) });
+    }
+
+    // Spawn the monitor task.
+    let registry_clone = Arc::clone(&registry);
+    let sink_clone = Arc::clone(&sink);
+    let slug_clone = slug.clone();
+
+    tokio::spawn(async move {
+        monitor_child(
+            slug_clone,
+            inst_dir,
+            child,
+            stdout,
+            stderr,
+            kill_rx,
+            started,
+            registry_clone,
+            sink_clone,
+        )
+        .await;
+    });
+
+    Ok(())
+}
+
+/// Monitor a running child: stream stdout+stderr, handle natural exit or kill signal,
+/// record playtime on exit, deregister from the registry.
+///
+/// This function is `async` and runs under `tokio::spawn`. It owns the `Child`.
+/// It is the **sole owner of registry removal** — both the natural-exit and the
+/// kill paths call `registry.remove` here, after the child has actually exited.
+async fn monitor_child<S: LaunchSink>(
+    slug: String,
+    inst_dir: PathBuf,
+    mut child: tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    kill_rx: tokio::sync::oneshot::Receiver<()>,
+    started: Instant,
+    registry: Arc<RunningRegistry>,
+    sink: Arc<S>,
+) {
+    use tokio::io::{AsyncBufReadExt, BufReader as AsyncBufReader};
+
+    let mut stdout_reader = AsyncBufReader::new(stdout).lines();
+    let mut stderr_reader = AsyncBufReader::new(stderr).lines();
+
+    // Line-reading tasks: we use separate spawned tasks for each stream so
+    // `select!` below can poll them without blocking on either pipe.
+    //
+    // We can't do `tokio::select!` on two `AsyncBufReadExt::lines()` calls and
+    // `child.wait()` simultaneously in a clean way without moving the readers.
+    // Solution: spawn two line-reader subtasks that send lines into channels;
+    // the monitor selects on `child.wait()` and the kill signal.
+    let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (stderr_tx, mut stderr_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    // Stdout reader subtask.
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = stdout_reader.next_line().await {
+            if stdout_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Stderr reader subtask.
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = stderr_reader.next_line().await {
+            if stderr_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Pin the kill receiver so it can be polled in a loop without moving.
+    tokio::pin!(kill_rx);
+
+    // Drive line draining + child wait + kill signal together.
+    //
+    // We track which channels are open so closed channels don't spin the loop.
+    // When both log channels close, only `child.wait()` and `kill_rx` remain.
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+
+    let exit_status = loop {
+        tokio::select! {
+            // Drain stdout lines — disabled once the channel is closed.
+            line = stdout_rx.recv(), if stdout_open => {
+                match line {
+                    Some(l) => sink.log(&slug, "stdout", &l),
+                    None => stdout_open = false,
+                }
+            }
+
+            // Drain stderr lines — disabled once the channel is closed.
+            line = stderr_rx.recv(), if stderr_open => {
+                match line {
+                    Some(l) => sink.log(&slug, "stderr", &l),
+                    None => stderr_open = false,
+                }
+            }
+
+            // Natural exit.
+            status = child.wait() => {
+                let code = status.ok().and_then(|s| s.code());
+                break code;
+            }
+
+            // Kill signal from kill_instance command.
+            // `&mut kill_rx` polls the pinned receiver without consuming it.
+            _ = &mut kill_rx => {
+                // Signal the child to stop. start_kill() is non-blocking.
+                let _ = child.start_kill();
+                // Wait for the child to actually terminate.
+                let status = child.wait().await.ok().and_then(|s| s.code());
+                break status;
+            }
+        }
+    };
+
+    // Drain any remaining lines in the channels after exit.
+    while let Ok(line) = stdout_rx.try_recv() {
+        sink.log(&slug, "stdout", &line);
+    }
+    while let Ok(line) = stderr_rx.try_recv() {
+        sink.log(&slug, "stderr", &line);
+    }
+
+    // Record playtime.
+    let elapsed_secs = started.elapsed().as_secs();
+    let now = chrono::Utc::now();
+    if let Err(e) = crate::core::instances::record_playtime(&inst_dir, elapsed_secs, now) {
+        // Best-effort — log but don't panic.
+        eprintln!("launch: failed to record playtime for {slug}: {e}");
+    }
+
+    // Deregister — monitor is the sole owner of this removal (both exit paths).
+    {
+        let mut guard = registry.lock().unwrap();
+        guard.remove(&slug);
+    }
+
+    // Emit exit event.
+    sink.exited(&slug, exit_status);
+}
+
+/// Send a kill signal to a running instance.
+///
+/// Fires the kill oneshot without removing the registry entry. The monitor task
+/// is the sole owner of registry removal — it deregisters after the child has
+/// actually exited (eliminating the TOCTOU window).
+///
+/// Returns `Ok(())` if the signal was sent. Returns `Err` if the instance is not
+/// in the registry or if the kill signal was already sent.
+pub fn kill_instance(registry: &RunningRegistry, slug: &str) -> Result<(), String> {
+    // Take the sender out of the Option while leaving the entry in the map.
+    // The lock is released before any signal is sent (no await here anyway, but
+    // honoring the "never hold lock across await" invariant as a style rule).
+    let kill_tx = {
+        let mut guard = registry.lock().unwrap();
+        match guard.get_mut(slug) {
+            Some(handle) => handle.kill_tx.take(),
+            None => return Err(format!("instance '{slug}' is not running")),
+        }
+    };
+
+    match kill_tx {
+        Some(tx) => {
+            // Receiver dropped = child already gone; silently ignore.
+            let _ = tx.send(());
+            Ok(())
+        }
+        // kill_tx already taken — kill was already sent; treat as success.
+        None => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -368,6 +711,7 @@ fn normalize_path_launch(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
 
     fn make_meta(
         version_type: &str,
@@ -858,5 +1202,286 @@ mod tests {
             !escape_target.exists(),
             "malicious file must not exist outside natives_dir"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CP3 — playtime accounting (unit, no JVM)
+    // -----------------------------------------------------------------------
+
+    /// Helper: write a minimal instance.json into a TempDir and return the dir.
+    fn make_instance_dir(tmp: &tempfile::TempDir, initial_playtime: u64) -> std::path::PathBuf {
+        use crate::core::instances::{Instance, JavaCfg, Loader, SCHEMA_VERSION};
+        use std::io::Write as _;
+
+        let inst = Instance {
+            schema: SCHEMA_VERSION,
+            id: "test-id-1234".to_string(),
+            name: "Test Instance".to_string(),
+            slug: "test-instance".to_string(),
+            icon: None,
+            minecraft: "1.21.1".to_string(),
+            loader: Loader {
+                kind: "vanilla".to_string(),
+                version: None,
+            },
+            java: JavaCfg {
+                major: None,
+                args_override: None,
+                memory_mb: 2048,
+            },
+            source: None,
+            mods: vec![],
+            created: "2024-01-01T00:00:00+00:00".to_string(),
+            last_played: None,
+            total_playtime_sec: initial_playtime,
+        };
+
+        let json = serde_json::to_string_pretty(&inst).unwrap();
+        let path = tmp.path().join("instance.json");
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+        tmp.path().to_path_buf()
+    }
+
+    #[test]
+    fn playtime_record_increments_and_sets_last_played() {
+        use crate::core::instances::{record_playtime, read_manifest_pub};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let inst_dir = make_instance_dir(&tmp, 100);
+
+        let fake_now = chrono::TimeZone::timestamp_opt(&chrono::Utc, 1_700_000_000, 0).unwrap();
+        let elapsed = 3661u64; // 1h 1m 1s
+
+        record_playtime(&inst_dir, elapsed, fake_now).expect("record_playtime failed");
+
+        let inst = read_manifest_pub(&inst_dir.join("instance.json"))
+            .expect("manifest must be readable after record");
+
+        assert_eq!(
+            inst.total_playtime_sec,
+            100 + 3661,
+            "total_playtime_sec must have incremented"
+        );
+        assert_eq!(
+            inst.last_played.as_deref(),
+            Some("2023-11-14T22:13:20+00:00"),
+            "last_played must be set to the injected now"
+        );
+    }
+
+    #[test]
+    fn playtime_record_accumulates_across_calls() {
+        use crate::core::instances::{record_playtime, read_manifest_pub};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let inst_dir = make_instance_dir(&tmp, 0);
+        let fake_now = chrono::TimeZone::timestamp_opt(&chrono::Utc, 1_700_000_000, 0).unwrap();
+
+        record_playtime(&inst_dir, 60, fake_now).unwrap();
+        record_playtime(&inst_dir, 120, fake_now).unwrap();
+
+        let inst = read_manifest_pub(&inst_dir.join("instance.json")).unwrap();
+        assert_eq!(inst.total_playtime_sec, 180, "two calls must accumulate");
+    }
+
+    // -----------------------------------------------------------------------
+    // CP3 — spawn/monitor smoke (no real JVM, trivial process)
+    // -----------------------------------------------------------------------
+
+    /// Run the full spawn_instance → monitor → playtime cycle with a trivial process.
+    /// On Windows (the actual test host) we use `cmd /c echo hello && cmd /c exit 0`.
+    /// On Unix we use `sh -c "echo hello"`.
+    #[tokio::test]
+    async fn spawn_monitor_smoke_process_exits_playtime_recorded_registry_cleared() {
+        use crate::core::instances::read_manifest_pub;
+        use std::sync::Arc;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let inst_dir = make_instance_dir(&tmp, 0);
+
+        // game_dir must exist (spawn_instance creates it, but create here to be safe).
+        let game_dir = tmp.path().join("mc");
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let sink = Arc::new(CapturingLaunchSink::new());
+        let registry = Arc::new(new_running_registry());
+
+        // Choose a trivial cross-platform process.
+        #[cfg(windows)]
+        let (java_path, argv) = {
+            let java = PathBuf::from("cmd.exe");
+            let args = vec!["/c".to_string(), "echo hello".to_string()];
+            (java, args)
+        };
+        #[cfg(not(windows))]
+        let (java_path, argv) = {
+            let java = PathBuf::from("sh");
+            let args = vec!["-c".to_string(), "echo hello".to_string()];
+            (java, args)
+        };
+
+        let slug = "smoke-test-instance".to_string();
+
+        spawn_instance(
+            slug.clone(),
+            inst_dir.clone(),
+            game_dir,
+            java_path,
+            argv,
+            Arc::clone(&registry),
+            Arc::clone(&sink),
+        )
+        .await
+        .expect("spawn must succeed");
+
+        // Registry must contain the instance immediately after spawn.
+        assert!(
+            registry.lock().unwrap().contains_key(&slug),
+            "registry must have entry after spawn"
+        );
+
+        // Wait for the process to exit — poll with a timeout.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            if !registry.lock().unwrap().contains_key(&slug) {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("process did not exit within 10s");
+            }
+        }
+
+        // Registry cleared.
+        assert!(
+            !registry.lock().unwrap().contains_key(&slug),
+            "registry must be cleared after process exits"
+        );
+
+        // Sink received at least one line containing "hello".
+        let lines = sink.lines.lock().unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|(_, _, line)| line.to_lowercase().contains("hello")),
+            "sink must have received a line containing 'hello': {lines:?}"
+        );
+
+        // Exit code received.
+        let exits = sink.exit_codes.lock().unwrap();
+        assert_eq!(exits.len(), 1, "exactly one exit event");
+
+        // Playtime persisted.
+        let inst = read_manifest_pub(&inst_dir.join("instance.json"))
+            .expect("manifest must be readable after smoke");
+        assert!(
+            inst.last_played.is_some(),
+            "last_played must be set after process exits"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CP3 — already-running rejection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn kill_instance_not_running_returns_err() {
+        let registry = new_running_registry();
+        let result = kill_instance(&registry, "not-running-id");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not running"));
+    }
+
+    /// Assert that after `kill_instance` fires, the registry entry is still
+    /// present (the monitor owns removal), and that playtime is recorded and
+    /// the entry is gone only after the child actually exits.
+    ///
+    /// Uses a long-running `sleep` process so we can fire the kill before exit.
+    #[tokio::test]
+    async fn kill_leaves_entry_until_monitor_removes_it() {
+        use crate::core::instances::read_manifest_pub;
+        use std::sync::Arc;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let inst_dir = make_instance_dir(&tmp, 0);
+        let game_dir = tmp.path().join("mc");
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let sink = Arc::new(CapturingLaunchSink::new());
+        let registry = Arc::new(new_running_registry());
+
+        // A process that sleeps long enough we can kill it mid-run.
+        #[cfg(windows)]
+        let (java_path, argv) = {
+            let java = PathBuf::from("cmd.exe");
+            let args = vec!["/c".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()];
+            (java, args)
+        };
+        #[cfg(not(windows))]
+        let (java_path, argv) = {
+            let java = PathBuf::from("sh");
+            let args = vec!["-c".to_string(), "sleep 30".to_string()];
+            (java, args)
+        };
+
+        let slug = "kill-test-instance".to_string();
+
+        spawn_instance(
+            slug.clone(),
+            inst_dir.clone(),
+            game_dir,
+            java_path,
+            argv,
+            Arc::clone(&registry),
+            Arc::clone(&sink),
+        )
+        .await
+        .expect("spawn must succeed");
+
+        // Entry must be in registry right after spawn.
+        assert!(
+            registry.lock().unwrap().contains_key(&slug),
+            "registry must have entry after spawn"
+        );
+
+        // Fire the kill signal — must NOT remove the entry immediately.
+        kill_instance(&registry, &slug).expect("kill must succeed while running");
+
+        // Entry must STILL be present right after kill (monitor hasn't exited yet).
+        assert!(
+            registry.lock().unwrap().contains_key(&slug),
+            "registry entry must persist immediately after kill (monitor owns removal)"
+        );
+
+        // Wait for the monitor to remove the entry (child terminates after kill).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            if !registry.lock().unwrap().contains_key(&slug) {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("registry entry was not removed within 10s after kill");
+            }
+        }
+
+        // Entry gone — monitor removed it after child exited.
+        assert!(
+            !registry.lock().unwrap().contains_key(&slug),
+            "registry must be cleared after monitor confirms exit"
+        );
+
+        // Playtime must have been recorded on the kill path.
+        let inst = read_manifest_pub(&inst_dir.join("instance.json"))
+            .expect("manifest must be readable after kill");
+        assert!(
+            inst.last_played.is_some(),
+            "last_played must be set after kill path"
+        );
+
+        // Exit event emitted.
+        let exits = sink.exit_codes.lock().unwrap();
+        assert_eq!(exits.len(), 1, "exactly one exit event after kill");
     }
 }

@@ -192,11 +192,41 @@ pub fn delete(app: &AppHandle, slug: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Playtime accounting
+// ---------------------------------------------------------------------------
+
+/// Increment `total_playtime_sec` by `elapsed_secs` and set `last_played` to
+/// `now` (ISO-8601), then persist the instance manifest.
+///
+/// Both `elapsed_secs` and `now` are injectable so unit tests exercise the
+/// accounting logic with a fake clock — no real JVM required.
+///
+/// `inst_dir` is the per-instance directory (e.g. `<instances>/<slug>/`).
+pub fn record_playtime(
+    inst_dir: &Path,
+    elapsed_secs: u64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    let manifest_path = inst_dir.join("instance.json");
+    let mut inst = read_manifest(&manifest_path)?;
+    inst.total_playtime_sec += elapsed_secs;
+    inst.last_played = Some(now.to_rfc3339());
+    write_manifest(&manifest_path, &inst)
+}
+
 // --- helpers ---------------------------------------------------------------
 
 fn read_manifest(path: &Path) -> Result<Instance, String> {
     let raw = fs::read_to_string(path).map_err(|e| e.to_string())?;
     serde_json::from_str(&raw).map_err(|e| format!("malformed instance.json: {e}"))
+}
+
+/// Public version of `read_manifest`, exposed for tests in sibling modules
+/// that need to inspect the manifest after playtime recording.
+#[cfg(test)]
+pub fn read_manifest_pub(path: &Path) -> Result<Instance, String> {
+    read_manifest(path)
 }
 
 fn write_manifest(path: &Path, inst: &Instance) -> Result<(), String> {

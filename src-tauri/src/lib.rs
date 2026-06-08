@@ -1,9 +1,11 @@
 use serde::Serialize;
+use std::sync::Arc;
 
 mod core;
-use core::download::{self, DownloadPlan, PlanResult, ProgressSink, ProgressUpdate};
+use core::download::{self, DownloadPlan, ItemOutcome, ItemStatus, PlanResult, ProgressSink, ProgressUpdate};
 use core::instances::{self, CreateInstanceReq, Instance, InstanceDetail};
 use core::java::JavaInstallation;
+use core::launch::{self, LaunchSink, RunningRegistry};
 use core::loaders::{self, LoaderOption};
 use core::resolver::{self, ResolveResult};
 use core::settings::{self, Settings};
@@ -171,6 +173,171 @@ async fn ensure_java(app: tauri::AppHandle, major: u32) -> Result<JavaInstallati
     core::java::ensure_java(&app, major).await
 }
 
+// --- Phase 2, slice D: vanilla launch. ---
+
+/// Payload emitted on the `launch://log` Tauri event channel.
+///
+/// Mirrors the `CapturingLaunchSink` line tuple with serde rename so the
+/// TypeScript side receives camelCase field names.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchLogPayload {
+    instance_id: String,
+    /// `"stdout"` or `"stderr"`.
+    stream: String,
+    line: String,
+}
+
+/// Payload emitted on the `launch://exit` Tauri event channel.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchExitPayload {
+    instance_id: String,
+    /// Process exit code; `null` if the code could not be determined.
+    code: Option<i32>,
+}
+
+/// A [`LaunchSink`] that emits `launch://log` and `launch://exit` events on the
+/// Tauri event channel.
+struct TauriLaunchSink {
+    app: tauri::AppHandle,
+}
+
+impl LaunchSink for TauriLaunchSink {
+    fn log(&self, instance_id: &str, stream: &str, line: &str) {
+        use tauri::Emitter as _;
+        let payload = LaunchLogPayload {
+            instance_id: instance_id.to_owned(),
+            stream: stream.to_owned(),
+            line: line.to_owned(),
+        };
+        let _ = self.app.emit("launch://log", payload);
+    }
+
+    fn exited(&self, instance_id: &str, code: Option<i32>) {
+        use tauri::Emitter as _;
+        let payload = LaunchExitPayload {
+            instance_id: instance_id.to_owned(),
+            code,
+        };
+        let _ = self.app.emit("launch://exit", payload);
+    }
+}
+
+/// Launch a vanilla Minecraft instance.
+///
+/// Orchestrates: load instance → resolve → download → ensure Java →
+/// extract natives → build argv → spawn JVM.
+///
+/// Returns promptly; the child runs under a background `tokio::spawn` task that
+/// streams stdout+stderr as `launch://log` events and records playtime on exit.
+///
+/// The registry is managed as `Arc<RunningRegistry>` so the monitor task (which
+/// runs under `tokio::spawn` and outlives this command's stack frame) can hold a
+/// clone of the Arc and still access the shared map.
+#[tauri::command]
+async fn launch_instance(
+    app: tauri::AppHandle,
+    registry_state: tauri::State<'_, Arc<RunningRegistry>>,
+    slug: String,
+) -> Result<(), String> {
+    use core::download::NoOpSink;
+
+    // --- 1. Load instance manifest. ---
+    let inst_detail = instances::get(&app, &slug).map_err(|e| {
+        format!("failed to load instance '{slug}': {e}")
+    })?;
+    let inst = inst_detail.instance;
+
+    // --- 2. Reject if already running (keyed by slug; check before any async work). ---
+    {
+        let guard = registry_state.lock().unwrap();
+        if guard.contains_key(&inst.slug) {
+            return Err(format!("instance '{}' is already running", inst.slug));
+        }
+    }
+
+    // --- 3. Resolve: manifest → DownloadPlan + LaunchMeta. ---
+    let spec = resolver::fetch_version_spec(&app, &inst.minecraft).await?;
+    let asset_data = resolver::fetch_asset_index(&app, &spec.asset_index).await?;
+    let data_dir = core::store::data_dir(&app)?;
+    let target_os = resolver::host_os_name();
+    let (plan, launch_meta) = resolver::assemble(&spec, &asset_data, target_os, &data_dir);
+
+    // --- 4. Download: execute the plan; inspect outcomes before proceeding. ---
+    let client = download::build_client().map_err(|e| e.to_string())?;
+    let plan_result = download::execute_plan(&client, &plan, &NoOpSink, 8).await;
+
+    // Collect failures. The engine never aborts early — all items run — so we
+    // must inspect outcomes here and abort before spawning a doomed JVM.
+    let failures: Vec<&ItemOutcome> = plan_result
+        .outcomes
+        .iter()
+        .filter(|o| matches!(o.status, ItemStatus::Failed { .. }))
+        .collect();
+
+    if !failures.is_empty() {
+        let first = &failures[0];
+        return Err(format!(
+            "{} download(s) failed; cannot launch. First failure: {}",
+            failures.len(),
+            first.url,
+        ));
+    }
+
+    // --- 5. Ensure Java. ---
+    let java_inst = core::java::ensure_java(&app, launch_meta.java_major).await?;
+
+    // --- 6. Resolve paths. ---
+    let instances_dir = core::store::instances_dir(&app)?;
+    let paths = launch::LaunchPaths::new(&data_dir, &instances_dir, &inst.slug);
+
+    // --- 7. Extract natives. ---
+    launch::extract_natives(&launch_meta.natives, &paths.natives_directory)?;
+
+    // --- 8. Build argv. ---
+    let argv = launch::build_argv(&launch_meta, &paths)
+        .map_err(|e| format!("argv assembly failed: {e}"))?;
+
+    // --- 9. Spawn (registry keyed by slug). ---
+    let inst_dir = instances_dir.join(&inst.slug);
+    let game_dir = paths.game_directory.clone();
+    let java_path = java_inst.path.clone();
+
+    // Clone the Arc so the monitor task owns its own reference.
+    // State<Arc<…>> auto-derefs to Arc<…>, so &*registry_state is &Arc<…>.
+    let registry_arc = Arc::clone(&*registry_state);
+    let sink = Arc::new(TauriLaunchSink { app: app.clone() });
+
+    launch::spawn_instance(
+        inst.slug.clone(),
+        inst_dir,
+        game_dir,
+        java_path,
+        argv,
+        registry_arc,
+        sink,
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Stop (kill) a running Minecraft instance.
+///
+/// Fires the kill signal to the child process. The monitor task will then
+/// record playtime and deregister the instance after the child actually exits.
+///
+/// Returns `Ok` if the signal was sent, `Err` if the instance is not running.
+#[tauri::command]
+fn kill_instance(
+    registry_state: tauri::State<'_, Arc<RunningRegistry>>,
+    slug: String,
+) -> Result<(), String> {
+    // registry_state is State<Arc<Mutex<…>>>; deref State then Arc to get &Mutex<…>.
+    launch::kill_instance(&**registry_state, &slug)
+}
+
 // --- Version & loader metadata (Mojang / Forge / Fabric / Quilt / NeoForge). ---
 
 #[tauri::command]
@@ -185,8 +352,14 @@ async fn get_loaders(app: tauri::AppHandle, minecraft: String) -> Result<Vec<Loa
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The running instance registry is the first managed state in this app.
+    // Managed as Arc<RunningRegistry> so the monitor background tasks can clone
+    // the Arc and still access the shared map after the command returns.
+    let registry: Arc<RunningRegistry> = Arc::new(launch::new_running_registry());
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(registry)
         .invoke_handler(tauri::generate_handler![
             app_info,
             list_instances,
@@ -200,7 +373,9 @@ pub fn run() {
             get_loaders,
             execute_download_plan,
             resolve_vanilla,
-            ensure_java
+            ensure_java,
+            launch_instance,
+            kill_instance
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
