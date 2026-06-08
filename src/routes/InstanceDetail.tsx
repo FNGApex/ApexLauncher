@@ -35,6 +35,7 @@ export function InstanceDetail() {
   useEffect(() => {
     if (!slug) return;
 
+    let cancelled = false;
     let unlistenLog: (() => void) | undefined;
     let unlistenExit: (() => void) | undefined;
 
@@ -44,7 +45,10 @@ export function InstanceDetail() {
         const next = [...prev, `[${event.payload.stream}] ${event.payload.line}`];
         return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next;
       });
-    }).then((fn) => { unlistenLog = fn; });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenLog = fn;
+    }).catch(console.error);
 
     listen<LaunchExitPayload>(LAUNCH_EXIT_EVENT, (event) => {
       if (event.payload.instanceId !== slug) return;
@@ -54,9 +58,13 @@ export function InstanceDetail() {
         ...prev,
         `[launcher] process exited (code ${code ?? "unknown"})`,
       ]);
-    }).then((fn) => { unlistenExit = fn; });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenExit = fn;
+    }).catch(console.error);
 
     return () => {
+      cancelled = true;
       unlistenLog?.();
       unlistenExit?.();
     };
