@@ -210,3 +210,5 @@ Final: 129 Rust tests pass (Windows toolchain); `npm run build` green.
 **Manual verification still pending:** launch-to-main-menu with a real MC version + JRE + display
 is not automated (deterministic parts unit-tested; CP3 smoke uses a trivial process). See project
 memory `windows-launch-test-pending` for the GUI/launch verification path (WSLg vs native Windows).
+
+**Merged into main as 4b0bdcf — 2026-06-08.**
