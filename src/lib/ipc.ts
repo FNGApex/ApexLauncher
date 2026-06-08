@@ -225,6 +225,8 @@ export function executeDownloadPlan(
  */
 export interface LaunchMeta {
   versionId: string;
+  /** The Mojang manifest `type` field: `"release"`, `"snapshot"`, etc. */
+  versionType: string;
   mainClass: string;
   /** JVM arg templates (OS-filtered modern entries). Empty for legacy manifests. */
   jvmArgs: string[];

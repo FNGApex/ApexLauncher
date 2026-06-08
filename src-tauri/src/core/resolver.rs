@@ -170,6 +170,10 @@ pub struct Library {
 #[serde(rename_all = "camelCase")]
 pub struct VersionSpec {
     pub id: String,
+    /// The version type as reported by Mojang: `"release"`, `"snapshot"`, etc.
+    /// Absent on very old manifests; defaults to `"release"`.
+    #[serde(rename = "type", default = "default_version_type")]
+    pub version_type: String,
     pub main_class: String,
     pub downloads: ManifestDownloads,
     pub asset_index: AssetIndex,
@@ -191,6 +195,10 @@ pub struct VersionSpec {
     /// Absent on older manifests and some modern ones — treated as optional.
     #[serde(default)]
     pub logging: Option<Logging>,
+}
+
+fn default_version_type() -> String {
+    "release".to_string()
 }
 
 impl VersionSpec {
@@ -499,6 +507,9 @@ pub(crate) struct Logging {
 #[serde(rename_all = "camelCase")]
 pub struct LaunchMeta {
     pub version_id: String,
+    /// The version type from the Mojang manifest: `"release"`, `"snapshot"`, etc.
+    /// Substituted into `${version_type}` by the argv assembler.
+    pub version_type: String,
     pub main_class: String,
     /// JVM argument templates (modern `arguments.jvm` entries, OS-filtered).
     /// Empty for legacy manifests — slice D provides defaults.
@@ -679,6 +690,7 @@ pub fn assemble(
 
     let launch = LaunchMeta {
         version_id: spec.id.clone(),
+        version_type: spec.version_type.clone(),
         main_class: spec.main_class.clone(),
         jvm_args,
         game_args,
@@ -1254,6 +1266,7 @@ mod tests {
         assert_eq!(launch.asset_index_id, "17");
         assert!(!launch.assets_legacy);
         assert_eq!(launch.version_id, "1.21.1");
+        assert_eq!(launch.version_type, "release");
 
         // Classpath contains client jar path.
         let client_jar = base
