@@ -11,12 +11,14 @@
 //! - `resolver`  — vanilla manifest fetch + parse, DownloadPlan + LaunchMeta (Phase 2 slice B).
 //! - `java`      — system JRE detection + Adoptium provisioning (Phase 2 slice C).
 //! - `auth`      — Microsoft OAuth 2.0 device-code authentication + token chain (Phase 3).
+//! - `loader_profile` — Fabric/Quilt loader profile fetch + parse (Phase 4 slice A).
 
 pub mod auth;
 pub mod download;
 pub mod instances;
 pub mod java;
 pub mod launch;
+pub mod loader_profile;
 pub mod loaders;
 pub mod meta;
 pub mod resolver;
