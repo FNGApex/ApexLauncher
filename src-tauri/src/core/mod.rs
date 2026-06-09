@@ -10,7 +10,9 @@
 //! - `download`  — concurrent, hash-verified download engine (Phase 2).
 //! - `resolver`  — vanilla manifest fetch + parse, DownloadPlan + LaunchMeta (Phase 2 slice B).
 //! - `java`      — system JRE detection + Adoptium provisioning (Phase 2 slice C).
+//! - `auth`      — Microsoft OAuth 2.0 device-code authentication + token chain (Phase 3).
 
+pub mod auth;
 pub mod download;
 pub mod instances;
 pub mod java;
