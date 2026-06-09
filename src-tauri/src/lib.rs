@@ -206,6 +206,15 @@ async fn list_accounts(
     Ok(guard.list_accounts().to_vec())
 }
 
+/// The id of the active account, if one is set. `None` when no account is active.
+#[tauri::command]
+async fn get_active_account_id(
+    store_state: tauri::State<'_, SharedAccountStore>,
+) -> Result<Option<String>, AuthCommandError> {
+    let guard = store_state.lock().await;
+    Ok(guard.active_account_id().map(str::to_owned))
+}
+
 /// Remove an account by id.
 #[tauri::command]
 async fn remove_account(
@@ -635,6 +644,7 @@ pub fn run() {
             begin_login,
             cancel_login,
             list_accounts,
+            get_active_account_id,
             remove_account,
             set_active_account
         ])

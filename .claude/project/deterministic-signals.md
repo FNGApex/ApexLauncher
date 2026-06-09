@@ -1,6 +1,6 @@
 ---
-generated_at: 2026-06-09T20:56:26Z
-atomic_version: 3.1.1
+generated_at: 2026-06-09T06:51:45Z
+atomic_version: 3.0.1
 ---
 # Deterministic signals
 
@@ -86,6 +86,7 @@ atomic_version: 3.1.1
 ├── CLAUDE.md (e8a1fc6, 107L, 4184ch, 4281B)
 ├── README.md (dcc56cc, 47L, 1960ch, 1985B)
 ├── index.html (d20d275, 13L, 297ch, 297B)
+├── options.txt (3f03d06, 596L, 29667ch, 29667B)
 ├── package-lock.json (a13ba32, 2893L, 94356ch, 94356B)
 ├── package.json (9c61eaf, 34L, 817ch, 817B)
 ├── tsconfig.json (4195971, 27L, 660ch, 660B)

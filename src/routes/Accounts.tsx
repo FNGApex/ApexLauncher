@@ -4,6 +4,7 @@ import { Check, Loader2, LogIn, Star, Trash2, UserPlus, X } from "lucide-react";
 import {
   beginLogin,
   cancelLogin,
+  getActiveAccountId,
   listAccounts,
   listenDeviceCode,
   removeAccount,
@@ -20,9 +21,14 @@ export function Accounts() {
     queryFn: listAccounts,
   });
 
-  // The active account id is not returned by listAccounts — track locally.
-  // Seeded from setActiveAccount calls and from beginLogin (new account is always active).
-  const [activeId, setActiveId] = useState<string | null>(null);
+  // The active account id is its own query so the indicator is correct on mount,
+  // not just after the user interacts. Mutations update it via setQueryData.
+  const { data: activeId } = useQuery({
+    queryKey: ["activeAccount"],
+    queryFn: getActiveAccountId,
+  });
+  const setActiveId = (id: string | null) =>
+    qc.setQueryData(["activeAccount"], id);
 
   // Device-code flow state.
   const [loginState, setLoginState] = useState<"idle" | "pending" | "polling">("idle");
@@ -293,11 +299,11 @@ function AccountRow({
 
 /** Extract a human-readable message from a Tauri command error. */
 function extractMessage(err: unknown): string {
-  if (err && typeof err === "object") {
-    const e = err as Record<string, unknown>;
-    if (typeof e.message === "string") return e.message;
-    if (typeof e.kind === "string" && typeof e.message === "string") {
-      return `[${e.kind}] ${e.message}`;
+  if (err && typeof err === "object" && "message" in err) {
+    const { message } = err;
+    if (typeof message === "string") {
+      const kind = "kind" in err ? err.kind : undefined;
+      return typeof kind === "string" ? `[${kind}] ${message}` : message;
     }
   }
   return String(err);
