@@ -17,9 +17,9 @@
 // MultiMC, and other open-source MC launchers).
 pub const MS_CLIENT_ID: &str = "00000000402b5328";
 
-const MS_DEVICE_CODE_URL: &str =
+pub const MS_DEVICE_CODE_URL: &str =
     "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
-const MS_TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+pub const MS_TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 
 const XBL_AUTH_URL: &str = "https://user.auth.xboxlive.com/user/authenticate";
 const XSTS_AUTH_URL: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
@@ -189,6 +189,10 @@ pub enum AuthError {
     /// Account store I/O or parse failure (reading/writing `accounts.json`).
     #[error("account store error: {0}")]
     Store(String),
+
+    /// Unexpected internal condition (not a user-facing error).
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 // ── Injectable HTTP client seam ───────────────────────────────────────────────
@@ -319,9 +323,12 @@ pub async fn poll_token_once(
         )
         .await?;
 
-    // MS token endpoint uses 400 for pending/error states — parse the body for
-    // the error field regardless of status.
-    let _ = status; // body contains discriminating info; status alone doesn't distinguish error subtypes
+    // MS token endpoint uses 400 for pending/error states (authorization_pending,
+    // expired_token, access_denied, etc.) — parse the body for the error field.
+    // Any other non-200 status is unexpected and returned as HttpStatus.
+    if status != 200 && status != 400 {
+        return Err(AuthError::HttpStatus { status, body });
+    }
     parse_poll_response(&body)
 }
 
@@ -689,6 +696,19 @@ impl AccountStore {
         Ok(AccountStore { path, keyring, state })
     }
 
+    /// Construct an in-memory-only empty store (no file I/O).
+    ///
+    /// Used when `load` fails (e.g. corrupt `accounts.json`) to start the app
+    /// with an empty account list rather than panicking. The path is kept so that
+    /// any future writes go to the correct location.
+    pub fn new_empty(path: std::path::PathBuf, keyring: Box<dyn KeyringBackend>) -> Self {
+        AccountStore {
+            path,
+            keyring,
+            state: PersistedStore::default(),
+        }
+    }
+
     /// Persist the current state to `accounts.json`.
     fn save(&self) -> Result<(), AuthError> {
         let json = serde_json::to_string_pretty(&self.state)
@@ -717,13 +737,22 @@ impl AccountStore {
 
     /// Remove the account with `id`. Deletes the keyring secret too.
     /// If this was the active account, clears `active_account_id`.
+    ///
+    /// Ordering (F-10 fix): keyring delete happens first. If it fails, state and
+    /// disk are left unchanged — no desync. Only after a successful keyring delete
+    /// are the in-memory state and disk updated.
     pub fn remove_account(&mut self, id: &str) -> Result<(), AuthError> {
+        // Step 1: delete the keyring secret first. Not-found is fine.
+        // If this fails, we stop here — state and disk are not mutated.
+        self.keyring.delete_secret(id)?;
+
+        // Step 2: mutate in-memory state only after the keyring step succeeded.
         self.state.accounts.retain(|a| a.id != id);
         if self.state.active_account_id.as_deref() == Some(id) {
             self.state.active_account_id = None;
         }
-        // Delete keyring secret; not-found is fine.
-        self.keyring.delete_secret(id)?;
+
+        // Step 3: persist.
         self.save()
     }
 
@@ -1014,6 +1043,34 @@ mod tests {
             matches!(err, AuthError::AuthorizationDeclined),
             "expected AuthorizationDeclined for access_denied, got: {err}"
         );
+    }
+
+    // ── F-7: poll_token_once non-200/400 guard ────────────────────────────────
+
+    /// Any status that is not 200 or 400 must return HttpStatus error without
+    /// attempting to parse the body as a poll response.
+    #[tokio::test]
+    async fn f7_poll_non_200_non_400_returns_http_status_error() {
+        let client = MockAuthClient::new(vec![MockResp::status(503, "Service Unavailable")]);
+        let err = poll_token_once(&client, "http://unused", "dc_abc123")
+            .await
+            .expect_err("503 must be Err");
+        assert!(
+            matches!(err, AuthError::HttpStatus { status: 503, .. }),
+            "expected HttpStatus(503), got: {err}"
+        );
+    }
+
+    /// Status 400 still goes through parse_poll_response (MS uses 400 for
+    /// error states like expired_token / authorization_declined).
+    #[tokio::test]
+    async fn f7_poll_status_400_still_parsed_as_poll_response() {
+        // MS returns 400 with authorization_pending — should yield None (pending).
+        let client = MockAuthClient::new(vec![MockResp::status(400, pending_json())]);
+        let result = poll_token_once(&client, "http://unused", "dc_abc123")
+            .await
+            .expect("400 with pending body must not be Err");
+        assert!(result.is_none(), "400 authorization_pending must yield None");
     }
 
     // ── CP1 tests: refresh_ms_token ───────────────────────────────────────────
@@ -1609,5 +1666,128 @@ mod tests {
         let accounts = store.list_accounts();
         assert_eq!(accounts.len(), 1, "duplicate add must not create a second entry");
         assert_eq!(accounts[0].username, "Steve_Updated");
+    }
+
+    // ── Test: F-10 — remove_account keyring failure leaves state intact ───────
+    //
+    // A keyring backend that stores successfully but fails on delete.
+    // Simulates the failure case that caused the F-10 ordering bug.
+
+    struct StoreOkDeleteFailKeyring {
+        store: StdMutex<HashMap<String, String>>,
+    }
+
+    impl StoreOkDeleteFailKeyring {
+        fn new() -> Self {
+            StoreOkDeleteFailKeyring {
+                store: StdMutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl KeyringBackend for StoreOkDeleteFailKeyring {
+        fn store_secret(&self, account_id: &str, secret: &str) -> Result<(), AuthError> {
+            self.store
+                .lock()
+                .unwrap()
+                .insert(account_id.to_owned(), secret.to_owned());
+            Ok(())
+        }
+
+        fn load_secret(&self, account_id: &str) -> Result<String, AuthError> {
+            self.store
+                .lock()
+                .unwrap()
+                .get(account_id)
+                .cloned()
+                .ok_or_else(|| AuthError::Keyring(format!("no secret for {account_id}")))
+        }
+
+        fn delete_secret(&self, _id: &str) -> Result<(), AuthError> {
+            Err(AuthError::Keyring("keyring delete failed".to_owned()))
+        }
+    }
+
+    #[test]
+    fn cp4_f10_remove_account_keyring_failure_leaves_state_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("accounts.json");
+        let mut store =
+            AccountStore::load(path.clone(), Box::new(StoreOkDeleteFailKeyring::new()))
+                .expect("load");
+
+        store
+            .add_account(make_meta("acc-1", "Steve"), "refresh_abc")
+            .expect("add_account must succeed with StoreOk backend");
+
+        // Attempt remove — keyring delete fails.
+        let err = store
+            .remove_account("acc-1")
+            .expect_err("remove_account must fail when keyring delete fails");
+
+        assert!(
+            matches!(err, AuthError::Keyring(_)),
+            "expected Keyring error, got: {err}"
+        );
+
+        // State must be unchanged — account still present in memory.
+        assert_eq!(
+            store.list_accounts().len(),
+            1,
+            "account must still be in-memory after failed remove"
+        );
+
+        // Disk must also be unchanged — reload and verify.
+        let store2 =
+            AccountStore::load(path, Box::new(StoreOkDeleteFailKeyring::new()))
+                .expect("reload");
+        assert_eq!(
+            store2.list_accounts().len(),
+            1,
+            "account must still be on disk after failed remove"
+        );
+    }
+
+    // ── CP4 tests: refresh-at-launch (mock HTTP, no live TCP) ─────────────────
+    //
+    // Simulates the launch-time path: stored refresh token + expired MC token
+    // → refresh_ms_token → xbox_chain → Account with fresh MC token.
+    // No live HTTP. No real keyring.
+
+    #[tokio::test]
+    async fn cp4_refresh_at_launch_derives_fresh_mc_token() {
+        // Refresh token exchange: MS returns new access+refresh tokens.
+        // Then the full xbox_chain: XBL, XSTS, MC token, MC profile.
+        let client = MockAuthClient::new(vec![
+            // 1. refresh_ms_token call → new MS tokens
+            MockResp::ok(success_token_json()),
+            // 2. xbox_chain: XBL
+            MockResp::ok(xbl_response_json()),
+            // 3. xbox_chain: XSTS
+            MockResp::ok(xsts_response_json()),
+            // 4. xbox_chain: MC token
+            MockResp::ok(mc_token_json()),
+            // 5. xbox_chain: MC profile
+            MockResp::ok(mc_profile_json()),
+        ]);
+
+        // Step 1: refresh MS token.
+        let ms_tokens = refresh_ms_token(&client, "http://unused", "stored_refresh_token")
+            .await
+            .expect("refresh must succeed");
+
+        assert_eq!(ms_tokens.access_token, "ms_access_xyz");
+
+        // Step 2: run xbox_chain with the fresh MS tokens.
+        let account = xbox_chain(&client, ms_tokens)
+            .await
+            .expect("xbox_chain must succeed after refresh");
+
+        // The resulting account has a fresh MC access token — not the expired one.
+        assert_eq!(account.mc_access_token, "mc_token_xyz");
+        assert_eq!(account.username, "Steve");
+        assert_eq!(account.id, "aaaabbbbccccdddd");
+        assert_eq!(account.xuid, "xbox_user_id_1234");
+        // Confirm this path requires no device-code prompt (no device-code response in queue).
     }
 }

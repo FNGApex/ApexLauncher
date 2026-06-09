@@ -29,6 +29,11 @@ pub struct Settings {
     /// except to display/edit here. `None` until the user sets one.
     #[serde(default)]
     pub curseforge_api_key: Option<String>,
+    /// When true, always use the offline identity at launch regardless of whether
+    /// an active account is set. Default: false (use real account when available).
+    /// Preserves existing offline behavior for users with no account configured.
+    #[serde(default = "default_offline_mode")]
+    pub offline_mode: bool,
 }
 
 fn default_schema() -> u32 {
@@ -40,6 +45,9 @@ fn default_memory() -> u32 {
 fn default_java_args() -> String {
     "-XX:+UseG1GC".to_string()
 }
+fn default_offline_mode() -> bool {
+    false
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -48,6 +56,7 @@ impl Default for Settings {
             default_memory_mb: default_memory(),
             default_java_args: default_java_args(),
             curseforge_api_key: None,
+            offline_mode: false,
         }
     }
 }

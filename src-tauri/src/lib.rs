@@ -1,7 +1,9 @@
 use serde::Serialize;
 use std::sync::Arc;
+use tauri::Manager as _;
 
 mod core;
+use core::auth::{self, AccountMeta, AccountStore, AuthError};
 use core::download::{self, DownloadPlan, ItemOutcome, ItemStatus, PlanResult, ProgressSink, ProgressUpdate};
 use core::instances::{self, CreateInstanceReq, Instance, InstanceDetail};
 use core::java::JavaInstallation;
@@ -10,6 +12,219 @@ use core::loaders::{self, LoaderOption};
 use core::resolver::{self, ResolveResult};
 use core::settings::{self, Settings};
 use core::versions::{self, McVersion};
+
+// --- Phase 3: authentication ---
+
+/// Serializable command error wrapping [`AuthError`] (F-5).
+///
+/// `AuthError::Http` contains `reqwest::Error` which is not `Serialize`.
+/// This wrapper converts every variant to a string at the command boundary so
+/// the frontend always receives a JSON-serializable `{"error": "..."}` on
+/// failure. The named variant is preserved in the `kind` field for typed
+/// handling in the UI.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthCommandError {
+    kind: String,
+    message: String,
+}
+
+impl From<AuthError> for AuthCommandError {
+    fn from(e: AuthError) -> Self {
+        let kind = match &e {
+            AuthError::DeviceCodeExpired => "deviceCodeExpired",
+            AuthError::AuthorizationDeclined => "authorizationDeclined",
+            AuthError::NoXboxAccount => "noXboxAccount",
+            AuthError::XboxRegionBlocked => "xboxRegionBlocked",
+            AuthError::ChildAccount => "childAccount",
+            AuthError::NoMinecraftLicense => "noMinecraftLicense",
+            AuthError::Http(_) => "httpError",
+            AuthError::BadResponse(_) => "badResponse",
+            AuthError::HttpStatus { .. } => "httpStatus",
+            AuthError::Keyring(_) => "keyringError",
+            AuthError::Store(_) => "storeError",
+            AuthError::Internal(_) => "internalError",
+        };
+        AuthCommandError {
+            kind: kind.to_string(),
+            message: e.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for AuthCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.kind, self.message)
+    }
+}
+
+// Implement serde::Serialize on AuthCommandError already done above.
+// Tauri commands return Result<T, AuthCommandError>; Tauri serializes the
+// Err variant as the error payload to the frontend.
+
+/// Payload for the `auth://device-code` event emitted by `begin_login`.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceCodePayload {
+    user_code: String,
+    verification_uri: String,
+}
+
+/// Shared account store managed as `Arc<tokio::sync::Mutex<AccountStore>>`.
+///
+/// `tokio::sync::Mutex` because the `begin_login` command holds the store
+/// across an await point (persisting the account after the full auth chain).
+type SharedAccountStore = Arc<tokio::sync::Mutex<AccountStore>>;
+
+/// Cancel token for an in-flight `begin_login` — a one-shot channel sender.
+///
+/// When `cancel_login` fires, it sends `()` on this channel; `begin_login`
+/// polls the receiver in its poll loop and aborts on receipt.
+///
+/// Wrapped in `Mutex<Option<…>>` so `begin_login` can place the sender and
+/// `cancel_login` can take it atomically.
+type CancelToken = std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>;
+
+/// Start the Microsoft device-code login flow.
+///
+/// Emits an `auth://device-code` event with `user_code` + `verification_uri`
+/// before the first poll, then polls the MS token endpoint until resolved,
+/// expired, or cancelled. On success, runs the Xbox chain, persists the
+/// account (with the MS refresh token in the keyring), and returns the
+/// `AccountMeta`.
+///
+/// Pattern mirrors `launch_instance`: long-lived async command that emits
+/// progress events via the Tauri event channel.
+#[tauri::command]
+async fn begin_login(
+    app: tauri::AppHandle,
+    store_state: tauri::State<'_, SharedAccountStore>,
+    cancel_state: tauri::State<'_, CancelToken>,
+) -> Result<AccountMeta, AuthCommandError> {
+    use tauri::Emitter as _;
+    use tokio::time::{sleep, Duration};
+
+    let http = auth::ReqwestAuthClient(reqwest::Client::new());
+
+    // Request device code.
+    let device_code_resp = auth::request_device_code(&http, auth::MS_DEVICE_CODE_URL)
+        .await
+        .map_err(AuthCommandError::from)?;
+
+    // Emit auth://device-code event so the UI can display the code.
+    let _ = app.emit("auth://device-code", DeviceCodePayload {
+        user_code: device_code_resp.user_code.clone(),
+        verification_uri: device_code_resp.verification_uri.clone(),
+    });
+
+    // Register a cancel oneshot so cancel_login can abort this loop.
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut guard = cancel_state.lock().unwrap();
+        *guard = Some(cancel_tx);
+    }
+
+    // Poll loop — interval from device code response.
+    let interval = Duration::from_secs(device_code_resp.interval.max(1));
+    let ms_tokens = loop {
+        // Check for cancellation first (non-blocking).
+        match cancel_rx.try_recv() {
+            Ok(_) => {
+                // User explicitly cancelled via cancel_login.
+                return Err(AuthCommandError::from(AuthError::AuthorizationDeclined));
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                // Sender dropped without sending — unexpected internal condition
+                // (not a user cancel; e.g. mutex poisoned or CancelToken state lost).
+                return Err(AuthCommandError::from(AuthError::Internal(
+                    "cancel channel closed unexpectedly".to_owned(),
+                )));
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+        }
+
+        sleep(interval).await;
+
+        match auth::poll_token_once(&http, auth::MS_TOKEN_URL, &device_code_resp.device_code)
+            .await
+            .map_err(AuthCommandError::from)?
+        {
+            Some(tokens) => break tokens,
+            None => {} // still pending — loop
+        }
+    };
+
+    // Capture the MS refresh token before xbox_chain consumes MsTokens.
+    // The keyring stores this token; it is used at launch time to re-derive
+    // a fresh MC access token via refresh_ms_token → xbox_chain.
+    let ms_refresh_token = ms_tokens.refresh_token.clone();
+
+    // Clear cancel token — login completed.
+    {
+        let mut guard = cancel_state.lock().unwrap();
+        *guard = None;
+    }
+
+    // Run Xbox chain → Account.
+    let account = auth::xbox_chain(&http, ms_tokens)
+        .await
+        .map_err(AuthCommandError::from)?;
+
+    // Build AccountMeta and persist with the MS refresh token in the keyring.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let meta = auth::AccountMeta::from_account(&account, now_secs);
+
+    let mut guard = store_state.lock().await;
+    guard
+        .add_account(meta.clone(), &ms_refresh_token)
+        .map_err(AuthCommandError::from)?;
+
+    Ok(meta)
+}
+
+/// Cancel an in-flight `begin_login` without panic or deadlock.
+///
+/// If no login is in progress, this is a no-op.
+#[tauri::command]
+fn cancel_login(cancel_state: tauri::State<'_, CancelToken>) {
+    let mut guard = cancel_state.lock().unwrap();
+    if let Some(tx) = guard.take() {
+        // Receiver dropped = login already completed; silently ignore.
+        let _ = tx.send(());
+    }
+}
+
+/// List all stored accounts (metadata only — no secrets).
+#[tauri::command]
+async fn list_accounts(
+    store_state: tauri::State<'_, SharedAccountStore>,
+) -> Result<Vec<AccountMeta>, AuthCommandError> {
+    let guard = store_state.lock().await;
+    Ok(guard.list_accounts().to_vec())
+}
+
+/// Remove an account by id.
+#[tauri::command]
+async fn remove_account(
+    store_state: tauri::State<'_, SharedAccountStore>,
+    id: String,
+) -> Result<(), AuthCommandError> {
+    let mut guard = store_state.lock().await;
+    guard.remove_account(&id).map_err(AuthCommandError::from)
+}
+
+/// Set the active account by id.
+#[tauri::command]
+async fn set_active_account(
+    store_state: tauri::State<'_, SharedAccountStore>,
+    id: String,
+) -> Result<(), AuthCommandError> {
+    let mut guard = store_state.lock().await;
+    guard.set_active_account(&id).map_err(AuthCommandError::from)
+}
 
 /// Basic app metadata, surfaced to the UI as the Phase-0 IPC smoke test.
 #[derive(Serialize)]
@@ -239,6 +454,7 @@ impl LaunchSink for TauriLaunchSink {
 async fn launch_instance(
     app: tauri::AppHandle,
     registry_state: tauri::State<'_, Arc<RunningRegistry>>,
+    store_state: tauri::State<'_, SharedAccountStore>,
     slug: String,
 ) -> Result<(), String> {
     use core::download::NoOpSink;
@@ -295,8 +511,23 @@ async fn launch_instance(
     // --- 7. Extract natives. ---
     launch::extract_natives(&launch_meta.natives, &paths.natives_directory)?;
 
-    // --- 8. Build argv. ---
-    let argv = launch::build_argv(&launch_meta, &paths)
+    // --- 8. Resolve launch identity. ---
+    // Load settings to check the offline-mode toggle, then delegate to the
+    // seam-injectable resolver. The MC token is never cached (CP3 decision), so
+    // the resolver always performs a full MS refresh → Xbox chain when an active
+    // account is present. Lock is held for the duration of the async call; the
+    // resolver drops no sub-locks internally — single lock site here.
+    let app_settings = settings::load(&app).unwrap_or_default();
+    let http = auth::ReqwestAuthClient(reqwest::Client::new());
+    let identity = {
+        let mut store_guard = store_state.lock().await;
+        launch::resolve_launch_identity(&mut store_guard, &http, app_settings.offline_mode)
+            .await
+            .map_err(|e| format!("identity resolution failed: {e}"))?
+    };
+
+    // --- 8b. Build argv. ---
+    let argv = launch::build_argv(&launch_meta, &paths, &identity)
         .map_err(|e| format!("argv assembly failed: {e}"))?;
 
     // --- 9. Spawn (registry keyed by slug). ---
@@ -357,9 +588,34 @@ pub fn run() {
     // the Arc and still access the shared map after the command returns.
     let registry: Arc<RunningRegistry> = Arc::new(launch::new_running_registry());
 
+    // Cancel token for in-flight begin_login.
+    let cancel_token: CancelToken = std::sync::Mutex::new(None);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(registry)
+        .manage(cancel_token)
+        .setup(|app| {
+            // Initialize the account store now that the AppHandle is available,
+            // so the real on-disk path can be resolved.
+            //
+            // If the keyring is unavailable at runtime (e.g. WSL without
+            // secret-service), login will fail loud — no silent plaintext fallback.
+            let accounts_path = core::store::accounts_file(app.handle())
+                .expect("failed to resolve accounts file path");
+            let store = AccountStore::load(accounts_path.clone(), Box::new(auth::SystemKeyringBackend))
+                .unwrap_or_else(|e| {
+                    // Load failed (e.g. corrupt accounts.json). Start with an empty
+                    // in-memory store so the app boots without panicking. The path is
+                    // kept so future writes (on next successful login) go to the right
+                    // location.
+                    eprintln!("auth: could not load accounts.json ({e}); starting with empty store");
+                    AccountStore::new_empty(accounts_path, Box::new(auth::SystemKeyringBackend))
+                });
+            let shared: SharedAccountStore = Arc::new(tokio::sync::Mutex::new(store));
+            app.manage(shared);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_info,
             list_instances,
@@ -375,7 +631,12 @@ pub fn run() {
             resolve_vanilla,
             ensure_java,
             launch_instance,
-            kill_instance
+            kill_instance,
+            begin_login,
+            cancel_login,
+            list_accounts,
+            remove_account,
+            set_active_account
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

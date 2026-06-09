@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::core::auth::{AccountStore, AuthError, AuthHttpClient};
 use crate::core::resolver::LaunchMeta;
 
 // ---------------------------------------------------------------------------
@@ -86,6 +87,96 @@ impl LaunchPaths {
 // Argv assembler
 // ---------------------------------------------------------------------------
 
+/// Launch identity injected into `build_argv`.
+///
+/// The caller resolves which identity to use (online vs. offline, refresh if
+/// needed) before calling `build_argv`; this struct holds the resolved values.
+pub struct LaunchIdentity {
+    /// Minecraft player name.
+    pub player_name: String,
+    /// Minecraft profile UUID (hyphenated string).
+    pub uuid: String,
+    /// MC access token. Use `"0"` for offline.
+    pub access_token: String,
+    /// Xbox user ID. Use `""` or `"0"` for offline.
+    pub xuid: String,
+    /// Auth user type, e.g. `"msa"`.
+    pub user_type: String,
+}
+
+impl LaunchIdentity {
+    /// Standard offline identity matching the pre-Phase-3 hardcoded values.
+    pub fn offline() -> Self {
+        LaunchIdentity {
+            player_name: OFFLINE_PLAYER_NAME.to_string(),
+            uuid: offline_uuid().as_hyphenated().to_string(),
+            access_token: "0".to_string(),
+            xuid: "0".to_string(),
+            user_type: "msa".to_string(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Identity resolution (CP4 — injected seam for testability)
+// ---------------------------------------------------------------------------
+
+/// Resolve the launch identity from the account store and the offline flag.
+///
+/// - `offline = true` → always returns [`LaunchIdentity::offline()`].
+/// - No active account → offline identity (user hasn't logged in yet).
+/// - Active account found → retrieves the stored MS refresh token from the
+///   keyring, runs `refresh_ms_token` → `xbox_chain` to obtain a fresh MC
+///   access token, updates the store, and returns an online identity.
+///
+/// The MC access token is never cached on disk (CP3 decision), so a full
+/// refresh is always performed when an online account is present.
+///
+/// Injectable seams: the store is passed by reference (not built inside this
+/// function) and the HTTP client is injected as a trait object — tests supply
+/// a mock client and a fake-keyring-backed store.
+///
+/// The caller (normally `launch_instance` in `lib.rs`) is responsible for
+/// persisting any changes made to the store (via `add_account`) and for
+/// holding any lock around the store for the duration of this call.
+pub async fn resolve_launch_identity(
+    store: &mut AccountStore,
+    http: &dyn AuthHttpClient,
+    offline: bool,
+) -> Result<LaunchIdentity, AuthError> {
+    if offline {
+        return Ok(LaunchIdentity::offline());
+    }
+
+    let account_meta = match store.get_active_account() {
+        None => return Ok(LaunchIdentity::offline()),
+        Some(m) => m.clone(),
+    };
+
+    // MC token is never persisted — always re-derive via refresh.
+    let refresh_token = store.get_refresh_token(&account_meta.id)?;
+
+    let ms_tokens = crate::core::auth::refresh_ms_token(http, crate::core::auth::MS_TOKEN_URL, &refresh_token).await?;
+    let new_ms_refresh = ms_tokens.refresh_token.clone();
+    let account = crate::core::auth::xbox_chain(http, ms_tokens).await?;
+
+    // Update the store with the refreshed metadata + new MS refresh token.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let updated_meta = crate::core::auth::AccountMeta::from_account(&account, now_secs);
+    store.add_account(updated_meta, &new_ms_refresh)?;
+
+    Ok(LaunchIdentity {
+        player_name: account.username,
+        uuid: account.id,
+        access_token: account.mc_access_token,
+        xuid: account.xuid,
+        user_type: "msa".to_string(),
+    })
+}
+
 /// Errors from the argv assembler.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AssembleError {
@@ -103,7 +194,7 @@ impl std::fmt::Display for AssembleError {
     }
 }
 
-/// Build the full JVM argv for the given `LaunchMeta` + resolved paths.
+/// Build the full JVM argv for the given `LaunchMeta` + resolved paths + identity.
 ///
 /// Returns `[<substituted jvm_args>, main_class, <substituted game_args>]`.
 ///
@@ -113,9 +204,8 @@ impl std::fmt::Display for AssembleError {
 ///
 /// When `launch.jvm_args` is empty (legacy manifests), a minimal set of
 /// default JVM args is prepended so the JVM can start.
-pub fn build_argv(launch: &LaunchMeta, paths: &LaunchPaths) -> Result<Vec<String>, AssembleError> {
+pub fn build_argv(launch: &LaunchMeta, paths: &LaunchPaths, identity: &LaunchIdentity) -> Result<Vec<String>, AssembleError> {
     let classpath = build_classpath(&launch.classpath);
-    let uuid = offline_uuid();
 
     // Choose the asset root: legacy branch points at the virtual tree.
     let effective_assets_root = if launch.assets_legacy {
@@ -147,10 +237,11 @@ pub fn build_argv(launch: &LaunchMeta, paths: &LaunchPaths) -> Result<Vec<String
         ("${assets_index_name}", launch.asset_index_id.clone()),
         ("${version_name}", launch.version_id.clone()),
         ("${version_type}", launch.version_type.clone()),
-        ("${auth_player_name}", OFFLINE_PLAYER_NAME.to_string()),
-        ("${auth_uuid}", uuid.as_hyphenated().to_string()),
-        ("${auth_access_token}", "0".to_string()),
-        ("${user_type}", "msa".to_string()),
+        ("${auth_player_name}", identity.player_name.clone()),
+        ("${auth_uuid}", identity.uuid.clone()),
+        ("${auth_access_token}", identity.access_token.clone()),
+        ("${auth_xuid}", identity.xuid.clone()),
+        ("${user_type}", identity.user_type.clone()),
         // ${path} for log4j config — handled specially below (omitted when None).
     ];
 
@@ -712,6 +803,10 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Offline identity for tests that don't exercise identity routing.
+    fn offline_identity() -> LaunchIdentity {
+        LaunchIdentity::offline()
+    }
 
     fn make_meta(
         version_type: &str,
@@ -826,7 +921,7 @@ mod tests {
         let meta = make_meta("release", jvm_args, game_args, cp, false, None);
         let paths = make_paths();
 
-        let argv = build_argv(&meta, &paths).expect("no unresolved placeholders");
+        let argv = build_argv(&meta, &paths, &offline_identity()).expect("no unresolved placeholders");
 
         // main_class must be present between jvm and game sections.
         let mc_idx = argv
@@ -883,7 +978,7 @@ mod tests {
         let meta = make_meta("release", jvm_args, vec![], vec![], false, None);
         let paths = make_paths();
 
-        let err = build_argv(&meta, &paths).expect_err("must error on unknown placeholder");
+        let err = build_argv(&meta, &paths, &offline_identity()).expect_err("must error on unknown placeholder");
         match err {
             AssembleError::UnsubstitutedPlaceholders(ps) => {
                 assert!(
@@ -915,7 +1010,7 @@ mod tests {
         );
         let paths = make_paths();
 
-        let argv = build_argv(&meta, &paths).expect("no error expected");
+        let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error expected");
         assert!(
             !argv.iter().any(|a| a.contains("log4j")),
             "log4j arg must be omitted when logging_config is None: {argv:?}"
@@ -943,7 +1038,7 @@ mod tests {
         );
         let paths = make_paths();
 
-        let argv = build_argv(&meta, &paths).expect("no error expected");
+        let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error expected");
         assert!(
             argv.iter().any(|a| a.contains("/data/assets/log_configs/log4j2.xml")),
             "log4j path must be substituted: {argv:?}"
@@ -989,7 +1084,7 @@ mod tests {
         );
         let paths = make_paths();
 
-        let argv = build_argv(&meta, &paths).expect("no error expected");
+        let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error expected");
 
         // Defaults must include -cp and classpath.
         let cp_idx = argv.iter().position(|a| a == "-cp").expect("-cp must be injected");
@@ -1031,7 +1126,7 @@ mod tests {
         );
         let paths = make_paths();
 
-        let argv = build_argv(&meta, &paths).expect("no error");
+        let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error");
         assert!(
             argv.iter().any(|a| a.contains("virtual/legacy")),
             "legacy assets must point at virtual/legacy: {argv:?}"
@@ -1051,7 +1146,7 @@ mod tests {
         );
         let paths = make_paths();
 
-        let argv = build_argv(&meta, &paths).expect("no error");
+        let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error");
         // Modern: uses /data/assets, NOT /data/assets/virtual/legacy.
         assert!(
             argv.iter().any(|a| a == "/data/assets"),
@@ -1081,7 +1176,7 @@ mod tests {
         );
         let paths = make_paths();
 
-        let argv = build_argv(&meta, &paths).expect("no error");
+        let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error");
         assert!(
             argv.iter().any(|a| a == "snapshot"),
             "snapshot version_type must appear in argv: {argv:?}"
@@ -1483,5 +1578,320 @@ mod tests {
         // Exit event emitted.
         let exits = sink.exit_codes.lock().unwrap();
         assert_eq!(exits.len(), 1, "exactly one exit event after kill");
+    }
+
+    // -----------------------------------------------------------------------
+    // CP4 — identity routing in build_argv
+    // -----------------------------------------------------------------------
+
+    fn make_identity_meta() -> LaunchMeta {
+        // Minimal meta that exercises the identity placeholders.
+        make_meta(
+            "release",
+            vec!["-cp", "${classpath}"],
+            vec![
+                "--username", "${auth_player_name}",
+                "--uuid", "${auth_uuid}",
+                "--accessToken", "${auth_access_token}",
+                "--userType", "${user_type}",
+                "--clientId", "${auth_xuid}",
+            ],
+            vec!["/data/versions/1.21.1/1.21.1.jar"],
+            false,
+            None,
+        )
+    }
+
+    /// Online identity: argv must contain the account's username, uuid, access_token.
+    #[test]
+    fn cp4_online_identity_in_argv() {
+        let meta = make_identity_meta();
+        let paths = make_paths();
+
+        let identity = LaunchIdentity {
+            player_name: "TruePlayer".to_string(),
+            uuid: "00112233-4455-6677-8899-aabbccddeeff".to_string(),
+            access_token: "real_mc_token_xyz".to_string(),
+            xuid: "xuid_online_999".to_string(),
+            user_type: "msa".to_string(),
+        };
+
+        let argv = build_argv(&meta, &paths, &identity).expect("no unresolved placeholders");
+        let joined = argv.join(" ");
+
+        assert!(
+            joined.contains("TruePlayer"),
+            "argv must contain account username: {argv:?}"
+        );
+        assert!(
+            joined.contains("00112233-4455-6677-8899-aabbccddeeff"),
+            "argv must contain account uuid: {argv:?}"
+        );
+        assert!(
+            joined.contains("real_mc_token_xyz"),
+            "argv must contain access_token: {argv:?}"
+        );
+        assert!(
+            joined.contains("xuid_online_999"),
+            "argv must contain xuid: {argv:?}"
+        );
+        // Must NOT contain the offline constants as standalone tokens.
+        // (Use exact token match rather than substring to avoid false positives
+        //  when the online player name happens to contain "Player" as a substring.)
+        assert!(
+            !argv.iter().any(|a| a.as_str() == OFFLINE_PLAYER_NAME),
+            "argv must not contain offline player name as an exact token when online: {argv:?}"
+        );
+        assert!(
+            !joined.contains("2e5dcd13-3805-3256-b49c-819167bf4871"),
+            "argv must not contain offline UUID when online: {argv:?}"
+        );
+    }
+
+    /// Offline identity: argv must contain OFFLINE_PLAYER_NAME and offline_uuid().
+    #[test]
+    fn cp4_offline_identity_in_argv() {
+        let meta = make_identity_meta();
+        let paths = make_paths();
+        let identity = LaunchIdentity::offline();
+
+        let argv = build_argv(&meta, &paths, &identity).expect("no error");
+        let joined = argv.join(" ");
+
+        assert!(
+            joined.contains(OFFLINE_PLAYER_NAME),
+            "argv must contain offline player name: {argv:?}"
+        );
+        assert!(
+            joined.contains("2e5dcd13-3805-3256-b49c-819167bf4871"),
+            "argv must contain offline UUID: {argv:?}"
+        );
+        assert!(
+            // access_token "0" appears somewhere in the argv
+            argv.iter().any(|a| a == "0"),
+            "argv must contain token '0' for offline: {argv:?}"
+        );
+    }
+
+    /// ${auth_xuid} must be in the substitution table — not left as a raw placeholder.
+    #[test]
+    fn cp4_auth_xuid_placeholder_is_substituted() {
+        let meta = make_identity_meta();
+        let paths = make_paths();
+
+        let identity = LaunchIdentity {
+            player_name: "AnyPlayer".to_string(),
+            uuid: "aaaabbbb-0000-0000-0000-ccccddddeeee".to_string(),
+            access_token: "tok".to_string(),
+            xuid: "xuid_check_123".to_string(),
+            user_type: "msa".to_string(),
+        };
+
+        let argv = build_argv(&meta, &paths, &identity).expect("no error");
+        // No raw placeholder must survive.
+        for arg in &argv {
+            assert!(
+                !arg.contains("${auth_xuid}"),
+                "raw ${{auth_xuid}} must not appear in argv: {arg}"
+            );
+        }
+        // The xuid value must appear.
+        assert!(
+            argv.iter().any(|a| a.contains("xuid_check_123")),
+            "xuid must be substituted into argv: {argv:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CP4 — resolve_launch_identity routing
+    //
+    // Tests use a mock AuthHttpClient and an AccountStore backed by a FakeKeyring
+    // (in-memory, no real keyring) + TempDir (no persistent file I/O side effects
+    // that would cross test isolation). No live HTTP in any test.
+    // -----------------------------------------------------------------------
+
+    use crate::core::auth::{AccountMeta, AccountStore, AuthError, AuthHttpClient, KeyringBackend};
+    use std::collections::{HashMap as StdHashMap, VecDeque};
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::Mutex as TokioMutex;
+    use tempfile::TempDir;
+
+    /// In-memory keyring for tests — no OS keychain calls.
+    struct FakeKeyring {
+        store: StdMutex<StdHashMap<String, String>>,
+    }
+
+    impl FakeKeyring {
+        fn new() -> Self {
+            FakeKeyring { store: StdMutex::new(StdHashMap::new()) }
+        }
+    }
+
+    impl KeyringBackend for FakeKeyring {
+        fn store_secret(&self, id: &str, secret: &str) -> Result<(), AuthError> {
+            self.store.lock().unwrap().insert(id.to_owned(), secret.to_owned());
+            Ok(())
+        }
+        fn load_secret(&self, id: &str) -> Result<String, AuthError> {
+            self.store
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .ok_or_else(|| AuthError::Keyring(format!("no secret for {id}")))
+        }
+        fn delete_secret(&self, id: &str) -> Result<(), AuthError> {
+            self.store.lock().unwrap().remove(id);
+            Ok(())
+        }
+    }
+
+    /// Canned HTTP response.
+    struct MockResp(u16, String);
+
+    impl MockResp {
+        fn ok(body: impl Into<String>) -> Self { MockResp(200, body.into()) }
+    }
+
+    /// Mock HTTP client — pops responses in FIFO order regardless of method.
+    struct MockAuthClient {
+        responses: std::sync::Arc<TokioMutex<VecDeque<MockResp>>>,
+    }
+
+    impl MockAuthClient {
+        fn new(responses: Vec<MockResp>) -> Self {
+            Self { responses: std::sync::Arc::new(TokioMutex::new(responses.into_iter().collect())) }
+        }
+
+        async fn pop(&self) -> (u16, String) {
+            let mut q = self.responses.lock().await;
+            let MockResp(s, b) = q.pop_front().expect("MockAuthClient: no more canned responses");
+            (s, b)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AuthHttpClient for MockAuthClient {
+        async fn post_form(&self, _url: &str, _params: &[(&str, &str)]) -> Result<(u16, String), reqwest::Error> {
+            Ok(self.pop().await)
+        }
+        async fn post_json(&self, _url: &str, _body: serde_json::Value) -> Result<(u16, String), reqwest::Error> {
+            Ok(self.pop().await)
+        }
+        async fn get_bearer(&self, _url: &str, _token: &str) -> Result<(u16, String), reqwest::Error> {
+            Ok(self.pop().await)
+        }
+    }
+
+    /// Full Xbox-chain success: MS refresh → MS tokens → XBL → XSTS → MC token → profile.
+    fn xbox_chain_responses() -> Vec<MockResp> {
+        vec![
+            // refresh_ms_token: returns MS tokens
+            MockResp::ok(r#"{"access_token":"ms_access","refresh_token":"ms_refresh_new","expires_in":3600}"#),
+            // XBL authenticate
+            MockResp::ok(r#"{"Token":"xbl_tok","DisplayClaims":{"xui":[{"uhs":"uhs_val"}]}}"#),
+            // XSTS authorize
+            MockResp::ok(r#"{"Token":"xsts_tok","DisplayClaims":{"xui":[{"xid":"xuid_abc"}]}}"#),
+            // MC login_with_xbox
+            MockResp::ok(r#"{"username":"ignored","access_token":"mc_tok_fresh","token_type":"Bearer","expires_in":86400}"#),
+            // MC profile
+            MockResp::ok(r#"{"id":"uuid1234","name":"OnlinePlayer","skins":[],"capes":[]}"#),
+        ]
+    }
+
+    fn make_store_with_account(dir: &TempDir, account_id: &str, refresh_token: &str) -> AccountStore {
+        let path = dir.path().join("accounts.json");
+        let mut store = AccountStore::load(path, Box::new(FakeKeyring::new()))
+            .expect("AccountStore::load should succeed");
+        let meta = AccountMeta {
+            id: account_id.to_owned(),
+            username: "SomePlayer".to_owned(),
+            xuid: "xuid_old".to_owned(),
+            mc_token_expires: None, // never cached → always refresh
+        };
+        store.add_account(meta, refresh_token).expect("add_account");
+        store.set_active_account(account_id).expect("set_active");
+        store
+    }
+
+    /// The MC profile fixture returns `"id": "uuid1234"` — this is the account id
+    /// that `xbox_chain` returns in `Account.id`. The store account id must match
+    /// so that `add_account` (which replaces by id) updates the same entry and
+    /// `get_active_account` (which looks up by `active_account_id`) still finds it.
+    const FIXTURE_ACCOUNT_ID: &str = "uuid1234";
+
+    /// offline = true → returns offline identity regardless of store contents.
+    #[tokio::test]
+    async fn cp4_resolve_offline_flag_returns_offline_identity() {
+        let dir = TempDir::new().unwrap();
+        // Store has an active account, but offline flag overrides.
+        let mut store = make_store_with_account(&dir, "acc-1", "rt_unused");
+        let http = MockAuthClient::new(vec![]); // no HTTP calls expected
+
+        let identity = resolve_launch_identity(&mut store, &http, true)
+            .await
+            .expect("offline resolve must not error");
+
+        assert_eq!(identity.player_name, OFFLINE_PLAYER_NAME);
+        assert_eq!(
+            identity.uuid,
+            offline_uuid().as_hyphenated().to_string(),
+            "offline uuid must match"
+        );
+        assert_eq!(identity.access_token, "0");
+    }
+
+    /// No active account → offline identity (no HTTP calls).
+    #[tokio::test]
+    async fn cp4_resolve_no_active_account_returns_offline() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("accounts.json");
+        let mut store = AccountStore::load(path, Box::new(FakeKeyring::new()))
+            .expect("load");
+        let http = MockAuthClient::new(vec![]); // no HTTP calls expected
+
+        let identity = resolve_launch_identity(&mut store, &http, false)
+            .await
+            .expect("no-account resolve must not error");
+
+        assert_eq!(identity.player_name, OFFLINE_PLAYER_NAME);
+    }
+
+    /// Active account present → performs full refresh, returns online identity.
+    /// Asserts: username/uuid/xuid from the chain, fresh MC token in identity.
+    #[tokio::test]
+    async fn cp4_resolve_active_account_refresh_at_launch() {
+        let dir = TempDir::new().unwrap();
+        // Account id must match the MC profile fixture's `"id"` field ("uuid1234")
+        // so that add_account replaces the existing entry (same id) and
+        // get_active_account still resolves after the refresh.
+        let mut store = make_store_with_account(&dir, FIXTURE_ACCOUNT_ID, "stored_refresh_tok");
+        let http = MockAuthClient::new(xbox_chain_responses());
+
+        let identity = resolve_launch_identity(&mut store, &http, false)
+            .await
+            .expect("online resolve must succeed");
+
+        assert_eq!(identity.player_name, "OnlinePlayer", "username from xbox chain");
+        assert_eq!(identity.uuid, "uuid1234", "uuid from MC profile");
+        assert_eq!(identity.xuid, "xuid_abc", "xuid from XSTS claims");
+        assert_eq!(identity.access_token, "mc_tok_fresh", "fresh MC token from chain");
+        assert_eq!(identity.user_type, "msa");
+
+        // Offline constants must not appear.
+        assert_ne!(identity.player_name, OFFLINE_PLAYER_NAME);
+        assert_ne!(
+            identity.uuid,
+            offline_uuid().as_hyphenated().to_string()
+        );
+
+        // Store must have been updated with refreshed metadata.
+        let updated = store.get_active_account().expect("active account still set");
+        assert_eq!(updated.username, "OnlinePlayer", "store updated with new username");
+        assert_eq!(updated.xuid, "xuid_abc", "store updated with new xuid");
+
+        // New MS refresh token must be in keyring under the account id.
+        let new_rt = store.get_refresh_token(FIXTURE_ACCOUNT_ID).expect("refresh token in keyring");
+        assert_eq!(new_rt, "ms_refresh_new", "keyring updated with new MS refresh token");
     }
 }
