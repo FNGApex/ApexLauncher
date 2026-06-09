@@ -71,4 +71,19 @@ rejected.
 
 ## Change log
 
-<!-- Populated on first amendment after approval. Empty at creation. -->
+### 2026-06-09 — CP3 wired into launch_instance
+
+**What changed:** `launch_instance` in `src-tauri/src/lib.rs` now fetches and merges the
+loader profile before the download step for Fabric and Quilt instances that have a pinned
+`loader.version`. Vanilla instances, unknown loader kinds, and loader instances with
+`version == None` fall through the branch unchanged and launch exactly as before.
+The `loader_profile` module import was added to `lib.rs` following the existing `use core::`
+import style.
+
+**Why:** completes the slice — loader instances now launch with the loader's `mainClass`,
+loader libraries on the classpath (ahead of the vanilla client jar), and the loader's
+extra JVM/game arguments, all wired from the fully unit-tested merge logic in CP2.
+
+**Note:** `resolve_vanilla` (the standalone Tauri preview command) is intentionally left
+vanilla-only — it exists for the frontend resolver preview flow and does not take a loader
+version parameter. This is an explicit scope boundary, not an oversight.

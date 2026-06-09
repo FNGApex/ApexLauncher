@@ -8,6 +8,7 @@ use core::download::{self, DownloadPlan, ItemOutcome, ItemStatus, PlanResult, Pr
 use core::instances::{self, CreateInstanceReq, Instance, InstanceDetail};
 use core::java::JavaInstallation;
 use core::launch::{self, LaunchSink, RunningRegistry};
+use core::loader_profile;
 use core::loaders::{self, LoaderOption};
 use core::resolver::{self, ResolveResult};
 use core::settings::{self, Settings};
@@ -487,7 +488,15 @@ async fn launch_instance(
     let asset_data = resolver::fetch_asset_index(&app, &spec.asset_index).await?;
     let data_dir = core::store::data_dir(&app)?;
     let target_os = resolver::host_os_name();
-    let (plan, launch_meta) = resolver::assemble(&spec, &asset_data, target_os, &data_dir);
+    let (mut plan, mut launch_meta) = resolver::assemble(&spec, &asset_data, target_os, &data_dir);
+
+    // --- 3b. Merge loader profile (fabric / quilt with a pinned version). ---
+    if inst.loader.kind == "fabric" || inst.loader.kind == "quilt" {
+        if let Some(ref v) = inst.loader.version {
+            let profile = loader_profile::fetch_profile(&app, &inst.loader.kind, &inst.minecraft, v).await?;
+            resolver::merge_loader_profile(&mut plan, &mut launch_meta, &profile, target_os, &data_dir);
+        }
+    }
 
     // --- 4. Download: execute the plan; inspect outcomes before proceeding. ---
     let client = download::build_client().map_err(|e| e.to_string())?;
