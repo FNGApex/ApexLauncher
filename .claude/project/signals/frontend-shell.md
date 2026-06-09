@@ -2,7 +2,7 @@
 
 ## What it does
 
-React 19 app entry point, routing, sidebar navigation, IPC wrapper layer, TanStack Query client setup, settings UI, and stub routes (Browse, Accounts). All Tauri `invoke` calls are centralized in `src/lib/ipc.ts` with hand-typed TS interfaces mirroring Rust structs.
+React 19 app entry point, routing, sidebar navigation, IPC wrapper layer, TanStack Query client setup, settings UI, live Accounts UI (Phase 3), and Browse stub. All Tauri `invoke` calls are centralized in `src/lib/ipc.ts` with hand-typed TS interfaces mirroring Rust structs.
 
 ## Artifacts
 
@@ -11,9 +11,9 @@ React 19 app entry point, routing, sidebar navigation, IPC wrapper layer, TanSta
 - `src/components/AppShell.tsx` — root layout: Sidebar + `<Outlet />`
 - `src/components/Sidebar.tsx` — fixed 240px left nav; links to Instances / Browse / Accounts / Settings; shows `v0.1.0 · pre-alpha` at bottom
 - `src/routes/Browse.tsx` — stub; provider filter tabs (All / Modrinth / CurseForge) + search input; no backend wiring yet (Phase 5/6)
-- `src/routes/Accounts.tsx` — stub placeholder (Phase 3)
+- `src/routes/Accounts.tsx` — live (Phase 3): device-code login flow (subscribe to `auth://device-code` before `beginLogin`, display `userCode`+`verificationUri` panel, cancel button), account list/remove/set-active via TanStack Query + mutations; `activeId` state tracked locally (not returned by `listAccounts`)
 - `src/routes/Settings.tsx` — live: loads/saves `Settings` (defaultMemoryMb, defaultJavaArgs, curseforgeApiKey); displays read-only `AppPaths`; dirty-state save button
-- `src/lib/ipc.ts` — all typed `invoke` wrappers; exports interfaces for `AppInfo`, `Instance`, `InstanceDetail`, `FolderMod`, `CreateInstanceReq`, `Settings`, `AppPaths`, `McVersion`, `LoaderOption`, `LoaderKind`, `DownloadItem`, `DownloadPlan`, `ItemStatus`, `ItemOutcome`, `PlanResult`, `DownloadProgressPayload`, `ResolveResult`, `LaunchMeta`, `JavaSource`, `JavaInstallation`; functions: `getAppInfo`, `listInstances`, `createInstance`, `getInstance`, `deleteInstance`, `getSettings`, `saveSettings`, `getAppPaths`, `listMinecraftVersions`, `getLoaders`, `executeDownloadPlan`, `resolveVanilla`, `ensureJava`
+- `src/lib/ipc.ts` — all typed `invoke` wrappers; exports interfaces for `AppInfo`, `Instance`, `InstanceDetail`, `FolderMod`, `CreateInstanceReq`, `Settings`, `AppPaths`, `McVersion`, `LoaderOption`, `LoaderKind`, `DownloadItem`, `DownloadPlan`, `ItemStatus`, `ItemOutcome`, `PlanResult`, `DownloadProgressPayload`, `ResolveResult`, `LaunchMeta`, `JavaSource`, `JavaInstallation`, `AccountMeta`, `DeviceCodePayload`, `AuthCommandError`; functions: `getAppInfo`, `listInstances`, `createInstance`, `getInstance`, `deleteInstance`, `getSettings`, `saveSettings`, `getAppPaths`, `listMinecraftVersions`, `getLoaders`, `executeDownloadPlan`, `resolveVanilla`, `ensureJava`, `listenDeviceCode`, `beginLogin`, `cancelLogin`, `listAccounts`, `removeAccount`, `setActiveAccount`; constant `AUTH_DEVICE_CODE_EVENT = "auth://device-code"`
 - `src/lib/query.ts` — exports `queryClient` (staleTime=30s, gcTime=24h, retry=1, no refetch-on-focus) and `META_STALE_TIME` (6h)
 - `src/lib/prefetch.ts` — `prefetchStartupData`: prefetches `["instances"]`, `["mc-versions"]`, `["loaders", latest]`
 - `src/lib/utils.ts` — `cn` (clsx + tailwind-merge)
@@ -29,8 +29,9 @@ React 19 app entry point, routing, sidebar navigation, IPC wrapper layer, TanSta
 - `ipc.ts` hand-mirrors Rust struct field names; no generated types yet (specta/ts-rs planned per `docs/ROADMAP.md` cross-cutting section). Any Rust struct rename or new field requires manual `ipc.ts` update.
 - `Settings.tsx` is tightly coupled to `src/lib/ipc.ts` `Settings` interface; if `curseforge_api_key` moves from settings to a separate secret store (Phase 5), both files change.
 - `prefetch.ts` imports `META_STALE_TIME` from `query.ts` and IPC fns from `ipc.ts`; changes to query key shapes affect both.
-- `Browse.tsx` and `Accounts.tsx` are stubs — they will be replaced wholesale in Phase 5 and Phase 3 respectively.
+- `Browse.tsx` is a stub — will be replaced in Phase 5. `Accounts.tsx` is now live (Phase 3 complete).
 - `JavaInstallation` and `JavaSource` in `ipc.ts` mirror `core/java.rs`; any rename in the Rust struct requires manual update here (java domain coupling).
+- `AccountMeta`, `DeviceCodePayload`, `AuthCommandError` in `ipc.ts` mirror `core/auth.rs` and `lib.rs`; same manual-update risk (auth domain coupling).
 
 ## Conventions worth knowing
 

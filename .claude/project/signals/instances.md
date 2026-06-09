@@ -13,8 +13,8 @@ Manages the full lifecycle of Minecraft instances: create, list, get (with mods-
 ## CLI code
 
 - `src-tauri/src/core/instances.rs` — `Instance`, `FolderMod`, `InstanceDetail`, `CreateInstanceReq` structs; `list`, `create`, `get`, `delete` fns; `slugify`/`unique_slug`/`validate_slug` helpers; `scan_mods` reconciles `mc/mods/` against `mods[]`
-- `src-tauri/src/core/settings.rs` — `Settings` struct (schema=1, defaultMemoryMb=4096, defaultJavaArgs=`-XX:+UseG1GC`, curseforgeApiKey); `load`/`save`; blank API key normalized to `None` on save
-- `src-tauri/src/core/store.rs` — `data_dir` and `instances_dir` via Tauri path API; creates `instances/` dir on demand
+- `src-tauri/src/core/settings.rs` — `Settings` struct (schema=1, defaultMemoryMb=4096, defaultJavaArgs=`-XX:+UseG1GC`, curseforgeApiKey, `offline_mode: bool` default=`false`); `load`/`save`; blank API key normalized to `None` on save; `Settings::default()` impl
+- `src-tauri/src/core/store.rs` — `data_dir`, `instances_dir`, `java_dir` via Tauri path API; `accounts_file()` returns `<data>/accounts.json` path (creates parent dir, not the file); creates dirs on demand
 - `src-tauri/src/lib.rs` — thin Tauri command wrappers: `list_instances`, `create_instance`, `get_instance`, `delete_instance`, `get_settings`, `save_settings`, `app_paths`
 
 ## Docs
