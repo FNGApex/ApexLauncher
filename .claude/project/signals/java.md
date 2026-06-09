@@ -6,7 +6,7 @@ Detects or provisions a JRE matching a required Java major version. Probes syste
 
 ## CLI code
 
-- `src-tauri/src/core/java.rs` — full implementation: `TargetOs` (Linux/MacOs/Windows, injectable), `JavaInstallation` (major + path + source), `JavaSource` (Detected/Downloaded enum), `parse_major_from_release` (handles modern `"17.0.8"` and legacy `"1.8.0_392"` schemes), `probe_installation`, `detect` (injectable candidates + cache_prefix for source labelling), `default_candidates` (env+filesystem reads; not under test), `ArchiveKind` (TarGz/Zip), `adoptium_query_url`, `adoptium_arch`, `parse_adoptium_response` (fixture-tested), `provision_java` (async; real HTTP; not unit-tested), `extract_archive` → `extract_tar_gz` / `extract_zip` (traversal guard via `normalize_path` + prefix-check on every entry), `locate_java_bin` (recursive walk for `bin/java[.exe]`), `ensure_java_core` (injectable detect-or-provision; unit-tested without network), `ensure_java` (thin `AppHandle` wrapper; real network); 45 tests
+- `src-tauri/src/core/java.rs` — full implementation: `TargetOs` (Linux/MacOs/Windows, injectable), `JavaInstallation` (major + path + source), `JavaSource` (Detected/Downloaded enum), `parse_major_from_release` (handles modern `"17.0.8"` and legacy `"1.8.0_392"` schemes), `probe_installation`, `detect` (injectable candidates + cache_prefix for source labelling), `default_candidates` (env+filesystem reads; not under test), `ArchiveKind` (TarGz/Zip), `adoptium_query_url`, `adoptium_arch`, `parse_adoptium_response` (fixture-tested), `provision_java` (async; real HTTP; not unit-tested), `extract_archive` → `extract_tar_gz` / `extract_zip` (traversal guard via `normalize_path` + prefix-check on every entry), `locate_java_bin` (recursive walk for `bin/java[.exe]`), `ensure_java_core` (injectable detect-or-provision; unit-tested without network), `ensure_java` (thin `AppHandle` wrapper; real network); 39 tests
 - `src-tauri/src/core/store.rs` — `java_dir` fn: returns `<data>/java/`, creates on demand; downloaded JREs land at `<data>/java/<major>/`
 - `src-tauri/src/lib.rs` — `ensure_java` Tauri command (wraps `core::java::ensure_java`); registered in `invoke_handler`
 
@@ -16,7 +16,7 @@ Detects or provisions a JRE matching a required Java major version. Probes syste
 
 ## Docs
 
-- `docs/spec/java-manager.md` — Phase 2 slice C spec: success criteria, approach table, checkpoint plan, risks, implementation log (shipped 2026-06-07, 45 tests)
+- `docs/spec/java-manager.md` — Phase 2 slice C spec: success criteria, approach table, checkpoint plan, risks, implementation log (shipped 2026-06-07, 39 tests)
 - `docs/design/vanilla-launch.md` — design doc §C: detect-first + Temurin-download decision; slices B/C/D context
 
 ## Coupling

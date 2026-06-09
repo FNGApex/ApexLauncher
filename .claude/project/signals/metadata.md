@@ -2,7 +2,7 @@
 
 ## What it does
 
-Fetches and disk-caches Minecraft version lists (Mojang piston-meta) and per-version mod-loader build lists (Forge, Fabric, Quilt, NeoForge). All responses are cached in `<data>/meta-cache/` with a 6-hour TTL. Network failures per loader are swallowed ("not available for this MC") rather than failing the whole request.
+Fetches and disk-caches Minecraft version lists (Mojang piston-meta), per-version mod-loader build lists (Forge, Fabric, Quilt, NeoForge), and Fabric/Quilt loader profile JSONs (mainClass + libraries + args). All responses are cached in `<data>/meta-cache/` with a 6-hour TTL. Network failures per loader are swallowed ("not available for this MC") rather than failing the whole request.
 
 ## CLI code
 
@@ -12,6 +12,7 @@ Fetches and disk-caches Minecraft version lists (Mojang piston-meta) and per-ver
   - Fabric/Quilt: JSON API at `meta.fabricmc.net/v2/versions/loader/{mc}` / `meta.quiltmc.org/v3/versions/loader/{mc}`; already newest-first
   - NeoForge: `maven.neoforged.net` XML; version encodes MC (e.g. `20.4.237` → 1.20.4); legacy artifact for 1.20.1 at `net/neoforged/forge`
 - `src-tauri/src/core/meta.rs` — `cached_text(app, url, key, ttl)`: checks `meta-cache/<key>` mtime vs TTL, GETs if stale, writes back on success (cache write is best-effort); builds one `reqwest::Client` per call (not shared)
+- `src-tauri/src/core/loader_profile.rs` — `LoaderProfile` / `LoaderLibrary` structs (serde-tolerant, unknown fields ignored); `fetch_profile(app, kind, mc, loader_version)` fetches and caches the Mojang launcher-profile JSON served by Fabric (`meta.fabricmc.net/v2/versions/loader/{mc}/{loader}/profile/json`) and Quilt (`meta.quiltmc.org/v3/versions/loader/{mc}/{loader}/profile/json`); TTL 6h via `meta::cached_text`; `profile_url(kind, mc, loader)` pure URL builder; `maven_coord_to_path(coord)` converts Maven coordinate to relative Maven repo path; cache key `<kind>-profile-<sanitized-mc>-<sanitized-loader>.json`; 12 unit tests + `fixtures/fabric_profile.json`
 - `src-tauri/src/lib.rs` — Tauri commands: `list_minecraft_versions` (async), `get_loaders` (async, takes `minecraft: String`)
 
 ## Artifacts
@@ -24,16 +25,21 @@ Fetches and disk-caches Minecraft version lists (Mojang piston-meta) and per-ver
 - `docs/ARCHITECTURE.md` §2 — `meta-cache/` location
 - `docs/PROVIDERS.md` — CurseForge and Modrinth API details (relevant to future Phase 5 extension of this layer)
 - `docs/ROADMAP.md` Phase 2/4 note — version/loader metadata pulled forward early
+- `docs/spec/fabric-quilt-launch.md` — spec for Phase 4 slice A; `loader_profile.rs` implements CP1 (fetch + cache) and the `LoaderProfile`/`LoaderLibrary` types
+- `docs/design/fabric-quilt-launch.md` — design rationale for the profile-overlay approach
 
 ## Coupling
 
 - `NewInstanceModal` (instances domain) reads from this domain's query cache; `McVersion`/`LoaderOption` IPC type changes require updating `src/lib/ipc.ts` and the modal.
-- `src/lib/query.ts` exports `META_STALE_TIME = 6h` used in both `NewInstanceModal` and `prefetch.ts`; changing the Rust TTL (currently `6 * 3600` in both `versions.rs` and `loaders.rs`) should be mirrored here.
-- `meta.rs` builds a new `reqwest::Client` per `cached_text` call — no shared client. `download.rs` (`build_client()`) and `resolver.rs` (via `meta::cached_text`) each use separate clients; three independent reqwest clients coexist at runtime.
+- `src/lib/query.ts` exports `META_STALE_TIME = 6h` used in both `NewInstanceModal` and `prefetch.ts`; changing the Rust TTL (currently `6 * 3600` in `versions.rs`, `loaders.rs`, and `loader_profile.rs`) should be mirrored here.
+- `meta.rs` builds a new `reqwest::Client` per `cached_text` call — no shared client. `download.rs` (`build_client()`), `resolver.rs`, and `loader_profile.rs` each use separate clients via `meta::cached_text`; multiple independent reqwest clients coexist at runtime.
+- `loader_profile.rs` imports `Arguments` / `ArgumentEntry` from `resolver.rs` — a change to those types requires updating both modules.
+- **launch domain:** `lib.rs::launch_instance` calls `loader_profile::fetch_profile` and then `resolver::merge_loader_profile` for fabric/quilt instances; `LoaderProfile` is consumed by the resolver domain.
 
 ## Conventions worth knowing
 
 - NeoForge version-to-MC derivation: 3-part version `A.B.C` → `1.A.B`; 4-part `A.B.C.D` → `A.B.C`. The `neoforge_matches` fn handles both plus `.0` suffix stripping.
 - `sort_versions_desc` splits on `.` and `-`, parses each segment as u64 (non-numeric → 0), compares lexicographically by segment tuple.
-- Cache key for Fabric/Quilt is `fabric-loader-{mc}.json` / `quilt-loader-{mc}.json`; MC version is sanitized (non-alphanumeric non-`.` → `_`) before use as filename.
+- Cache key for Fabric/Quilt loader list is `fabric-loader-{mc}.json` / `quilt-loader-{mc}.json`; loader profile cache key is `<kind>-profile-<mc>-<loader>.json`; both sanitize the version string (non-alphanumeric non-`.` → `_`).
 - Loaders with zero builds for a given MC are excluded from the result (not returned as an empty entry).
+- `maven_coord_to_path` supports 3-segment (`group:artifact:version`) and 4-segment (`group:artifact:version:classifier`) Maven coordinates; group dots become path separators.
