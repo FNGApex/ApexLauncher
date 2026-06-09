@@ -87,3 +87,25 @@ extra JVM/game arguments, all wired from the fully unit-tested merge logic in CP
 **Note:** `resolve_vanilla` (the standalone Tauri preview command) is intentionally left
 vanilla-only — it exists for the frontend resolver preview flow and does not take a loader
 version parameter. This is an explicit scope boundary, not an oversight.
+
+## Implementation log
+
+### v1 — 2026-06-09
+
+Built across 4 iterations of /subagent-implementation (3 checkpoints; CP2 took one fix round).
+Commits (chronological):
+
+- `1ec4ab7` — CP1: `core/loader_profile` — typed profile, per-kind endpoint URL builder, maven coord→path, fabric fixture (12 tests)
+- `3a623c0` — CP2: `resolver::merge_loader_profile` — override mainClass, loader libs→plan+classpath (profile order, ahead of client jar), append OS-filtered args; empty-url skip (9 tests; fixed reversed-classpath-order + empty-url guard in iter 3)
+- `2368ad9` — CP3: wire fetch+merge into `launch_instance` for fabric/quilt with a pinned version; `resolve_vanilla` left vanilla-only
+- `277645d` — defer follow-up `fabric-quilt-launch-f-1`
+
+**Out-of-scope work performed during this build:** none. (`DownloadPlan.items` was already `pub`, so no new surface in `download.rs` was needed.)
+
+**Unforeseens — surprises that emerged during implementation:**
+- Reviewer caught a latent classpath-ordering bug in CP2: a fixed `insert_pos` reversed loader libs relative to profile order, which matters for Fabric's order-sensitive classloading. Fixed via pop-extend-push + an exact-order test (iter 3).
+- The CP1 reviewer's circular-module-dependency question was a non-issue: Rust permits intra-crate module cycles, so `resolver` imports `loader_profile` while `loader_profile` imports `resolver::Arguments` with no problem.
+
+**Deferred items still open:**
+- `fabric-quilt-launch-f-1` (project follow-up, `plan`/risk): verify loader-library hashes via `.sha1` sibling files — Fabric/Quilt profiles ship no hashes, so loader jars currently download HTTPS-only-unverified.
+- **Manual e2e (developer-verify, not automatable in the loop):** Fabric instance reaches main menu; Quilt instance reaches main menu; vanilla instance still launches unchanged. All code-side criteria are verified green (`cargo check` 0 errors, `cargo test` 196 pass, `npm run build` ok).
