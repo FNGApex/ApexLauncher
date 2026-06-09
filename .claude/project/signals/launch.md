@@ -2,7 +2,7 @@
 
 ## What it does
 
-Assembles JVM argv from `LaunchMeta` + resolved paths, extracts native jars into a per-instance `natives/` dir, spawns the JVM via `tokio::process::Command` with `mc/` as cwd, streams stdout/stderr as `launch://log` events, tracks running instances in a slug-keyed `RunningRegistry` (Tauri managed state), kills on request, and records `last_played` + `total_playtime_sec` on exit (natural or killed). Offline identity is fixed: name `Player`, UUID v3 of `"OfflinePlayer:Player"` (`2e5dcd13-3805-3256-b49c-819167bf4871`).
+Assembles JVM argv from `LaunchMeta` + resolved paths + `LaunchIdentity`, extracts native jars into a per-instance `natives/` dir, spawns the JVM via `tokio::process::Command` with `mc/` as cwd, streams stdout/stderr as `launch://log` events, tracks running instances in a slug-keyed `RunningRegistry` (Tauri managed state), kills on request, and records `last_played` + `total_playtime_sec` on exit (natural or killed). Identity is resolved at launch time via `resolve_launch_identity`: offline flag or no active account → offline identity (`Player` + UUID v3 of `"OfflinePlayer:Player"`, token `"0"`); active account present → MS refresh token from keyring → `refresh_ms_token` + `xbox_chain` → real MC identity.
 
 ## Artifacts
 
@@ -11,8 +11,8 @@ Assembles JVM argv from `LaunchMeta` + resolved paths, extracts native jars into
 
 ## CLI code
 
-- `src-tauri/src/core/launch.rs` — core implementation: `build_argv` (CP1, placeholder substitution table + `default_jvm_args` fallback for legacy manifests + `apply_logging_config`), `extract_natives` (CP2, zip-slip traversal guard), `spawn_instance` + `monitor_child` + `kill_instance` + `RunningRegistry` + `KillHandle` (CP3), `LaunchSink` trait + `CapturingLaunchSink` (test-only); `LaunchPaths` struct; `offline_uuid()`; `OFFLINE_PLAYER_NAME`
-- `src-tauri/src/lib.rs` — `launch_instance` Tauri command (9-step orchestration: load instance → resolve → download with outcome inspection → `ensure_java` → `extract_natives` → `build_argv` → spawn); `kill_instance` Tauri command; `TauriLaunchSink` (emits `launch://log` + `launch://exit` events); registry registered via `.manage(Arc<RunningRegistry>)`
+- `src-tauri/src/core/launch.rs` — core implementation: `build_argv` (CP1, placeholder substitution table + `default_jvm_args` fallback for legacy manifests + `apply_logging_config`), `extract_natives` (CP2, zip-slip traversal guard), `spawn_instance` + `monitor_child` + `kill_instance` + `RunningRegistry` + `KillHandle` (CP3), `LaunchSink` trait + `CapturingLaunchSink` (test-only); `LaunchPaths` struct; `offline_uuid()`; `OFFLINE_PLAYER_NAME`; `LaunchIdentity` struct (CP4: `player_name`, `uuid`, `access_token`, `xuid`, `user_type`); `resolve_launch_identity` (CP4: offline flag → offline; no active account → offline; active account → keyring refresh + Xbox chain → online identity)
+- `src-tauri/src/lib.rs` — `launch_instance` Tauri command (9-step orchestration: load instance → resolve → download with outcome inspection → `ensure_java` → `extract_natives` → `resolve_launch_identity` (loads settings, injects `ReqwestAuthClient`, holds `SharedAccountStore` lock) → `build_argv` → spawn); `kill_instance` Tauri command; `TauriLaunchSink` (emits `launch://log` + `launch://exit` events); registry registered via `.manage(Arc<RunningRegistry>)`
 - `src-tauri/src/core/instances.rs` — `record_playtime` (ln 206) + `read_manifest_pub` (ln 228) called by the monitor task on child exit
 
 ## Docs
@@ -22,6 +22,7 @@ Assembles JVM argv from `LaunchMeta` + resolved paths, extracts native jars into
 
 ## Coupling
 
+- **auth domain:** `resolve_launch_identity` in `launch.rs` imports `AccountStore`, `AuthHttpClient`, `refresh_ms_token`, `xbox_chain` from `core::auth`; `launch_instance` in `lib.rs` holds the `SharedAccountStore` lock during identity resolution. Any change to `AccountMeta` or keyring API in auth must be reflected here.
 - **resolver domain:** `launch_instance` calls `resolver::resolve_vanilla` internally; `LaunchMeta` is defined in `resolver.rs` and consumed directly — adding fields to `LaunchMeta` (e.g. `version_type` was added in slice D) requires coordinating both modules.
 - **download domain:** `launch_instance` calls `execute_plan` from `core::download` and inspects `ItemOutcome` results before spawn; a failed download now errors before spawning (fixed in iter 4 — previously outcomes were silently dropped).
 - **java domain:** `launch_instance` calls `java::ensure_java` to obtain the `java`/`java.exe` path; `JavaInstallation.path` is passed to `spawn_instance`.
@@ -37,5 +38,5 @@ Assembles JVM argv from `LaunchMeta` + resolved paths, extracts native jars into
 - Legacy manifests (empty `jvm_args`) receive `default_jvm_args` supplying `-Djava.library.path`, `-cp`, classpath. Modern manifests supply their own `jvm_args`.
 - `${path}` (log4j config arg) is dropped when `logging_config` is `None`, not passed raw to the JVM.
 - Classpath separator: `:` on non-Windows, `;` on Windows (`#[cfg(target_os = "windows")]`).
-- Test count: 20 unit tests + 2 async integration tests in `launch.rs` (15 tests from CP1–CP3 + playtime tests; total project Rust tests = 129).
+- Test count: 22 Rust tests in `launch.rs` (20 unit + 2 async); total project Rust tests grew from 129 to ~186 with auth's 57 additional tests.
 - Open follow-ups: `vanilla-launch-f-1` (legacy asset virtual tree for pre-1.7 MC, risk) and `vanilla-launch-f-2` (`-Dminecraft.client.jar=` gets asset index id instead of jar path, nit) — both in `.claude/project/followups/`.
