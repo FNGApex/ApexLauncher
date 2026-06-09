@@ -1,5 +1,5 @@
 ---
-generated_at: 2026-06-08T07:39:01Z
+generated_at: 2026-06-09T02:04:40Z
 atomic_version: 3.1.1
 ---
 # Deterministic signals
@@ -80,7 +80,7 @@ atomic_version: 3.1.1
 │   ├── build.rs (487059e, 3L, 39ch, 39B)
 │   └── tauri.conf.json (edcd844, 35L, 695ch, 695B)
 ├── .gitignore (90d3b59, 31L, 476ch, 478B)
-├── CLAUDE.md (64f7906, 107L, 4170ch, 4267B)
+├── CLAUDE.md (e8a1fc6, 107L, 4184ch, 4281B)
 ├── README.md (dcc56cc, 47L, 1960ch, 1985B)
 ├── index.html (d20d275, 13L, 297ch, 297B)
 ├── package-lock.json (a13ba32, 2893L, 94356ch, 94356B)

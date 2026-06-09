@@ -43,14 +43,14 @@ Done early so the create-instance flow picks real versions/builds:
   in-process tar.gz/zip extraction, `ensure_java` command. 45 tests. See
   `docs/spec/java-manager.md`.)
 - Launch (slice D): build classpath + argv, extract natives, spawn the JVM, stream logs, track
-  playtime. ✅ code-complete (`core/launch.rs` — placeholder substitution, offline identity
+  playtime. ✅ verified (`core/launch.rs` — placeholder substitution, offline identity
   (Player + UUIDv3), traversal-safe natives extraction, `tokio::process` spawn with cwd `mc/`,
   `launch://log` streaming, slug-keyed running registry, `launch_instance`/`kill_instance`
   commands, playtime on exit. `InstanceDetail` Launch/Stop + live console + playtime. 5 Rust
   tests. See `docs/spec/vanilla-launch.md`.)
-- **Done when:** a vanilla instance launches and reaches the main menu. ⬜ pending manual
-  end-to-end verification (real MC + JRE + display; deterministic parts unit-tested). Pre-1.7
-  (`assets_legacy`) launch deferred — see follow-ups `vanilla-launch-f-1`/`-f-2`.
+- **Done when:** a vanilla instance launches and reaches the main menu. ✅ verified end-to-end
+  (real MC + JRE + display). Pre-1.7 (`assets_legacy`) launch deferred — see follow-ups
+  `vanilla-launch-f-1`/`-f-2`.
 
 ## Phase 3 — Authentication
 - Microsoft device-code OAuth → MC token; profile fetch.
