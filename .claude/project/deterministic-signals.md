@@ -1,6 +1,6 @@
 ---
-generated_at: 2026-06-09T08:19:50Z
-atomic_version: 3.0.1
+generated_at: 2026-06-09T21:58:53Z
+atomic_version: 3.1.1
 ---
 # Deterministic signals
 
@@ -9,12 +9,13 @@ atomic_version: 3.0.1
 ├── .vscode/ (1)
 │   └── extensions.json (8988c70, 3L, 80ch, 80B)
 ├── docs/ (5)
-│   ├── design/ (3)
-│   │   ├── authentication.md (2e9e492, 166L, 8732ch, 8777B)
+│   ├── design/ (4)
+│   │   ├── auth-client-id-blocker.md (2505ead, 102L, 5361ch, 5395B)
+│   │   ├── authentication.md (b987e08, 166L, 9040ch, 9085B)
 │   │   ├── fabric-quilt-launch.md (170aeb7, 105L, 6009ch, 6047B)
 │   │   └── vanilla-launch.md (e581004, 133L, 7319ch, 7372B)
 │   ├── spec/ (6)
-│   │   ├── authentication.md (f459b1e, 141L, 10210ch, 10260B)
+│   │   ├── authentication.md (b7534ce, 161L, 11383ch, 11439B)
 │   │   ├── download-engine.md (eb2b21f, 120L, 9507ch, 9580B)
 │   │   ├── fabric-quilt-launch.md (7de6879, 111L, 9202ch, 9256B)
 │   │   ├── java-manager.md (7bd5211, 134L, 9816ch, 9875B)
@@ -66,7 +67,7 @@ atomic_version: 3.0.1
 │   ├── src/ (3)
 │   │   ├── core/ (14)
 │   │   │   ├── fixtures/ (5 files, 0 dirs)
-│   │   │   ├── auth.rs (bdc25f6, 1819L, 62905ch, 66033B)
+│   │   │   ├── auth.rs (cad0b8a, 1867L, 64974ch, 68208B)
 │   │   │   ├── download.rs (dab6bbb, 1795L, 71600ch, 71695B)
 │   │   │   ├── instances.rs (163e5cf, 318L, 10162ch, 10173B)
 │   │   │   ├── java.rs (7523b18, 1526L, 56322ch, 56474B)
@@ -102,10 +103,10 @@ atomic_version: 3.0.1
 
 ## Languages
 
-- Rust: 10533 LOC (59%), 16 files (26%)
-- JSON: 3352 LOC (19%), 12 files (19%)
-- Markdown: 1794 LOC (10%), 14 files (22%)
-- TypeScript: 1746 LOC (9%), 16 files (26%)
+- Rust: 10581 LOC (59%), 16 files (25%)
+- JSON: 3352 LOC (18%), 12 files (19%)
+- Markdown: 1916 LOC (10%), 15 files (24%)
+- TypeScript: 1746 LOC (9%), 16 files (25%)
 - CSS: 92 LOC (0%), 1 file (1%)
 - TOML: 43 LOC (0%), 1 file (1%)
 - HTML: 13 LOC (0%), 1 file (1%)

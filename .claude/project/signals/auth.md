@@ -19,7 +19,7 @@ Implements Microsoft OAuth 2.0 device-code flow → Xbox Live chain → Minecraf
   - `KeyringBackend` trait + `SystemKeyringBackend` (production, backed by `keyring` crate) — injectable seam so tests never call the real OS keyring
   - `AuthHttpClient` trait + `ReqwestAuthClient` (production) — injectable HTTP seam so all tests use mock responses
   - `AuthError` enum — 11 named variants covering device-code expiry, authorization decline, XSTS XErr codes (2148916233 / 2148916235 / 2148916238), no Minecraft license (profile 404), keyring failure, store I/O failure
-  - 40 unit tests (all mock HTTP, no live TCP; all keyring tests use `FakeKeyring` or `FailingKeyring` in-process)
+  - 42 unit tests (all mock HTTP, no live TCP; all keyring tests use `FakeKeyring` or `FailingKeyring` in-process)
 - `src-tauri/src/lib.rs` (auth section, lines 16–228) — Tauri command layer:
   - `begin_login` — long-lived async command: requests device code, emits `auth://device-code` event, runs poll loop with cancel-token check, runs Xbox chain, persists account with MS refresh token in keyring, returns `AccountMeta`
   - `cancel_login` — fires a oneshot to abort the in-flight `begin_login` poll loop; no-op if not running
@@ -33,6 +33,7 @@ Implements Microsoft OAuth 2.0 device-code flow → Xbox Live chain → Minecraf
 
 - `docs/spec/authentication.md` — implementation contract: goal, non-goals, success criteria (12 criteria), checkpoints CP1–CP5 with file ranges and verification conditions, risks table, open questions, change log
 - `docs/design/authentication.md` — design doc: problem statement, goals/non-goals, token-chain diagram, approach comparisons (token storage A1–A3, UX threading B1–B2, HTTP client C1–C2), chosen approach rationale, checkpoint table, risk table
+- `docs/design/auth-client-id-blocker.md` — ongoing blocker log: AADSTS700016 root cause, Azure app registration steps, Mojang `login_with_xbox` approval gate (form at `aka.ms/mce-reviewappid`, submitted 2026-06-09, awaiting approval), test plan for post-approval verification
 
 ## Coupling
 
@@ -43,11 +44,11 @@ Implements Microsoft OAuth 2.0 device-code flow → Xbox Live chain → Minecraf
 
 ## Conventions worth knowing
 
-- Azure `client_id` is `00000000402b5328` — the official public Minecraft launcher client ID (constant `MS_CLIENT_ID` in `auth.rs:18`). Source documented in code comment.
+- Azure `client_id` defaults to `82a79499-8c2e-49b8-9e42-1dd9d56252f2` — registered modloader Azure app GUID (constant `DEFAULT_MS_CLIENT_ID` in `auth.rs:22`). Can be overridden at runtime via `MODLOADER_MS_CLIENT_ID` env var (resolved by `ms_client_id()` in `auth.rs:28`). Mojang approval gate still pending (see `docs/design/auth-client-id-blocker.md`).
 - Refresh token stored in keyring under key `account_id` (Minecraft UUID), service name `"modloader"` (constant `KEYRING_SERVICE`). MC access token and MS refresh token are never written to `accounts.json`.
 - `AccountStore` is not thread-safe internally; callers serialize access via `tokio::sync::Mutex<AccountStore>` in Tauri managed state.
 - `remove_account` ordering (F-10 fix): keyring delete happens first; if it fails, in-memory state and disk are left unchanged — no desync.
 - `poll_token_once`: MS token endpoint uses HTTP 400 for error states (`authorization_pending`, `expired_token`, `access_denied`) — these are parsed as poll responses. Any other non-200/400 status is returned as `HttpStatus` error without parsing.
 - `begin_login` cancel: oneshot sender placed in `CancelToken` managed state before the poll loop; `cancel_login` `take()`s the sender. If the receiver is already gone (login completed), the send is silently dropped.
-- All auth tests: 40 unit tests in `auth.rs`, split across CP1 (device-code/poll/refresh), CP2 (Xbox chain + XSTS XErr mapping), CP3 (AccountStore round-trips with `FakeKeyring`/`FailingKeyring`/`StoreOkDeleteFailKeyring`), CP4 (refresh-at-launch mock sequence). No real TCP connections in any test.
+- All auth tests: 42 unit tests in `auth.rs`, split across CP1 (device-code/poll/refresh), CP2 (Xbox chain + XSTS XErr mapping), CP3 (AccountStore round-trips with `FakeKeyring`/`FailingKeyring`/`StoreOkDeleteFailKeyring`), CP4 (refresh-at-launch mock sequence), CP5 (`ms_client_id_from` default, env-override, blank-override cases). No real TCP connections in any test.
 - XSTS `DisplayClaims.xui[0]` field for Xbox user ID is named `xid` (not `xuid`) — verified by fixture test `cp2_xsts_parses_token_and_xuid_from_xid_field`.

@@ -12,10 +12,30 @@
 //! No live HTTP in any test. All HTTP calls go through the injectable `AuthHttpClient`
 //! trait. Tests supply a mock client backed by a pre-loaded response queue.
 
-// Official public Minecraft launcher Azure client_id.
-// Source: https://wiki.vg/Microsoft_Authentication_Scheme (also used by PrismLauncher,
-// MultiMC, and other open-source MC launchers).
-pub const MS_CLIENT_ID: &str = "00000000402b5328";
+// Azure AD application (client) ID for the device-code flow: the "modloader" app,
+// registered 2026-06-09 (consumers tenant, personal accounts only, public client
+// flows enabled). Override per-deploy with the MODLOADER_MS_CLIENT_ID env var.
+//
+// Do NOT swap in the legacy official-launcher id (00000000402b5328): it exists only
+// in login.live.com for the redirect flow, and the AAD v2.0 device-code endpoint
+// rejects it with AADSTS700016. See docs/design/auth-client-id-blocker.md.
+pub const DEFAULT_MS_CLIENT_ID: &str = "82a79499-8c2e-49b8-9e42-1dd9d56252f2";
+
+/// Env var that overrides the built-in client ID (for forks / CI / other deploys).
+pub const MS_CLIENT_ID_ENV: &str = "MODLOADER_MS_CLIENT_ID";
+
+/// Effective client ID: `MODLOADER_MS_CLIENT_ID` if set and non-blank, else the default.
+pub fn ms_client_id() -> String {
+    ms_client_id_from(std::env::var(MS_CLIENT_ID_ENV).ok())
+}
+
+/// Pure resolution logic, separated from env access so tests need no env mutation.
+fn ms_client_id_from(override_val: Option<String>) -> String {
+    match override_val {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => DEFAULT_MS_CLIENT_ID.to_string(),
+    }
+}
 
 pub const MS_DEVICE_CODE_URL: &str =
     "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
@@ -281,11 +301,12 @@ pub async fn request_device_code(
     client: &dyn AuthHttpClient,
     device_code_url: &str,
 ) -> Result<DeviceCodeResponse, AuthError> {
+    let client_id = ms_client_id();
     let (status, body) = client
         .post_form(
             device_code_url,
             &[
-                ("client_id", MS_CLIENT_ID),
+                ("client_id", &client_id),
                 ("scope", "XboxLive.signin offline_access"),
             ],
         )
@@ -312,11 +333,12 @@ pub async fn poll_token_once(
     token_url: &str,
     device_code: &str,
 ) -> Result<Option<MsTokens>, AuthError> {
+    let client_id = ms_client_id();
     let (status, body) = client
         .post_form(
             token_url,
             &[
-                ("client_id", MS_CLIENT_ID),
+                ("client_id", &client_id),
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ("device_code", device_code),
             ],
@@ -338,11 +360,12 @@ pub async fn refresh_ms_token(
     token_url: &str,
     refresh_token: &str,
 ) -> Result<MsTokens, AuthError> {
+    let client_id = ms_client_id();
     let (status, body) = client
         .post_form(
             token_url,
             &[
-                ("client_id", MS_CLIENT_ID),
+                ("client_id", &client_id),
                 ("grant_type", "refresh_token"),
                 ("refresh_token", refresh_token),
                 ("scope", "XboxLive.signin offline_access"),
@@ -1815,5 +1838,30 @@ mod tests {
         assert_eq!(account.id, "aaaabbbbccccdddd");
         assert_eq!(account.xuid, "xbox_user_id_1234");
         // Confirm this path requires no device-code prompt (no device-code response in queue).
+    }
+
+    // ── Client ID resolution ──────────────────────────────────────────────────
+
+    #[test]
+    fn client_id_defaults_to_registered_modloader_app() {
+        // The default must be the modloader Azure app GUID (consumers tenant,
+        // public client). The legacy official-launcher id (00000000402b5328) is
+        // rejected by the AAD v2.0 device-code endpoint with AADSTS700016 —
+        // see docs/design/auth-client-id-blocker.md.
+        assert_eq!(
+            DEFAULT_MS_CLIENT_ID,
+            "82a79499-8c2e-49b8-9e42-1dd9d56252f2"
+        );
+        assert_eq!(ms_client_id_from(None), DEFAULT_MS_CLIENT_ID);
+    }
+
+    #[test]
+    fn client_id_env_override_wins_but_blank_is_ignored() {
+        assert_eq!(
+            ms_client_id_from(Some("11111111-2222-3333-4444-555555555555".into())),
+            "11111111-2222-3333-4444-555555555555"
+        );
+        // A set-but-empty override must not produce an empty client_id.
+        assert_eq!(ms_client_id_from(Some("   ".into())), DEFAULT_MS_CLIENT_ID);
     }
 }

@@ -102,7 +102,7 @@ Fixture JSON files are counted in Est. files; CP2 adds XBL/XSTS/MC/profile fixtu
 | `keyring` backend unavailable on Linux / WSL (no secret-service daemon) | High in dev environment | Injectable seam ensures tests never call the real keyring; at runtime, surface a clear error and fail loud — no silent plaintext fallback. Document the limitation for WSL users. |
 | Live HTTP accidentally used in a test | Medium (new contributor path) | Enforce via `TcpListener` mock or fixture injection for every HTTP call in `auth.rs`. If a test opens a real connection the CI integration-test policy blocks it; add a comment at the top of the test module. |
 | Token refresh races at launch (two concurrent launches refresh simultaneously) | Low | Account store update after refresh must be atomic (file write + in-memory); a simple per-account mutex or a serialized refresh future is sufficient. Spec does not prescribe the primitive. |
-| Azure client_id validity | Low (official public launcher id is stable and widely used) | Ship as a named constant with a comment pointing to the public launcher id source; if Microsoft revokes it, it is a one-line swap. |
+| Mojang approval of our client_id pending | Certain until form clears (submitted 2026-06-09) | `login_with_xbox` returns 403 for unapproved client IDs. Treat 403 there as "approval pending", not a code bug. Default client ID is the registered `modloader` Azure app (`DEFAULT_MS_CLIENT_ID`, env-overridable via `MODLOADER_MS_CLIENT_ID`); see docs/design/auth-client-id-blocker.md. |
 | XSTS `xuid` field name inconsistency (documented as `xid` in some references) | Medium | Verified by fixture tests covering the actual JSON shape from a real response snapshot; builder must confirm field name against a captured response fixture before parsing. |
 
 ## Open questions
@@ -120,6 +120,26 @@ Fixture JSON files are counted in Est. files; CP2 adds XBL/XSTS/MC/profile fixtu
    Leaning: XSTS claims (already parsed at that stage, no JWT decode dependency).
 
 ## Change log
+
+### 2026-06-09 — Own Azure app client ID; env override
+
+**What changed**
+
+- `MS_CLIENT_ID` const replaced by `DEFAULT_MS_CLIENT_ID` (`82a79499-8c2e-49b8-9e42-1dd9d56252f2`,
+  the registered `modloader` Azure app: consumers tenant, personal accounts only, public client
+  flows enabled) + `ms_client_id()` resolver honoring a `MODLOADER_MS_CLIENT_ID` env override.
+- Risk row rewritten: the "client_id validity" risk realized as AADSTS700016 — the legacy
+  official-launcher id exists only in login.live.com (redirect flow) and is rejected by the
+  AAD v2.0 device-code endpoint. New residual risk: Mojang approval of the new app id pending
+  (form aka.ms/mce-reviewappid); `login_with_xbox` 403s until it clears.
+
+**Why**
+
+Real-account testing of the Phase 3 flow failed at the device-code request. Full diagnosis in
+docs/design/auth-client-id-blocker.md.
+
+**Superseded:** "ship the official public launcher client_id as a constant; revocation is a
+one-line swap" — that id never worked for the device-code flow.
 
 ### 2026-06-09 — CP5 review fixes: active-account-id exposure + cast removal
 

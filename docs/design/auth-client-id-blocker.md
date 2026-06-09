@@ -61,16 +61,32 @@ Switch to the legacy `login.live.com` auth-code flow to keep `00000000402b5328`.
 a loopback/webview redirect handler, abandons the device-code UX, and is a much larger rewrite of
 a working flow. The client ID is the cheap thing to change, not the flow.
 
-## Resume checklist (next session)
+## Second gate: Mojang approval of the new client ID (found 2026-06-09)
 
-- [ ] Register the Azure app (steps above); obtain the client-ID GUID.
-- [ ] Wire `MS_CLIENT_ID`: read from env / build config with a constant fallback, so the per-deploy
-      ID isn't a hardcoded literal and other devs/CI can override. Paste the GUID into the local
-      config.
-- [ ] Fix the misleading comment at `auth.rs:15`.
-- [ ] Correct `docs/spec/authentication.md` risk row + `docs/design/authentication.md:39`
-      assumption (per the spec change-log rule).
-- [ ] Re-test: add a real Microsoft account end to end; then launch online.
+Registering the Azure app fixes AADSTS700016, but it is not the last gate. Mojang restricts
+which client IDs may call the Minecraft services API (`api.minecraftservices.com` —
+`login_with_xbox`, profile). A newly created Azure app gets **HTTP 403 at the
+`login_with_xbox` step** until Mojang approves it via the review form at
+https://aka.ms/mce-reviewappid. The OAuth + Xbox chain up to XSTS works without approval,
+so the device-code flow itself can be smoke-tested before the form clears.
+
+Consequence: submit the form immediately after registering the app — approval is async
+(community reports days to weeks) and the end-to-end test stays blocked until it lands.
+
+## Resume checklist
+
+- [x] Register the Azure app (steps above); obtain the client-ID GUID. *(done 2026-06-09:
+      `82a79499-8c2e-49b8-9e42-1dd9d56252f2`)*
+- [x] Submit the Mojang app-review form (https://aka.ms/mce-reviewappid) with that GUID;
+      until approved, expect 403 at `login_with_xbox` and treat it as pending, not a bug.
+      *(submitted 2026-06-09 — awaiting approval)*
+- [x] Wire the client ID: `DEFAULT_MS_CLIENT_ID` const + `ms_client_id()` with
+      `MODLOADER_MS_CLIENT_ID` env override (`auth.rs`). *(done 2026-06-09)*
+- [x] Fix the misleading comment at `auth.rs:15`. *(done 2026-06-09)*
+- [x] Correct `docs/spec/authentication.md` risk row + `docs/design/authentication.md`
+      decision row (per the spec change-log rule). *(done 2026-06-09)*
+- [ ] Re-test: add a real Microsoft account end to end (device-code + Xbox chain should pass;
+      `login_with_xbox` 403 = Mojang approval still pending); after approval, launch online.
 
 ## Sources
 
@@ -79,3 +95,8 @@ a working flow. The client ID is the cheap thing to change, not the flow.
   https://minecraft-launcher-lib.readthedocs.io/en/stable/tutorial/microsoft_login.html
 - Microsoft Entra error codes (AADSTS700016):
   https://learn.microsoft.com/en-us/entra/identity-platform/reference-error-codes
+- Entra app registration quickstart:
+  https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app
+- Minecraft Wiki — Microsoft authentication (approval form, consumers tenant):
+  https://minecraft.wiki/w/Microsoft_authentication
+- Mojang app-review form: https://aka.ms/mce-reviewappid
