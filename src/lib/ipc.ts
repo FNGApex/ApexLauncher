@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /**
  * Typed wrappers over Tauri commands. Keep every `invoke` call behind a named
@@ -333,4 +334,86 @@ export function launchInstance(slug: string): Promise<void> {
  */
 export function killInstance(slug: string): Promise<void> {
   return invoke<void>("kill_instance", { slug });
+}
+
+// --- Phase 3: Microsoft authentication. Mirrors core/auth.rs AccountMeta + lib.rs AuthCommandError. ---
+
+/**
+ * Persisted account metadata (no secrets). Mirrors `AccountMeta` in `core/auth.rs`.
+ * The MC access token and refresh token are never exposed to the frontend.
+ */
+export interface AccountMeta {
+  id: string;
+  username: string;
+  xuid: string;
+  /** Unix timestamp (seconds) when the MC token expires; null when unknown. */
+  mcTokenExpires: number | null;
+}
+
+/**
+ * Payload emitted on the `auth://device-code` event channel during `beginLogin`.
+ * Subscribe with `listenDeviceCode(handler)` before awaiting `beginLogin()`.
+ */
+export interface DeviceCodePayload {
+  userCode: string;
+  verificationUri: string;
+}
+
+/**
+ * Error shape returned by auth commands when the Tauri command returns Err.
+ * `kind` is one of the `AuthCommandError` kind strings from lib.rs.
+ */
+export interface AuthCommandError {
+  kind: string;
+  message: string;
+}
+
+/** Event name constant for the auth device-code channel. */
+export const AUTH_DEVICE_CODE_EVENT = "auth://device-code" as const;
+
+/**
+ * Subscribe to the `auth://device-code` event.
+ * Returns an unlisten function — call it to unsubscribe.
+ * Mirror of how `launch://log` is subscribed in InstanceDetail.tsx.
+ */
+export function listenDeviceCode(
+  handler: (payload: DeviceCodePayload) => void,
+): Promise<UnlistenFn> {
+  return listen<DeviceCodePayload>(AUTH_DEVICE_CODE_EVENT, (event) =>
+    handler(event.payload),
+  );
+}
+
+/**
+ * Begin the Microsoft device-code login flow.
+ *
+ * This command is long-lived: it opens the device-code request, emits an
+ * `auth://device-code` event (subscribe with `listenDeviceCode` before calling
+ * this), then polls Microsoft until the user completes sign-in or the code expires.
+ * On success, the new account is persisted and returned.
+ */
+export function beginLogin(): Promise<AccountMeta> {
+  return invoke<AccountMeta>("begin_login");
+}
+
+/**
+ * Cancel an in-flight `beginLogin`. No-op if no login is in progress.
+ */
+export function cancelLogin(): Promise<void> {
+  return invoke<void>("cancel_login");
+}
+
+/** List all persisted accounts. */
+export function listAccounts(): Promise<AccountMeta[]> {
+  return invoke<AccountMeta[]>("list_accounts");
+}
+
+/** Remove a persisted account by id. */
+export function removeAccount(id: string): Promise<void> {
+  return invoke<void>("remove_account", { id });
+}
+
+/** Set the active account used at launch. */
+export function setActiveAccount(id: string): Promise<void> {
+  return invoke<void>("set_active_account", { id });
 }
