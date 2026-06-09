@@ -120,3 +120,22 @@ Fixture JSON files are counted in Est. files; CP2 adds XBL/XSTS/MC/profile fixtu
    Leaning: XSTS claims (already parsed at that stage, no JWT decode dependency).
 
 ## Change log
+
+### 2026-06-09 — CP5 review fixes: active-account-id exposure + cast removal
+
+**What changed**
+
+- Added a `get_active_account_id` Tauri command (`-> Option<String>`) backed by a new
+  `AccountStore::active_account_id()` accessor. `Accounts.tsx` now seeds the active-account
+  indicator from this command on mount instead of tracking it in local React state.
+- `Accounts.tsx` `extractMessage` no longer casts the error to `Record<string, unknown>`;
+  it narrows via the `in` operator (project "Never cast" rule).
+- Renamed test `cp4_f10_remove_account_keyring_failure_leaves_state_unchanged` →
+  `cp3_…`; it exercises CP3 store behavior, not CP4.
+
+**Why**
+
+The active-account indicator was wrong on mount: `list_accounts` returns no active id, so
+the UI showed the wrong row as active until the user clicked. CP4 registered 5 commands;
+this adds a 6th for the active id. Found by the signals scan (`accounts-active-id-mount`
+risk, `accounts-extractmessage-cast` + `auth-test-cp4-misnamed` nits).

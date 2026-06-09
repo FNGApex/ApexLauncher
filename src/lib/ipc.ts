@@ -408,6 +408,11 @@ export function listAccounts(): Promise<AccountMeta[]> {
   return invoke<AccountMeta[]>("list_accounts");
 }
 
+/** The id of the active account, or null when none is set. */
+export function getActiveAccountId(): Promise<string | null> {
+  return invoke<string | null>("get_active_account_id");
+}
+
 /** Remove a persisted account by id. */
 export function removeAccount(id: string): Promise<void> {
   return invoke<void>("remove_account", { id });

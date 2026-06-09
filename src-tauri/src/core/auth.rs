@@ -767,6 +767,11 @@ impl AccountStore {
         self.save()
     }
 
+    /// The id of the active account, if one is set.
+    pub fn active_account_id(&self) -> Option<&str> {
+        self.state.active_account_id.as_deref()
+    }
+
     /// Get the active account metadata, if one is set.
     pub fn get_active_account(&self) -> Option<&AccountMeta> {
         self.state
@@ -1558,6 +1563,27 @@ mod tests {
         assert!(store.get_active_account().is_none());
     }
 
+    // ── Test: active_account_id accessor reflects current selection ──────────
+
+    #[test]
+    fn cp3_active_account_id_accessor_reflects_selection() {
+        let dir = TempDir::new().unwrap();
+        let mut store = make_store(&dir);
+
+        // No selection yet.
+        assert_eq!(store.active_account_id(), None);
+
+        store
+            .add_account(make_meta("acc-1", "Steve"), "r1")
+            .expect("add");
+        store.set_active_account("acc-1").expect("set active");
+        assert_eq!(store.active_account_id(), Some("acc-1"));
+
+        // Removing the active account clears the id.
+        store.remove_account("acc-1").expect("remove");
+        assert_eq!(store.active_account_id(), None);
+    }
+
     // ── Test: set_active with unknown id returns Store error ─────────────────
 
     #[test]
@@ -1709,7 +1735,7 @@ mod tests {
     }
 
     #[test]
-    fn cp4_f10_remove_account_keyring_failure_leaves_state_unchanged() {
+    fn cp3_f10_remove_account_keyring_failure_leaves_state_unchanged() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("accounts.json");
         let mut store =
