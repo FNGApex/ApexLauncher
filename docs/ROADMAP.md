@@ -52,10 +52,10 @@ Done early so the create-instance flow picks real versions/builds:
   (real MC + JRE + display). Pre-1.7 (`assets_legacy`) launch deferred — see follow-ups
   `vanilla-launch-f-1`/`-f-2`.
 
-## Phase 3 — Authentication
-- Microsoft device-code OAuth → MC token; profile fetch.
-- Multi-account; tokens in OS keychain; token refresh.
-- **Done when:** you log in with a real Microsoft account and launch online.
+## Phase 3 — Authentication ✅ DONE
+- Microsoft device-code OAuth → MC token; profile fetch. ✔
+- Multi-account; tokens in OS keychain; token refresh. ✔
+- **Done:** log in with a real Microsoft account; active account flows into launch identity. ✔
 
 ## Phase 4 — Mod loaders
 - Fabric + Quilt (meta APIs, simplest), then NeoForge + Forge (installers/maven).
@@ -92,6 +92,7 @@ Done early so the create-instance flow picks real versions/builds:
 ---
 
 ### Suggested next action
-Phases 0–1 run; version/loader metadata is wired into create-instance. Tackle the rest of
-**Phase 2** next — download engine + Java manager + the vanilla launch path. It's the
-riskiest piece and everything else (auth, loaders, packs) hangs off a real launch.
+Phases 0–3 run: vanilla launches end to end and Microsoft auth flows into launch identity.
+Tackle **Phase 4 — Mod loaders** next, starting with the Fabric + Quilt launch path (meta
+APIs, no installer jar). NeoForge + Forge follow once the modded classpath/argv seam exists,
+since they add a maven/installer-runner on top of the same launch plumbing.
