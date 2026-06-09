@@ -706,6 +706,91 @@ pub fn assemble(
 }
 
 // ---------------------------------------------------------------------------
+// Loader profile merge
+// ---------------------------------------------------------------------------
+
+/// Merge a Fabric / Quilt loader profile into an already-resolved vanilla
+/// `DownloadPlan` + `LaunchMeta`.
+///
+/// Mutations applied:
+/// 1. `launch.main_class` is overridden with the profile's `mainClass`.
+/// 2. Each loader library becomes a [`DownloadItem`] (no hash — loader profiles
+///    don't ship sha1) appended to `plan`, and its dest path is inserted into
+///    `launch.classpath` **before** the vanilla client jar (which must remain
+///    the last entry, per the `assemble` contract).
+/// 3. The profile's `arguments.jvm` / `.game` entries are OS-filtered via the
+///    same [`flatten_arg_entry`] machinery used by `assemble`, then appended to
+///    `launch.jvm_args` / `launch.game_args` after the existing vanilla args.
+///
+/// No network access. Pure function — safe to unit-test without an `AppHandle`.
+pub fn merge_loader_profile(
+    plan: &mut crate::core::download::DownloadPlan,
+    launch: &mut LaunchMeta,
+    profile: &crate::core::loader_profile::LoaderProfile,
+    target_os: &str,
+    data_dir: &std::path::Path,
+) {
+    use crate::core::download::DownloadItem;
+    use crate::core::loader_profile::maven_coord_to_path;
+
+    // 1. Override main class.
+    launch.main_class = profile.main_class.clone();
+
+    // 2. Loader libraries → plan items + classpath entries before client jar.
+    //    The client jar is guaranteed to be the last classpath entry (assemble contract).
+    //    Pop it, extend with loader lib dests in profile order, then push it back so the
+    //    final order is: [vanilla libs…, loader lib0, lib1, …, client jar].
+    let client_jar = launch.classpath.pop();
+
+    for lib in &profile.libraries {
+        // Libraries with an empty url field are skipped — a real Fabric/Quilt profile
+        // always supplies a url, but an empty string would produce a malformed "/…" path.
+        if lib.url.is_empty() {
+            continue;
+        }
+
+        let maven_path = maven_coord_to_path(&lib.name);
+
+        // URL: join base and maven path, normalising a single separator.
+        let base_url = lib.url.trim_end_matches('/');
+        let url = format!("{}/{}", base_url, maven_path);
+
+        let dest = data_dir.join("libraries").join(&maven_path);
+
+        plan.items.push(DownloadItem {
+            url,
+            dest: dest.clone(),
+            expected_hash: None,
+            size: None,
+        });
+
+        launch.classpath.push(dest.to_string_lossy().into_owned());
+    }
+
+    // Restore the client jar as the last entry.
+    if let Some(jar) = client_jar {
+        launch.classpath.push(jar);
+    }
+
+    // 3. Append loader args (OS-filtered) after the vanilla args.
+    let extra_jvm: Vec<String> = profile
+        .arguments
+        .jvm
+        .iter()
+        .flat_map(|e| flatten_arg_entry(e, target_os))
+        .collect();
+    launch.jvm_args.extend(extra_jvm);
+
+    let extra_game: Vec<String> = profile
+        .arguments
+        .game
+        .iter()
+        .flat_map(|e| flatten_arg_entry(e, target_os))
+        .collect();
+    launch.game_args.extend(extra_game);
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -1360,5 +1445,331 @@ mod tests {
         );
         // jvm_args left empty for legacy (slice D provides defaults).
         assert!(launch.jvm_args.is_empty(), "legacy jvm_args must be empty");
+    }
+
+    // -----------------------------------------------------------------------
+    // CP2 (fabric-quilt-launch): merge_loader_profile
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal `(DownloadPlan, LaunchMeta)` for testing merge.
+    fn make_test_resolve_result(data_dir: &std::path::Path) -> (crate::core::download::DownloadPlan, LaunchMeta) {
+        use crate::core::download::{DownloadItem, DownloadPlan, ExpectedHash};
+
+        let client_jar = data_dir
+            .join("versions")
+            .join("1.21.1")
+            .join("1.21.1.jar");
+
+        // One vanilla library + client jar last (mirrors assemble contract).
+        let vanilla_lib = data_dir.join("libraries").join("com/mojang/authlib/6.0.54/authlib-6.0.54.jar");
+        let plan = DownloadPlan::new(vec![
+            DownloadItem {
+                url: "https://example.com/authlib.jar".to_string(),
+                dest: vanilla_lib.clone(),
+                expected_hash: Some(ExpectedHash::Sha1("aabbccdd".to_string())),
+                size: Some(12345),
+            },
+            DownloadItem {
+                url: "https://example.com/client.jar".to_string(),
+                dest: client_jar.clone(),
+                expected_hash: Some(ExpectedHash::Sha1("deadbeef".to_string())),
+                size: Some(26000000),
+            },
+        ]);
+
+        let launch = LaunchMeta {
+            version_id: "1.21.1".to_string(),
+            version_type: "release".to_string(),
+            main_class: "net.minecraft.client.main.Main".to_string(),
+            jvm_args: vec!["-cp".to_string(), "${classpath}".to_string()],
+            game_args: vec!["--version".to_string(), "${version_name}".to_string()],
+            asset_index_id: "17".to_string(),
+            assets_legacy: false,
+            java_major: 21,
+            classpath: vec![
+                vanilla_lib.to_string_lossy().into_owned(),
+                client_jar.to_string_lossy().into_owned(), // client jar LAST
+            ],
+            natives: vec![],
+            logging_config: None,
+        };
+
+        (plan, launch)
+    }
+
+    /// Build a `LoaderProfile` matching the fabric fixture (from CP1).
+    fn fabric_profile() -> crate::core::loader_profile::LoaderProfile {
+        let json = include_str!("fixtures/fabric_profile.json");
+        serde_json::from_str(json).expect("fabric profile fixture must parse")
+    }
+
+    #[test]
+    fn merge_loader_profile_overrides_main_class() {
+        let base = std::path::Path::new("/data");
+        let (mut plan, mut launch) = make_test_resolve_result(base);
+        let profile = fabric_profile();
+
+        merge_loader_profile(&mut plan, &mut launch, &profile, "linux", base);
+
+        assert_eq!(
+            launch.main_class,
+            "net.fabricmc.loader.impl.launch.knot.KnotClient",
+            "main_class must be overridden to the loader's mainClass"
+        );
+    }
+
+    #[test]
+    fn merge_loader_profile_client_jar_still_last() {
+        let base = std::path::Path::new("/data");
+        let (mut plan, mut launch) = make_test_resolve_result(base);
+        let profile = fabric_profile();
+        let client_jar = base
+            .join("versions")
+            .join("1.21.1")
+            .join("1.21.1.jar")
+            .to_string_lossy()
+            .into_owned();
+
+        merge_loader_profile(&mut plan, &mut launch, &profile, "linux", base);
+
+        assert_eq!(
+            launch.classpath.last().unwrap(),
+            &client_jar,
+            "client jar must remain the last classpath entry after merge"
+        );
+    }
+
+    #[test]
+    fn merge_loader_profile_loader_libs_on_classpath() {
+        let base = std::path::Path::new("/data");
+        let (mut plan, mut launch) = make_test_resolve_result(base);
+        let profile = fabric_profile();
+        let original_cp_len = launch.classpath.len();
+
+        merge_loader_profile(&mut plan, &mut launch, &profile, "linux", base);
+
+        // Classpath must grow by the number of loader libraries.
+        assert_eq!(
+            launch.classpath.len(),
+            original_cp_len + profile.libraries.len(),
+            "classpath must contain all loader libs plus original entries"
+        );
+
+        // Each loader lib's dest must appear on the classpath.
+        for lib in &profile.libraries {
+            let maven_path = crate::core::loader_profile::maven_coord_to_path(&lib.name);
+            let expected_dest = base
+                .join("libraries")
+                .join(&maven_path)
+                .to_string_lossy()
+                .into_owned();
+            assert!(
+                launch.classpath.contains(&expected_dest),
+                "loader lib {} must be on classpath; got: {:?}",
+                lib.name,
+                launch.classpath
+            );
+        }
+    }
+
+    #[test]
+    fn merge_loader_profile_plan_gains_loader_items_with_no_hash() {
+        let base = std::path::Path::new("/data");
+        let (mut plan, mut launch) = make_test_resolve_result(base);
+        let profile = fabric_profile();
+        let original_item_count = plan.items.len();
+
+        merge_loader_profile(&mut plan, &mut launch, &profile, "linux", base);
+
+        assert_eq!(
+            plan.items.len(),
+            original_item_count + profile.libraries.len(),
+            "plan must gain one item per loader library"
+        );
+
+        // All newly added items must have expected_hash == None.
+        let new_items = &plan.items[original_item_count..];
+        for item in new_items {
+            assert!(
+                item.expected_hash.is_none(),
+                "loader lib items must have expected_hash None; got: {:?}",
+                item.expected_hash
+            );
+        }
+    }
+
+    #[test]
+    fn merge_loader_profile_url_join_trailing_slash() {
+        // Fabric uses "https://maven.fabricmc.net/" (trailing slash).
+        // Joining with the maven path must NOT produce "//" or lose the separator.
+        let base = std::path::Path::new("/data");
+        let (mut plan, mut launch) = make_test_resolve_result(base);
+        let profile = fabric_profile();
+
+        merge_loader_profile(&mut plan, &mut launch, &profile, "linux", base);
+
+        // The first library is net.fabricmc:fabric-loader:0.16.10 at https://maven.fabricmc.net/
+        // Expected URL: https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.16.10/fabric-loader-0.16.10.jar
+        let first_new_item = &plan.items[2]; // 2 original items (vanilla lib + client jar)
+        assert!(
+            !first_new_item.url.contains("//net/"),
+            "URL must not contain double slash before maven path: {}",
+            first_new_item.url
+        );
+        assert!(
+            first_new_item.url.contains("https://maven.fabricmc.net/net/fabricmc/fabric-loader"),
+            "URL must join base and maven path correctly: {}",
+            first_new_item.url
+        );
+    }
+
+    #[test]
+    fn merge_loader_profile_jvm_args_appended_after_vanilla() {
+        let base = std::path::Path::new("/data");
+        let (mut plan, mut launch) = make_test_resolve_result(base);
+        let original_jvm_args = launch.jvm_args.clone();
+        let profile = fabric_profile();
+
+        merge_loader_profile(&mut plan, &mut launch, &profile, "linux", base);
+
+        // Original vanilla args must still be at the start.
+        assert!(
+            launch.jvm_args.starts_with(&original_jvm_args),
+            "vanilla jvm_args must remain at the front"
+        );
+
+        // Fabric fixture has one jvm arg: "-DFabricMcEmu=net.minecraft.client.main.Main"
+        assert!(
+            launch.jvm_args.contains(&"-DFabricMcEmu=net.minecraft.client.main.Main".to_string()),
+            "loader jvm arg must be appended: {:?}",
+            launch.jvm_args
+        );
+    }
+
+    #[test]
+    fn merge_loader_profile_game_args_appended_after_vanilla() {
+        let base = std::path::Path::new("/data");
+        let (mut plan, mut launch) = make_test_resolve_result(base);
+        let original_game_args = launch.game_args.clone();
+        let profile = fabric_profile();
+
+        merge_loader_profile(&mut plan, &mut launch, &profile, "linux", base);
+
+        // Vanilla args remain at front.
+        assert!(
+            launch.game_args.starts_with(&original_game_args),
+            "vanilla game_args must remain at the front"
+        );
+
+        // Fabric fixture has zero game args — length should be unchanged.
+        assert_eq!(
+            launch.game_args.len(),
+            original_game_args.len(),
+            "no loader game args to append (fixture has empty game args)"
+        );
+    }
+
+    #[test]
+    fn merge_loader_profile_classpath_order() {
+        // Asserts exact classpath order: [vanilla libs..., loader libs in PROFILE order..., client jar].
+        // This test would fail against the original reversed-insertion implementation.
+        let base = std::path::Path::new("/data");
+        let (mut plan, mut launch) = make_test_resolve_result(base);
+        let profile = fabric_profile();
+
+        // Record the vanilla lib (first entry) and client jar (last entry) before merge.
+        let vanilla_lib = launch.classpath[0].clone();
+        let client_jar = launch.classpath.last().unwrap().clone();
+
+        merge_loader_profile(&mut plan, &mut launch, &profile, "linux", base);
+
+        // Build expected loader dest paths in profile order.
+        let expected_loader_paths: Vec<String> = profile
+            .libraries
+            .iter()
+            .map(|lib| {
+                let maven_path = crate::core::loader_profile::maven_coord_to_path(&lib.name);
+                base.join("libraries")
+                    .join(&maven_path)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        // Expected full order: vanilla_lib, loader_lib0, loader_lib1, …, client_jar.
+        let mut expected = vec![vanilla_lib];
+        expected.extend(expected_loader_paths);
+        expected.push(client_jar);
+
+        assert_eq!(
+            launch.classpath,
+            expected,
+            "classpath must be [vanilla libs, loader libs in profile order, client jar]"
+        );
+    }
+
+    #[test]
+    fn merge_loader_profile_empty_url_lib_skipped() {
+        // A loader library with an empty url must be silently skipped — no malformed
+        // URL pushed to the plan and no malformed path on the classpath.
+        use crate::core::loader_profile::{LoaderLibrary, LoaderProfile};
+        use crate::core::resolver::Arguments;
+
+        let base = std::path::Path::new("/data");
+        let (mut plan, mut launch) = make_test_resolve_result(base);
+
+        let profile = LoaderProfile {
+            main_class: "net.fabricmc.loader.impl.launch.knot.KnotClient".to_string(),
+            libraries: vec![
+                LoaderLibrary {
+                    name: "net.fabricmc:fabric-loader:0.16.10".to_string(),
+                    url: "https://maven.fabricmc.net/".to_string(),
+                },
+                LoaderLibrary {
+                    // Empty url — must be skipped without producing "/net/..." path.
+                    name: "org.example:empty-url-lib:1.0".to_string(),
+                    url: "".to_string(),
+                },
+                LoaderLibrary {
+                    name: "net.fabricmc:intermediary:1.21.1".to_string(),
+                    url: "https://maven.fabricmc.net/".to_string(),
+                },
+            ],
+            arguments: Arguments {
+                jvm: vec![],
+                game: vec![],
+            },
+        };
+
+        let original_item_count = plan.items.len();
+
+        merge_loader_profile(&mut plan, &mut launch, &profile, "linux", base);
+
+        // Only 2 of 3 libs should be added (the empty-url one is skipped).
+        assert_eq!(
+            plan.items.len(),
+            original_item_count + 2,
+            "empty-url library must be skipped; plan should gain 2 items, not 3"
+        );
+
+        // No plan item URL should start with "/" (malformed).
+        for item in &plan.items {
+            assert!(
+                !item.url.starts_with('/'),
+                "plan must not contain a malformed (leading-slash) URL: {}",
+                item.url
+            );
+        }
+
+        // Classpath must not contain any path that would come from the empty-url lib.
+        let bad_path = base
+            .join("libraries")
+            .join("org/example/empty-url-lib/1.0/empty-url-lib-1.0.jar")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            !launch.classpath.contains(&bad_path),
+            "empty-url library dest must not appear on classpath"
+        );
     }
 }
