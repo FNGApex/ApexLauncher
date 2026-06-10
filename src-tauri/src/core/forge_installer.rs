@@ -30,6 +30,7 @@
 //! `CapturingInstallSink`.
 
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::Mutex;
 
 use crate::core::loader_profile::maven_coord_to_path;
@@ -121,10 +122,12 @@ pub trait InstallSink: Send + Sync + 'static {
 }
 
 /// An [`InstallSink`] that captures lines for test assertion.
+#[cfg(test)]
 pub struct CapturingInstallSink {
     pub lines: Mutex<Vec<(String, String)>>, // (stream, line)
 }
 
+#[cfg(test)]
 impl CapturingInstallSink {
     pub fn new() -> Self {
         Self {
@@ -133,6 +136,7 @@ impl CapturingInstallSink {
     }
 }
 
+#[cfg(test)]
 impl InstallSink for CapturingInstallSink {
     fn log(&self, stream: &str, line: &str) {
         self.lines
@@ -382,8 +386,12 @@ pub async fn run_installer<Sink: InstallSink>(
             // Wait for both reader tasks before waiting on the child so the pipes
             // are fully drained (avoids a deadlock where wait() holds the child
             // while the child blocks on a full pipe).
-            let stdout_lines = stdout_task.await.unwrap_or_default();
-            let stderr_lines = stderr_task.await.unwrap_or_default();
+            let stdout_lines = stdout_task
+                .await
+                .map_err(|e| format!("stdout reader task panicked: {e}"))?;
+            let stderr_lines = stderr_task
+                .await
+                .map_err(|e| format!("stderr reader task panicked: {e}"))?;
 
             let status = child
                 .wait()

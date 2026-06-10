@@ -527,6 +527,10 @@ async fn launch_instance(
         }
     }
 
+    // Holds the JavaInstallation produced in the forge/neoforge installer step so
+    // step 5 can reuse it instead of calling ensure_java a second time.
+    let mut java_inst_opt: Option<core::java::JavaInstallation> = None;
+
     // --- 3c. Forge / NeoForge: run headless installer (idempotent), then merge profile. ---
     if inst.loader.kind == "forge" || inst.loader.kind == "neoforge" {
         let loader_version = inst.loader.version.as_deref().ok_or_else(|| {
@@ -543,7 +547,9 @@ async fn launch_instance(
         };
 
         // Ensure Java before running the installer (installer is a JVM process).
+        // Stored in `java_inst_opt` so step 5 can reuse it without a second call.
         let java_for_install = core::java::ensure_java(&app, launch_meta.java_major).await?;
+        java_inst_opt = Some(java_for_install.clone());
 
         let install_sink = TauriInstallSink { app: app.clone() };
         let version_json_path = forge_installer::run_installer(
@@ -581,8 +587,11 @@ async fn launch_instance(
         ));
     }
 
-    // --- 5. Ensure Java. ---
-    let java_inst = core::java::ensure_java(&app, launch_meta.java_major).await?;
+    // --- 5. Ensure Java (reuse from installer step if forge/neoforge). ---
+    let java_inst = match java_inst_opt {
+        Some(j) => j,
+        None => core::java::ensure_java(&app, launch_meta.java_major).await?,
+    };
 
     // --- 6. Resolve paths. ---
     let instances_dir = core::store::instances_dir(&app)?;
