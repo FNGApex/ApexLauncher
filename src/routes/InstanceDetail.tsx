@@ -10,8 +10,10 @@ import {
   type FolderMod,
   type LaunchLogPayload,
   type LaunchExitPayload,
+  type InstallLogPayload,
   LAUNCH_LOG_EVENT,
   LAUNCH_EXIT_EVENT,
+  INSTALL_LOG_EVENT,
 } from "@/lib/ipc";
 
 /** Max log lines kept in the console buffer before oldest are dropped. */
@@ -31,13 +33,14 @@ export function InstanceDetail() {
   const [logLines, setLogLines] = useState<string[]>([]);
   const consoleRef = useRef<HTMLPreElement>(null);
 
-  // Subscribe to launch://log and launch://exit for this instance's slug.
+  // Subscribe to launch://log, launch://exit, and install://log for this instance's slug.
   useEffect(() => {
     if (!slug) return;
 
     let cancelled = false;
     let unlistenLog: (() => void) | undefined;
     let unlistenExit: (() => void) | undefined;
+    let unlistenInstall: (() => void) | undefined;
 
     listen<LaunchLogPayload>(LAUNCH_LOG_EVENT, (event) => {
       if (event.payload.instanceId !== slug) return;
@@ -63,10 +66,23 @@ export function InstanceDetail() {
       else unlistenExit = fn;
     }).catch(console.error);
 
+    // install://log carries no instanceId — the installer runs at most once at a
+    // time, so all lines are attributed to the instance being launched right now.
+    listen<InstallLogPayload>(INSTALL_LOG_EVENT, (event) => {
+      setLogLines((prev) => {
+        const next = [...prev, `[install:${event.payload.stream}] ${event.payload.line}`];
+        return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next;
+      });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenInstall = fn;
+    }).catch(console.error);
+
     return () => {
       cancelled = true;
       unlistenLog?.();
       unlistenExit?.();
+      unlistenInstall?.();
     };
   }, [slug]);
 

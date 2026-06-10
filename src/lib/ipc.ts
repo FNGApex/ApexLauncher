@@ -288,6 +288,40 @@ export function ensureJava(major: number): Promise<JavaInstallation> {
   return invoke<JavaInstallation>("ensure_java", { major });
 }
 
+// --- Phase 4, slice B: NeoForge/Forge install progress. Mirrors lib.rs InstallLogPayload. ---
+
+/**
+ * Payload emitted on the `install://log` Tauri event channel during
+ * NeoForge / Forge headless installer runs.
+ *
+ * Distinct from `launch://log` — installer output is log-shaped (one line
+ * at a time from the installer's stdout/stderr), not item-progress-shaped.
+ * No `instanceId` field: only one installer runs at a time.
+ *
+ * Subscribe with `listen(INSTALL_LOG_EVENT, handler)`.
+ */
+export interface InstallLogPayload {
+  /** `"stdout"` or `"stderr"`. */
+  stream: string;
+  line: string;
+}
+
+/** Event name constant for the install log channel. */
+export const INSTALL_LOG_EVENT = "install://log" as const;
+
+/**
+ * Subscribe to the `install://log` event.
+ * Returns an unlisten function — call it to unsubscribe.
+ * Pattern mirrors `listenDeviceCode`.
+ */
+export function listenInstallLog(
+  handler: (payload: InstallLogPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<InstallLogPayload>(INSTALL_LOG_EVENT, (event) =>
+    handler(event.payload),
+  );
+}
+
 // --- Phase 2, slice D: vanilla launch. Mirrors lib.rs LaunchLogPayload/LaunchExitPayload. ---
 
 /**
