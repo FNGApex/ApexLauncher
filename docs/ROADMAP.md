@@ -58,9 +58,12 @@ Done early so the create-instance flow picks real versions/builds:
 - **Done:** log in with a real Microsoft account; active account flows into launch identity. ✔
 
 ## Phase 4 — Mod loaders
-- Fabric + Quilt (meta APIs, simplest), then NeoForge + Forge (installers/maven).
-- Launch a modded-loader instance with no mods.
-- **Done when:** a Fabric/NeoForge instance launches.
+- Fabric + Quilt (meta APIs, simplest), then NeoForge + Forge (installers/maven). ✔ (slice A
+  Fabric/Quilt + slice B NeoForge/Forge headless-installer launch — see
+  `docs/spec/fabric-quilt-launch.md`, `docs/spec/neoforge-forge-launch.md`)
+- Launch a modded-loader instance with no mods. ✔ code-complete; NeoForge/Forge manual e2e
+  pending (see neoforge-forge-launch spec Implementation log)
+- **Done when:** a Fabric/NeoForge instance launches. Fabric ✔; NeoForge pending manual run.
 
 ## Phase 5 — Providers: browse & add mods
 - ⚠️ **Apply for the free CurseForge API key now** (<https://console.curseforge.com>) — it's
@@ -92,7 +95,9 @@ Done early so the create-instance flow picks real versions/builds:
 ---
 
 ### Suggested next action
-Phases 0–3 run: vanilla launches end to end and Microsoft auth flows into launch identity.
-Tackle **Phase 4 — Mod loaders** next, starting with the Fabric + Quilt launch path (meta
-APIs, no installer jar). NeoForge + Forge follow once the modded classpath/argv seam exists,
-since they add a maven/installer-runner on top of the same launch plumbing.
+Phase 4 is code-complete: all four loaders (Fabric, Quilt, NeoForge, Forge) wire into the
+launch pipeline; NeoForge/Forge manual e2e verification is the only open box. Two external
+gates are pending in parallel: Mojang app-review approval for the MS-auth client id
+(`docs/design/auth-client-id-blocker.md`) and — before starting **Phase 5 — Providers** —
+the free CurseForge API key (<https://console.curseforge.com>; apply early, it gates the
+first CF API call).
