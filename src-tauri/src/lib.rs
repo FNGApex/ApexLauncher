@@ -5,6 +5,7 @@ use tauri::Manager as _;
 mod core;
 use core::auth::{self, AccountMeta, AccountStore, AuthError};
 use core::download::{self, DownloadPlan, ItemOutcome, ItemStatus, PlanResult, ProgressSink, ProgressUpdate};
+use core::forge_installer::{self, InstallerLoaderKind, InstallSink};
 use core::instances::{self, CreateInstanceReq, Instance, InstanceDetail};
 use core::java::JavaInstallation;
 use core::launch::{self, LaunchSink, RunningRegistry};
@@ -449,6 +450,34 @@ impl LaunchSink for TauriLaunchSink {
     }
 }
 
+/// Payload emitted on the `install://log` Tauri event channel.
+///
+/// Distinct from `launch://log` — installer output is log-shaped (one line at
+/// a time from the installer's stdout/stderr), not item-progress-shaped.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallLogPayload {
+    /// `"stdout"` or `"stderr"`.
+    stream: String,
+    line: String,
+}
+
+/// An [`InstallSink`] that emits `install://log` events on the Tauri event channel.
+struct TauriInstallSink {
+    app: tauri::AppHandle,
+}
+
+impl InstallSink for TauriInstallSink {
+    fn log(&self, stream: &str, line: &str) {
+        use tauri::Emitter as _;
+        let payload = InstallLogPayload {
+            stream: stream.to_owned(),
+            line: line.to_owned(),
+        };
+        let _ = self.app.emit("install://log", payload);
+    }
+}
+
 /// Launch a vanilla Minecraft instance.
 ///
 /// Orchestrates: load instance → resolve → download → ensure Java →
@@ -496,6 +525,39 @@ async fn launch_instance(
             let profile = loader_profile::fetch_profile(&app, &inst.loader.kind, &inst.minecraft, v).await?;
             resolver::merge_loader_profile(&mut plan, &mut launch_meta, &profile, target_os, &data_dir);
         }
+    }
+
+    // --- 3c. Forge / NeoForge: run headless installer (idempotent), then merge profile. ---
+    if inst.loader.kind == "forge" || inst.loader.kind == "neoforge" {
+        let loader_version = inst.loader.version.as_deref().ok_or_else(|| {
+            format!(
+                "instance '{}' has loader kind '{}' but no loader version set",
+                inst.slug, inst.loader.kind
+            )
+        })?;
+
+        let installer_kind = if inst.loader.kind == "neoforge" {
+            InstallerLoaderKind::NeoForge
+        } else {
+            InstallerLoaderKind::Forge
+        };
+
+        // Ensure Java before running the installer (installer is a JVM process).
+        let java_for_install = core::java::ensure_java(&app, launch_meta.java_major).await?;
+
+        let install_sink = TauriInstallSink { app: app.clone() };
+        let version_json_path = forge_installer::run_installer(
+            installer_kind,
+            loader_version,
+            &inst.minecraft,
+            &java_for_install.path,
+            &data_dir,
+            &install_sink,
+        )
+        .await?;
+
+        let profile = loader_profile::load_forge_profile(&version_json_path)?;
+        resolver::merge_loader_profile(&mut plan, &mut launch_meta, &profile, target_os, &data_dir);
     }
 
     // --- 4. Download: execute the plan; inspect outcomes before proceeding. ---
