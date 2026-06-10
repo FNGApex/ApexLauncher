@@ -110,3 +110,29 @@ Unresolved items deferred per the design doc:
 ## Change log
 
 <!-- new entries go here, newest first -->
+
+## Implementation log
+
+### shipped (manual e2e pending) — 2026-06-10
+
+Built across 7 iterations of /subagent-implementation. Commits (chronological):
+
+- `005ed3f` — CP-1 headless installer runner module (forge_installer.rs, 11 tests)
+- `c984f88` — CP-2 forge version.json → LoaderProfile + resolver merge extensions
+- `596e0af` — CP-1 io hardening (concurrent stream drain, .part guard, chunked download) + CP-2 argv regression tests (missed staging in c984f88)
+- `ca3afc3` — CP-3 lib.rs forge/neoforge launch wiring + install://log sink
+- `c772d91` — CP-4 frontend install://log surfacing in InstanceDetail
+- `c09cb4e` — polish: JoinError propagation, single ensure_java, cfg(test) gate
+
+**Out-of-scope work performed during this build:**
+- none
+
+**Unforeseens — surprises that emerged during implementation:**
+- Forge `version.json` library URLs are FULL artifact URLs, while fabric/quilt profiles carry base repo URLs; the shared `LoaderLibrary.url` field would have produced double-path 404s. Resolved with a `.jar`-suffix routing contract in `merge_loader_profile` (caught by iter-2 reviewer before any live download ran).
+- CP1's select!-based stream drain was a real deadlock risk for noisy installers; replaced with spawned reader tasks (iter 4).
+
+**Deferred items still open:**
+- `neoforge-forge-launch-f-5` — type-safe artifact-vs-base URL contract (.claude/project/followups/)
+- `neoforge-forge-launch-f-11` — install://log per-instance filtering (.claude/project/followups/)
+- Manual e2e (success criteria 1, 2, 8): NeoForge launch, Forge launch, vanilla/fabric regression — pending user verification; MS-auth online launch additionally blocked on Mojang app-review approval (see docs/design/auth-client-id-blocker.md), offline mode unaffected.
+- Dropped at triage: F-4 (deliberate maven_coord_to_path reuse), F-6 (placeholders covered by synthetic launch.rs tests), F-12 (wrapper kept for ipc.ts pattern parity).
