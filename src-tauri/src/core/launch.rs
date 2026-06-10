@@ -1184,6 +1184,112 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // CP2 (neoforge-forge-launch): forge placeholder regression
+    //
+    // Confirms that the three placeholders used in Forge/NeoForge JVM args but
+    // not present in vanilla manifests are correctly handled by the existing
+    // substitution table (launch.rs:219-244).  No new logic — pure regression.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_argv_forge_library_directory_substituted() {
+        // Forge JVM args include: -DlibraryDirectory=${library_directory}
+        // ${library_directory} is resolved to <assets_root_parent>/libraries.
+        let jvm_args = vec![
+            "-DlibraryDirectory=${library_directory}",
+            "-cp",
+            "${classpath}",
+        ];
+        let meta = make_meta(
+            "release",
+            jvm_args,
+            vec![],
+            vec!["/data/versions/1.21.1/1.21.1.jar"],
+            false,
+            None,
+        );
+        let paths = make_paths();
+        // assets_root = /data/assets → parent = /data → libraries = /data/libraries
+
+        let argv = build_argv(&meta, &paths, &offline_identity()).expect("no unresolved");
+
+        let lib_dir_arg = argv
+            .iter()
+            .find(|a| a.starts_with("-DlibraryDirectory="))
+            .expect("-DlibraryDirectory arg must be in argv");
+        assert!(
+            lib_dir_arg.ends_with("libraries"),
+            "${{library_directory}} must resolve to .../libraries: {lib_dir_arg}"
+        );
+        assert!(
+            !lib_dir_arg.contains("${library_directory}"),
+            "${{library_directory}} must be fully substituted: {lib_dir_arg}"
+        );
+    }
+
+    #[test]
+    fn build_argv_forge_classpath_separator_substituted() {
+        // Forge JVM args can include ${classpath_separator} for manual classpath assembly.
+        let jvm_args = vec![
+            "-DcpSep=${classpath_separator}",
+            "-cp",
+            "${classpath}",
+        ];
+        let meta = make_meta(
+            "release",
+            jvm_args,
+            vec![],
+            vec!["/data/versions/1.21.1/1.21.1.jar"],
+            false,
+            None,
+        );
+        let paths = make_paths();
+
+        let argv = build_argv(&meta, &paths, &offline_identity()).expect("no unresolved");
+
+        let sep_arg = argv
+            .iter()
+            .find(|a| a.starts_with("-DcpSep="))
+            .expect("-DcpSep arg must be in argv");
+        assert!(
+            !sep_arg.contains("${classpath_separator}"),
+            "${{classpath_separator}} must be fully substituted: {sep_arg}"
+        );
+        // Value must be OS-appropriate: ':' on non-Windows, ';' on Windows.
+        #[cfg(target_os = "windows")]
+        assert_eq!(sep_arg, "-DcpSep=;");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(sep_arg, "-DcpSep=:");
+    }
+
+    #[test]
+    fn build_argv_forge_version_name_substituted() {
+        // Forge game args include ${version_name} for FML bootstrap.
+        let game_args = vec!["--fml.mcVersion", "${version_name}"];
+        let meta = make_meta(
+            "release",
+            vec!["-cp", "${classpath}"],
+            game_args,
+            vec!["/data/versions/1.21.1/1.21.1.jar"],
+            false,
+            None,
+        );
+        let paths = make_paths();
+
+        let argv = build_argv(&meta, &paths, &offline_identity()).expect("no unresolved");
+
+        let mc_version = argv
+            .iter()
+            .position(|a| a == "--fml.mcVersion")
+            .and_then(|i| argv.get(i + 1))
+            .expect("--fml.mcVersion value must be present in argv");
+        assert_eq!(
+            mc_version, "1.21.1",
+            "${{version_name}} must resolve to version_id"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // CP2 — extract_natives
     // -----------------------------------------------------------------------
 

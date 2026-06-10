@@ -221,7 +221,10 @@ where
     let jar_name = installer_jar_name(kind, loader_version, mc_version);
     let jar_dest = installer_dir.join(&jar_name);
 
-    // Only download if not already cached.
+    // Only download if the completed jar is not already cached.
+    // A leftover `.part` file (from an interrupted download) does NOT satisfy
+    // this check — the download closure is responsible for writing to a `.part`
+    // path and atomically renaming to `jar_dest` on success.
     if !jar_dest.exists() {
         let url = installer_url(kind, loader_version, mc_version);
         download(url, jar_dest.clone()).await?;
@@ -291,7 +294,6 @@ pub async fn run_installer<Sink: InstallSink>(
     data_dir: &Path,
     sink: &Sink,
 ) -> Result<PathBuf, String> {
-    use tokio::io::AsyncBufReadExt as _;
     use tokio::process::Command;
 
     run_installer_core(
@@ -321,16 +323,23 @@ pub async fn run_installer<Sink: InstallSink>(
                 return Err(format!("installer download returned {}: {url}", resp.status()));
             }
 
-            // Stream bytes to file.
+            // Stream chunks to a `.part` file; rename to `dest` on success
+            // so that an interrupted download does not leave a valid-looking jar
+            // that would satisfy the cache check on the next run.
+            use futures_util::StreamExt as _;
             use std::io::Write as _;
-            let mut file = std::fs::File::create(&dest)
-                .map_err(|e| format!("failed to create installer jar at {}: {e}", dest.display()))?;
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| format!("failed to read installer response bytes: {e}"))?;
-            file.write_all(&bytes)
-                .map_err(|e| format!("failed to write installer jar: {e}"))?;
+            let part = dest.with_extension("part");
+            let mut file = std::fs::File::create(&part)
+                .map_err(|e| format!("failed to create installer part at {}: {e}", part.display()))?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| format!("failed to read installer response chunk: {e}"))?;
+                file.write_all(&chunk)
+                    .map_err(|e| format!("failed to write installer jar chunk: {e}"))?;
+            }
+            drop(file);
+            std::fs::rename(&part, &dest)
+                .map_err(|e| format!("failed to rename installer part to jar: {e}"))?;
 
             Ok(())
         },
@@ -347,39 +356,34 @@ pub async fn run_installer<Sink: InstallSink>(
             let stdout_pipe = child.stdout.take().ok_or("failed to capture stdout")?;
             let stderr_pipe = child.stderr.take().ok_or("failed to capture stderr")?;
 
-            let mut stdout_reader =
-                tokio::io::BufReader::new(stdout_pipe).lines();
-            let mut stderr_reader =
-                tokio::io::BufReader::new(stderr_pipe).lines();
-
-            let mut stdout_lines = Vec::new();
-            let mut stderr_lines = Vec::new();
-
-            // Drain stdout and stderr concurrently until both close.
-            loop {
-                tokio::select! {
-                    line = stdout_reader.next_line() => {
-                        match line {
-                            Ok(Some(l)) => stdout_lines.push(l),
-                            _ => break,
-                        }
-                    }
-                    line = stderr_reader.next_line() => {
-                        match line {
-                            Ok(Some(l)) => stderr_lines.push(l),
-                            _ => break,
-                        }
-                    }
+            // Drain stdout and stderr on independent tasks so that neither pipe
+            // can block the child when the other pipe's OS buffer fills (> ~64 KB).
+            // A select!-then-sequential-drain approach breaks as soon as one stream
+            // closes while the other still has buffered data.
+            let stdout_task = tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt as _;
+                let mut reader = tokio::io::BufReader::new(stdout_pipe).lines();
+                let mut lines = Vec::new();
+                while let Ok(Some(l)) = reader.next_line().await {
+                    lines.push(l);
                 }
-            }
+                lines
+            });
+            let stderr_task = tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt as _;
+                let mut reader = tokio::io::BufReader::new(stderr_pipe).lines();
+                let mut lines = Vec::new();
+                while let Ok(Some(l)) = reader.next_line().await {
+                    lines.push(l);
+                }
+                lines
+            });
 
-            // Drain any remainder after one stream closes.
-            while let Ok(Some(l)) = stdout_reader.next_line().await {
-                stdout_lines.push(l);
-            }
-            while let Ok(Some(l)) = stderr_reader.next_line().await {
-                stderr_lines.push(l);
-            }
+            // Wait for both reader tasks before waiting on the child so the pipes
+            // are fully drained (avoids a deadlock where wait() holds the child
+            // while the child blocks on a full pipe).
+            let stdout_lines = stdout_task.await.unwrap_or_default();
+            let stderr_lines = stderr_task.await.unwrap_or_default();
 
             let status = child
                 .wait()
@@ -731,5 +735,183 @@ mod tests {
         assert!(lines.contains(&("stdout".to_string(), "line A".to_string())));
         assert!(lines.contains(&("stdout".to_string(), "line B".to_string())));
         assert!(lines.contains(&("stderr".to_string(), "err C".to_string())));
+    }
+
+    // --- F-2: .part leftover does not satisfy the cache check ----------------
+    //
+    // A pre-existing `<jar>.part` file (interrupted download) must NOT be
+    // treated as a completed download. The download closure must still be called.
+
+    #[tokio::test]
+    async fn leftover_part_file_does_not_skip_download() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let java_bin = PathBuf::from("/usr/bin/java");
+
+        // Pre-create the installer cache dir and a leftover `.part` file.
+        let installer_dir = data_dir.join("installer-cache");
+        std::fs::create_dir_all(&installer_dir).unwrap();
+        let jar_name = installer_jar_name(InstallerLoaderKind::NeoForge, "21.1.72", "1.21.1");
+        let jar_dest = installer_dir.join(&jar_name);
+        // Simulate interrupted download: `.part` exists but the final `.jar` does not.
+        let part_path = jar_dest.with_extension("part");
+        std::fs::write(&part_path, b"partial-garbage").unwrap();
+        assert!(!jar_dest.exists(), "jar must not exist before test");
+
+        let download_called = Arc::new(Mutex::new(false));
+        let dc = Arc::clone(&download_called);
+
+        let version_id = "neoforge-21.1.72";
+        let version_dir = data_dir.join("versions").join(version_id);
+        let sink = CapturingInstallSink::new();
+
+        let _ = run_installer_core(
+            InstallerLoaderKind::NeoForge,
+            "21.1.72",
+            "1.21.1",
+            &java_bin,
+            &data_dir,
+            // download — record that it was called, write the jar
+            move |_url, dest| {
+                *dc.lock().unwrap() = true;
+                async move {
+                    std::fs::write(&dest, b"real-jar").unwrap();
+                    Ok(())
+                }
+            },
+            // spawn — succeed and create version.json
+            move |_java, _args, _cwd| {
+                std::fs::create_dir_all(&version_dir).unwrap();
+                let vj = version_dir.join(format!("{version_id}.json"));
+                std::fs::write(&vj, "{}").unwrap();
+                async { Ok(SpawnResult { stdout_lines: vec![], stderr_lines: vec![], exit_code: 0 }) }
+            },
+            &sink,
+        )
+        .await;
+
+        assert!(
+            *download_called.lock().unwrap(),
+            "download must be called when only a .part leftover exists"
+        );
+    }
+
+    // --- F-2: completed jar satisfies cache check (no re-download) -----------
+
+    #[tokio::test]
+    async fn completed_jar_satisfies_cache_check() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let java_bin = PathBuf::from("/usr/bin/java");
+
+        // Pre-create the installer cache dir and the completed jar.
+        let installer_dir = data_dir.join("installer-cache");
+        std::fs::create_dir_all(&installer_dir).unwrap();
+        let jar_name = installer_jar_name(InstallerLoaderKind::NeoForge, "21.1.72", "1.21.1");
+        let jar_dest = installer_dir.join(&jar_name);
+        std::fs::write(&jar_dest, b"cached-jar").unwrap();
+
+        let download_called = Arc::new(Mutex::new(false));
+        let dc = Arc::clone(&download_called);
+
+        let version_id = "neoforge-21.1.72";
+        let version_dir = data_dir.join("versions").join(version_id);
+        let sink = CapturingInstallSink::new();
+
+        let _ = run_installer_core(
+            InstallerLoaderKind::NeoForge,
+            "21.1.72",
+            "1.21.1",
+            &java_bin,
+            &data_dir,
+            // download — must NOT be called
+            move |_url, _dest| {
+                *dc.lock().unwrap() = true;
+                async { Ok(()) }
+            },
+            move |_java, _args, _cwd| {
+                std::fs::create_dir_all(&version_dir).unwrap();
+                let vj = version_dir.join(format!("{version_id}.json"));
+                std::fs::write(&vj, "{}").unwrap();
+                async { Ok(SpawnResult { stdout_lines: vec![], stderr_lines: vec![], exit_code: 0 }) }
+            },
+            &sink,
+        )
+        .await;
+
+        assert!(
+            !*download_called.lock().unwrap(),
+            "download must NOT be called when the completed jar is cached"
+        );
+    }
+
+    // --- F-1: both streams fully collected even when one stream is long -------
+    //
+    // The injectable SpawnResult already carries pre-collected lines, so we
+    // verify at the run_installer_core level that all lines from a long stdout
+    // and a long stderr both arrive at the sink. This is the seam-level proof
+    // that the concurrent-drain contract is honoured; the live tokio::spawn fix
+    // is what makes it hold against a real process.
+
+    #[tokio::test]
+    async fn both_streams_fully_collected_when_one_stream_is_long() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let java_bin = PathBuf::from("/usr/bin/java");
+
+        let version_id = "neoforge-21.1.72";
+        let version_dir = data_dir.join("versions").join(version_id);
+        let sink = Arc::new(CapturingInstallSink::new());
+
+        // Build a long stdout (1000 lines) and a short stderr (3 lines).
+        let long_stdout: Vec<String> = (0..1000).map(|i| format!("stdout-line-{i}")).collect();
+        let short_stderr: Vec<String> = vec!["err-0".to_string(), "err-1".to_string(), "err-2".to_string()];
+
+        let expected_last_stdout = long_stdout.last().unwrap().clone();
+        let long_stdout_clone = long_stdout.clone();
+        let short_stderr_clone = short_stderr.clone();
+
+        let sink_ref = Arc::clone(&sink);
+        let _ = run_installer_core(
+            InstallerLoaderKind::NeoForge,
+            "21.1.72",
+            "1.21.1",
+            &java_bin,
+            &data_dir,
+            {
+                let data_dir = data_dir.clone();
+                move |_url, dest| async move {
+                    std::fs::create_dir_all(data_dir.join("installer-cache")).unwrap();
+                    std::fs::write(&dest, b"fake").unwrap();
+                    Ok(())
+                }
+            },
+            move |_java, _args, _cwd| {
+                std::fs::create_dir_all(&version_dir).unwrap();
+                let vj = version_dir.join(format!("{version_id}.json"));
+                std::fs::write(&vj, "{}").unwrap();
+                async move {
+                    Ok(SpawnResult {
+                        stdout_lines: long_stdout_clone,
+                        stderr_lines: short_stderr_clone,
+                        exit_code: 0,
+                    })
+                }
+            },
+            sink_ref.as_ref(),
+        )
+        .await;
+
+        let lines = sink.lines.lock().unwrap().clone();
+        let stdout_count = lines.iter().filter(|(s, _)| s == "stdout").count();
+        let stderr_count = lines.iter().filter(|(s, _)| s == "stderr").count();
+
+        assert_eq!(stdout_count, 1000, "all 1000 stdout lines must arrive");
+        assert_eq!(stderr_count, 3, "all 3 stderr lines must arrive");
+        // Confirm the last stdout line is present (guards against truncation).
+        assert!(
+            lines.contains(&("stdout".to_string(), expected_last_stdout.clone())),
+            "last stdout line missing: {expected_last_stdout}"
+        );
     }
 }
