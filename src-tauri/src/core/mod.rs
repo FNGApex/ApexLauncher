@@ -12,9 +12,11 @@
 //! - `java`      — system JRE detection + Adoptium provisioning (Phase 2 slice C).
 //! - `auth`      — Microsoft OAuth 2.0 device-code authentication + token chain (Phase 3).
 //! - `loader_profile` — Fabric/Quilt loader profile fetch + parse (Phase 4 slice A).
+//! - `forge_installer` — NeoForge/Forge headless installer runner (Phase 4 slice B).
 
 pub mod auth;
 pub mod download;
+pub mod forge_installer;
 pub mod instances;
 pub mod java;
 pub mod launch;
