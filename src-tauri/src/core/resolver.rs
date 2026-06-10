@@ -743,26 +743,36 @@ pub fn merge_loader_profile(
     let client_jar = launch.classpath.pop();
 
     for lib in &profile.libraries {
-        // Libraries with an empty url field are skipped — a real Fabric/Quilt profile
-        // always supplies a url, but an empty string would produce a malformed "/…" path.
-        if lib.url.is_empty() {
-            continue;
-        }
-
         let maven_path = maven_coord_to_path(&lib.name);
-
-        // URL: join base and maven path, normalising a single separator.
-        let base_url = lib.url.trim_end_matches('/');
-        let url = format!("{}/{}", base_url, maven_path);
-
         let dest = data_dir.join("libraries").join(&maven_path);
 
-        plan.items.push(DownloadItem {
-            url,
-            dest: dest.clone(),
-            expected_hash: None,
-            size: None,
-        });
+        // Libraries with a present, non-empty url get a DownloadItem; libraries
+        // with url=None or url="" (processor-produced, no download URL) are added
+        // to the classpath only — the file must already exist from the installer run.
+        match lib.url.as_deref().filter(|u| !u.is_empty()) {
+            Some(raw_url) => {
+                // If the URL already ends with ".jar" it is a full artifact URL
+                // (Forge/NeoForge `downloads.artifact.url` format) — use it as-is.
+                // Otherwise treat it as a Maven repository base URL and append the
+                // maven coordinate path (Fabric/Quilt format).
+                let url = if raw_url.ends_with(".jar") {
+                    raw_url.to_owned()
+                } else {
+                    let base_url = raw_url.trim_end_matches('/');
+                    format!("{}/{}", base_url, maven_path)
+                };
+
+                plan.items.push(DownloadItem {
+                    url,
+                    dest: dest.clone(),
+                    expected_hash: None,
+                    size: None,
+                });
+            }
+            None => {
+                // url absent or empty — classpath-only, no download.
+            }
+        }
 
         launch.classpath.push(dest.to_string_lossy().into_owned());
     }
@@ -1708,10 +1718,100 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // CP2 (neoforge-forge-launch): merge with forge profile fixtures
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn merge_loader_profile_empty_url_lib_skipped() {
-        // A loader library with an empty url must be silently skipped — no malformed
-        // URL pushed to the plan and no malformed path on the classpath.
+    fn merge_neoforge_profile_none_url_lib_on_classpath_no_download_item() {
+        // Load the neoforge fixture via load_forge_profile (the forge-format parse path).
+        // The fixture has 5 libs: 4 with url, 1 with url=None (processor-produced).
+        // After merge: plan gains 4 items (not 5); classpath gains 5 entries (all 5 libs).
+        use crate::core::loader_profile::load_forge_profile;
+
+        let neoforge_json = include_str!("fixtures/neoforge_profile.json");
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(tmp.path(), neoforge_json).expect("write fixture");
+        let profile = load_forge_profile(tmp.path()).expect("neoforge fixture must parse");
+
+        let base = std::path::Path::new("/data");
+        let (mut plan, mut launch) = make_test_resolve_result(base);
+        let original_plan_len = plan.items.len();
+        let original_cp_len = launch.classpath.len();
+
+        merge_loader_profile(&mut plan, &mut launch, &profile, "linux", base);
+
+        // 4 libs with url → 4 DownloadItems added.
+        assert_eq!(
+            plan.items.len(),
+            original_plan_len + 4,
+            "4 url libs → 4 DownloadItems; got plan len {}",
+            plan.items.len()
+        );
+        // All 5 libs go on classpath (including the url=None one).
+        assert_eq!(
+            launch.classpath.len(),
+            original_cp_len + 5,
+            "all 5 libs → 5 classpath entries"
+        );
+        // url=None lib (client-extra) IS on classpath.
+        let client_extra_path = base
+            .join("libraries")
+            .join("net/neoforged/client-extra/26.1.2/client-extra-26.1.2.jar")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            launch.classpath.contains(&client_extra_path),
+            "url=None lib must be on classpath: {:?}",
+            launch.classpath
+        );
+        // client jar still last.
+        let client_jar = base
+            .join("versions")
+            .join("1.21.1")
+            .join("1.21.1.jar")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            launch.classpath.last().unwrap(),
+            &client_jar,
+            "client jar must remain last"
+        );
+
+        // The 4 DownloadItems must use the FULL artifact URLs from the fixture —
+        // not base-url + double maven path.
+        let item_urls: Vec<&str> = plan.items[original_plan_len..]
+            .iter()
+            .map(|i| i.url.as_str())
+            .collect();
+        assert!(
+            item_urls.contains(&"https://maven.neoforged.net/releases/net/neoforged/fancymodloader/earlydisplay/11.0.13/earlydisplay-11.0.13.jar"),
+            "earlydisplay URL must be the full artifact URL; got: {:?}",
+            item_urls
+        );
+        assert!(
+            item_urls.contains(&"https://maven.neoforged.net/releases/net/neoforged/fancymodloader/loader/11.0.13/loader-11.0.13.jar"),
+            "loader URL must be the full artifact URL; got: {:?}",
+            item_urls
+        );
+        assert!(
+            item_urls.contains(&"https://maven.neoforged.net/releases/net/neoforged/accesstransformers/11.0.2/accesstransformers-11.0.2.jar"),
+            "accesstransformers URL must be the full artifact URL; got: {:?}",
+            item_urls
+        );
+        assert!(
+            item_urls.contains(&"https://maven.neoforged.net/releases/org/ow2/asm/asm/9.9.1/asm-9.9.1.jar"),
+            "asm URL must be the full artifact URL; got: {:?}",
+            item_urls
+        );
+    }
+
+    #[test]
+    fn merge_loader_profile_none_url_lib_classpath_only() {
+        // A loader library with url=None (processor-produced, no download URL) must
+        // be added to the classpath but NOT produce a DownloadItem.  The old empty-string
+        // guard is superseded: url=None and url=Some("") both skip the download step
+        // but still add the classpath entry so the JVM can find the locally-produced jar.
         use crate::core::loader_profile::{LoaderLibrary, LoaderProfile};
         use crate::core::resolver::Arguments;
 
@@ -1720,19 +1820,20 @@ mod tests {
 
         let profile = LoaderProfile {
             main_class: "net.fabricmc.loader.impl.launch.knot.KnotClient".to_string(),
+            inherits_from: None,
             libraries: vec![
                 LoaderLibrary {
                     name: "net.fabricmc:fabric-loader:0.16.10".to_string(),
-                    url: "https://maven.fabricmc.net/".to_string(),
+                    url: Some("https://maven.fabricmc.net/".to_string()),
                 },
                 LoaderLibrary {
-                    // Empty url — must be skipped without producing "/net/..." path.
-                    name: "org.example:empty-url-lib:1.0".to_string(),
-                    url: "".to_string(),
+                    // url=None (processor-produced) — classpath-only, no DownloadItem.
+                    name: "org.example:no-url-lib:1.0".to_string(),
+                    url: None,
                 },
                 LoaderLibrary {
                     name: "net.fabricmc:intermediary:1.21.1".to_string(),
-                    url: "https://maven.fabricmc.net/".to_string(),
+                    url: Some("https://maven.fabricmc.net/".to_string()),
                 },
             ],
             arguments: Arguments {
@@ -1745,11 +1846,11 @@ mod tests {
 
         merge_loader_profile(&mut plan, &mut launch, &profile, "linux", base);
 
-        // Only 2 of 3 libs should be added (the empty-url one is skipped).
+        // Only 2 of 3 libs produce DownloadItems (the url=None one is download-skipped).
         assert_eq!(
             plan.items.len(),
             original_item_count + 2,
-            "empty-url library must be skipped; plan should gain 2 items, not 3"
+            "url=None library must not produce a DownloadItem; plan should gain 2 items"
         );
 
         // No plan item URL should start with "/" (malformed).
@@ -1761,15 +1862,16 @@ mod tests {
             );
         }
 
-        // Classpath must not contain any path that would come from the empty-url lib.
-        let bad_path = base
+        // The url=None lib IS on the classpath (classpath-only entry).
+        let no_url_path = base
             .join("libraries")
-            .join("org/example/empty-url-lib/1.0/empty-url-lib-1.0.jar")
+            .join("org/example/no-url-lib/1.0/no-url-lib-1.0.jar")
             .to_string_lossy()
             .into_owned();
         assert!(
-            !launch.classpath.contains(&bad_path),
-            "empty-url library dest must not appear on classpath"
+            launch.classpath.contains(&no_url_path),
+            "url=None library must appear on classpath (classpath-only entry): {:?}",
+            launch.classpath
         );
     }
 }
