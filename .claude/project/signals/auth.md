@@ -15,11 +15,11 @@ Implements Microsoft OAuth 2.0 device-code flow → Xbox Live chain → Minecraf
   - `request_device_code`, `poll_token_once`, `refresh_ms_token` — MS OAuth2 device-code + poll + refresh (CP1)
   - `xbox_chain` — XBL authenticate → XSTS authorize → MC `login_with_xbox` → MC profile GET (CP2)
   - `AccountStore` — multi-account store: `load`, `new_empty`, `add_account`, `list_accounts`, `remove_account`, `set_active_account`, `get_active_account`, `get_refresh_token` (CP3)
-  - `AccountMeta` — serializable non-secret metadata (`id`, `username`, `xuid`, `mc_token_expires`)
+  - `AccountMeta` — serializable non-secret metadata (`id`, `username`, `xuid`, `mc_token_expires`); `serde(rename_all = "camelCase")` for IPC, with `alias = "mc_token_expires"` so pre-rename accounts.json files still load
   - `KeyringBackend` trait + `SystemKeyringBackend` (production, backed by `keyring` crate) — injectable seam so tests never call the real OS keyring
   - `AuthHttpClient` trait + `ReqwestAuthClient` (production) — injectable HTTP seam so all tests use mock responses
   - `AuthError` enum — 11 named variants covering device-code expiry, authorization decline, XSTS XErr codes (2148916233 / 2148916235 / 2148916238), no Minecraft license (profile 404), keyring failure, store I/O failure
-  - 42 unit tests (all mock HTTP, no live TCP; all keyring tests use `FakeKeyring` or `FailingKeyring` in-process)
+  - 44 unit tests (all mock HTTP, no live TCP; all keyring tests use `FakeKeyring` or `FailingKeyring` in-process)
 - `src-tauri/src/lib.rs` (auth section, lines 16–228) — Tauri command layer:
   - `begin_login` — long-lived async command: requests device code, emits `auth://device-code` event, runs poll loop with cancel-token check, runs Xbox chain, persists account with MS refresh token in keyring, returns `AccountMeta`
   - `cancel_login` — fires a oneshot to abort the in-flight `begin_login` poll loop; no-op if not running
@@ -50,5 +50,5 @@ Implements Microsoft OAuth 2.0 device-code flow → Xbox Live chain → Minecraf
 - `remove_account` ordering (F-10 fix): keyring delete happens first; if it fails, in-memory state and disk are left unchanged — no desync.
 - `poll_token_once`: MS token endpoint uses HTTP 400 for error states (`authorization_pending`, `expired_token`, `access_denied`) — these are parsed as poll responses. Any other non-200/400 status is returned as `HttpStatus` error without parsing.
 - `begin_login` cancel: oneshot sender placed in `CancelToken` managed state before the poll loop; `cancel_login` `take()`s the sender. If the receiver is already gone (login completed), the send is silently dropped.
-- All auth tests: 42 unit tests in `auth.rs`, split across CP1 (device-code/poll/refresh), CP2 (Xbox chain + XSTS XErr mapping), CP3 (AccountStore round-trips with `FakeKeyring`/`FailingKeyring`/`StoreOkDeleteFailKeyring`), CP4 (refresh-at-launch mock sequence), CP5 (`ms_client_id_from` default, env-override, blank-override cases). No real TCP connections in any test.
+- All auth tests: 44 unit tests in `auth.rs`, split across CP1 (device-code/poll/refresh), CP2 (Xbox chain + XSTS XErr mapping), CP3 (AccountStore round-trips with `FakeKeyring`/`FailingKeyring`/`StoreOkDeleteFailKeyring`), CP4 (refresh-at-launch mock sequence), CP5 (`ms_client_id_from` default, env-override, blank-override cases). No real TCP connections in any test.
 - XSTS `DisplayClaims.xui[0]` field for Xbox user ID is named `xid` (not `xuid`) — verified by fixture test `cp2_xsts_parses_token_and_xuid_from_xid_field`.

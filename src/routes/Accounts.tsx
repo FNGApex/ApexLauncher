@@ -50,14 +50,14 @@ export function Accounts() {
     setDeviceCode(null);
     setLoginState("pending");
 
-    // Subscribe to auth://device-code before invoking beginLogin so we never miss the event.
-    const unlisten = await listenDeviceCode((payload) => {
-      setDeviceCode(payload);
-      setLoginState("polling");
-    });
-    unlistenRef.current = unlisten;
-
     try {
+      // Subscribe to auth://device-code before invoking beginLogin so we never miss the event.
+      const unlisten = await listenDeviceCode((payload) => {
+        setDeviceCode(payload);
+        setLoginState("polling");
+      });
+      unlistenRef.current = unlisten;
+
       const meta = await beginLogin();
       // New account is always the active one after login.
       setActiveId(meta.id);
@@ -66,7 +66,7 @@ export function Accounts() {
       // Tauri serializes AuthCommandError as the error payload.
       setLoginError(extractMessage(err));
     } finally {
-      unlisten();
+      unlistenRef.current?.();
       unlistenRef.current = null;
       setLoginState("idle");
       setDeviceCode(null);
@@ -76,9 +76,10 @@ export function Accounts() {
   async function handleCancel() {
     try {
       await cancelLogin();
-    } catch {
-      // If cancel fails (e.g. no login in progress), ignore — the flow will
-      // resolve or error on its own.
+    } catch (err) {
+      // Cancel failing is usually benign (no login in progress) — the flow
+      // resolves or errors on its own. Log so non-benign failures are visible.
+      console.warn("cancelLogin failed:", err);
     }
     // UI resets via the finally block in handleAddAccount.
   }

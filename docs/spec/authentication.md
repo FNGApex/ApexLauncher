@@ -159,3 +159,23 @@ The active-account indicator was wrong on mount: `list_accounts` returns no acti
 the UI showed the wrong row as active until the user clicked. CP4 registered 5 commands;
 this adds a 6th for the active id. Found by the signals scan (`accounts-active-id-mount`
 risk, `accounts-extractmessage-cast` + `auth-test-cp4-misnamed` nits).
+
+### 2026-06-11 — CP5 round-2 remainder: AccountMeta camelCase + login-flow hardening
+
+**What changed**
+
+- `AccountMeta` now carries `#[serde(rename_all = "camelCase")]`, matching every other
+  IPC-crossing struct; `mc_token_expires` serializes as `mcTokenExpires` (what `ipc.ts`
+  already declared). A `#[serde(alias = "mc_token_expires")]` keeps pre-rename
+  `accounts.json` files loadable. Two new tests (`cp5_account_meta_serializes_camel_case_for_ipc`,
+  `cp5_account_meta_reads_legacy_snake_case_disk_format`); suite 226.
+- `Accounts.tsx` `handleAddAccount`: `listenDeviceCode` moved inside the try block — a
+  failed event subscribe no longer wedges `loginState` at "pending" with no error shown.
+- `Accounts.tsx` `handleCancel`: catch logs via `console.warn` instead of swallowing.
+
+**Why**
+
+These were the open findings from the CP5 review (iteration 6, 2026-06-08) that the
+stopped loop never fixed — the 2026-06-09 entry above landed only the active-account-id
+and cast fixes. The 🔴 serde mismatch meant the frontend `mcTokenExpires` field was
+always `undefined` at runtime despite the TS type claiming `number | null`.

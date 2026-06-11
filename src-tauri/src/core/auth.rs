@@ -615,6 +615,7 @@ fn map_oauth_error<T>(err: &str) -> Result<T, AuthError> {
 /// lives in the OS keyring (via [`KeyringBackend`]); the MC access token is
 /// re-derived at launch time.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct AccountMeta {
     /// Minecraft profile UUID (from `mc/profile`).
     pub id: String,
@@ -623,6 +624,8 @@ pub struct AccountMeta {
     /// Xbox user ID.
     pub xuid: String,
     /// Unix timestamp (seconds) at which the MC token expires; `None` if unknown.
+    /// Alias keeps accounts.json files written before the camelCase rename loadable.
+    #[serde(alias = "mc_token_expires")]
     pub mc_token_expires: Option<u64>,
 }
 
@@ -1473,6 +1476,31 @@ mod tests {
         let store2 = AccountStore::load(path, Box::new(FakeKeyring::new())).expect("reload");
         assert_eq!(store2.list_accounts().len(), 1);
         assert_eq!(store2.list_accounts()[0].id, "acc-1");
+    }
+
+    // ── Test: AccountMeta IPC shape is camelCase; legacy disk format still loads ──
+
+    #[test]
+    fn cp5_account_meta_serializes_camel_case_for_ipc() {
+        // ipc.ts mirrors this struct with camelCase fields (project-wide
+        // `serde(rename_all = "camelCase")` convention); a snake_case key here
+        // means the frontend reads `undefined`.
+        let json = serde_json::to_value(make_meta("acc-1", "Steve")).expect("serialize");
+        assert_eq!(json["mcTokenExpires"], serde_json::json!(9999999));
+        assert!(
+            json.get("mc_token_expires").is_none(),
+            "snake_case key must not leak over IPC; got: {json}"
+        );
+    }
+
+    #[test]
+    fn cp5_account_meta_reads_legacy_snake_case_disk_format() {
+        // accounts.json files written before the camelCase rename used
+        // `mc_token_expires`; the alias keeps them loadable.
+        let legacy =
+            r#"{"id":"acc-1","username":"Steve","xuid":"xuid_acc-1","mc_token_expires":12345}"#;
+        let meta: AccountMeta = serde_json::from_str(legacy).expect("legacy parse");
+        assert_eq!(meta.mc_token_expires, Some(12345));
     }
 
     // ── Test: refresh token in keyring, NOT in accounts.json ─────────────────
