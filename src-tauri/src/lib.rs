@@ -12,6 +12,12 @@ use core::launch::{self, LaunchSink, RunningRegistry};
 use core::loader_profile;
 use core::loaders::{self, LoaderOption};
 use core::resolver::{self, ResolveResult};
+use core::curseforge::CurseForgeProvider;
+use core::modrinth::ModrinthProvider;
+use core::providers::{
+    self, cf_api_key_from, ModProvider, ProviderError, ReqwestProviderClient, SearchParams,
+    SearchResult, ProjectVersion,
+};
 use core::settings::{self, Settings};
 use core::versions::{self, McVersion};
 
@@ -670,6 +676,160 @@ async fn get_loaders(app: tauri::AppHandle, minecraft: String) -> Result<Vec<Loa
     loaders::for_mc(&app, &minecraft).await
 }
 
+// --- Phase 5: provider browse (search + versions) ---
+
+/// Serializable command error wrapping [`ProviderError`].
+///
+/// Mirrors `AuthCommandError` above. Every variant maps to a camelCase `kind`
+/// string; `"key_missing"` lets the frontend show the "API key required" state.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderCommandError {
+    kind: String,
+    message: String,
+}
+
+impl From<ProviderError> for ProviderCommandError {
+    fn from(e: ProviderError) -> Self {
+        let kind = match &e {
+            ProviderError::KeyMissing => "key_missing",
+            ProviderError::HttpStatus { .. } => "http_status",
+            ProviderError::BadResponse(_) => "bad_response",
+        };
+        ProviderCommandError {
+            kind: kind.to_string(),
+            message: e.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.kind, self.message)
+    }
+}
+
+/// Search mods across a single provider.
+///
+/// `provider` must be `"modrinth"` or `"curseforge"` (case-sensitive).
+/// Unknown provider strings return a typed `unknown_provider` error rather than panicking.
+/// The CF key is resolved from `MODLOADER_CF_API_KEY` env or `settings.curseforge_api_key`.
+#[tauri::command]
+async fn search_mods(
+    app: tauri::AppHandle,
+    provider: String,
+    query: String,
+    mc_version: Option<String>,
+    loader: Option<String>,
+    offset: u32,
+    limit: u32,
+) -> Result<SearchResult, ProviderCommandError> {
+    let params = SearchParams { query, mc_version, loader, offset, limit };
+    let http = ReqwestProviderClient(reqwest::Client::new());
+
+    match provider.as_str() {
+        "modrinth" => {
+            let p = ModrinthProvider;
+            p.search(&http, &params).await.map_err(ProviderCommandError::from)
+        }
+        "curseforge" => {
+            let settings = settings::load(&app).unwrap_or_default();
+            let key = cf_api_key_from(
+                std::env::var(providers::CF_API_KEY_ENV).ok(),
+                settings.curseforge_api_key,
+            );
+            let p = CurseForgeProvider::new(key);
+            p.search(&http, &params).await.map_err(ProviderCommandError::from)
+        }
+        other => Err(ProviderCommandError {
+            kind: "unknown_provider".to_string(),
+            message: format!("unknown provider: {other:?}"),
+        }),
+    }
+}
+
+/// Fetch versions of a mod project compatible with the supplied MC version + loader.
+///
+/// `provider` must be `"modrinth"` or `"curseforge"`.
+#[tauri::command]
+async fn get_mod_versions(
+    app: tauri::AppHandle,
+    provider: String,
+    project_id: String,
+    mc_version: Option<String>,
+    loader: Option<String>,
+) -> Result<Vec<ProjectVersion>, ProviderCommandError> {
+    let http = ReqwestProviderClient(reqwest::Client::new());
+
+    match provider.as_str() {
+        "modrinth" => {
+            let p = ModrinthProvider;
+            p.get_versions(&http, &project_id, mc_version.as_deref(), loader.as_deref())
+                .await
+                .map_err(ProviderCommandError::from)
+        }
+        "curseforge" => {
+            let settings = settings::load(&app).unwrap_or_default();
+            let key = cf_api_key_from(
+                std::env::var(providers::CF_API_KEY_ENV).ok(),
+                settings.curseforge_api_key,
+            );
+            let p = CurseForgeProvider::new(key);
+            p.get_versions(&http, &project_id, mc_version.as_deref(), loader.as_deref())
+                .await
+                .map_err(ProviderCommandError::from)
+        }
+        other => Err(ProviderCommandError {
+            kind: "unknown_provider".to_string(),
+            message: format!("unknown provider: {other:?}"),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // These tests encode the Rust↔TS IPC contract: the `kind` strings emitted by
+    // `From<ProviderError>` and the unknown-provider path MUST match the values
+    // documented in `ipc.ts`'s `ProviderCommandError` comment. If a string here
+    // changes, the frontend `kind` checks in Browse.tsx will silently stop working.
+
+    #[test]
+    fn provider_error_key_missing_kind() {
+        let cmd = ProviderCommandError::from(ProviderError::KeyMissing);
+        assert_eq!(cmd.kind, "key_missing");
+    }
+
+    #[test]
+    fn provider_error_http_status_kind() {
+        let cmd = ProviderCommandError::from(ProviderError::HttpStatus {
+            status: 403,
+            body: "Forbidden".to_string(),
+        });
+        assert_eq!(cmd.kind, "http_status");
+    }
+
+    #[test]
+    fn provider_error_bad_response_kind() {
+        let cmd = ProviderCommandError::from(ProviderError::BadResponse("parse failed".to_string()));
+        assert_eq!(cmd.kind, "bad_response");
+    }
+
+    #[test]
+    fn unknown_provider_kind_is_distinct() {
+        // The unknown-provider path must NOT reuse "bad_response" — the frontend
+        // uses the kind to decide whether to show "API key required" vs a generic
+        // error, and "bad_response" would mask a misconfigured provider string.
+        let cmd = ProviderCommandError {
+            kind: "unknown_provider".to_string(),
+            message: "unknown provider: \"bogus\"".to_string(),
+        };
+        assert_eq!(cmd.kind, "unknown_provider");
+        assert_ne!(cmd.kind, "bad_response");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // The running instance registry is the first managed state in this app.
@@ -726,7 +886,9 @@ pub fn run() {
             list_accounts,
             get_active_account_id,
             remove_account,
-            set_active_account
+            set_active_account,
+            search_mods,
+            get_mod_versions
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -456,3 +456,131 @@ export function removeAccount(id: string): Promise<void> {
 export function setActiveAccount(id: string): Promise<void> {
   return invoke<void>("set_active_account", { id });
 }
+
+// --- Phase 5: provider browse. Mirrors core/providers.rs normalized types. ---
+
+/**
+ * Which backend owns a search result or version.
+ * Matches the `ProviderKind` Rust enum serialized as camelCase strings.
+ */
+export type ProviderKind = "modrinth" | "curseForge";
+
+/**
+ * Condensed summary of a mod project, as returned by `searchMods`.
+ * Mirrors `ProjectSummary` in `core/providers.rs`.
+ */
+export interface ProjectSummary {
+  provider: ProviderKind;
+  id: string;
+  slug: string;
+  name: string;
+  summary: string;
+  downloads: number;
+  iconUrl: string | null;
+  categories: string[];
+}
+
+/**
+ * A single downloadable file within a `ProjectVersion`.
+ * `url` is `null` when the author has disabled distribution (CF `allowModDistribution: false`).
+ * Mirrors `VersionFile` in `core/providers.rs`.
+ */
+export interface VersionFile {
+  url: string | null;
+  fileName: string;
+  size: number | null;
+  hashes: Record<string, string>;
+  primary: boolean;
+}
+
+/**
+ * A declared dependency of a `ProjectVersion`.
+ * Mirrors `Dependency` in `core/providers.rs`.
+ */
+export interface Dependency {
+  projectId: string | null;
+  versionId: string | null;
+  dependencyType: string;
+}
+
+/**
+ * A specific release of a mod project.
+ * Mirrors `ProjectVersion` in `core/providers.rs`.
+ */
+export interface ProjectVersion {
+  provider: ProviderKind;
+  id: string;
+  name: string;
+  versionNumber: string;
+  gameVersions: string[];
+  loaders: string[];
+  files: VersionFile[];
+  dependencies: Dependency[];
+}
+
+/**
+ * Paginated search response returned by `searchMods`.
+ * Mirrors `SearchResult` in `core/providers.rs`.
+ */
+export interface SearchResult {
+  hits: ProjectSummary[];
+  offset: number;
+  total: number;
+}
+
+/**
+ * Error shape returned by provider commands when the Tauri command returns Err.
+ * `kind` is one of: `"key_missing"`, `"http_status"`, `"bad_response"`, `"unknown_provider"`.
+ * Mirrors `ProviderCommandError` in `lib.rs`.
+ */
+export interface ProviderCommandError {
+  kind: string;
+  message: string;
+}
+
+/**
+ * Search mods on the given provider.
+ *
+ * `provider` accepts `"modrinth"` or `"curseforge"` (lowercase routing strings,
+ * distinct from the `ProviderKind` response value casing e.g. `"curseForge"`).
+ * Returns a paginated `SearchResult` with `hits`, `offset`, and `total` for
+ * infinite scroll. CF key absence surfaces as a rejected promise with
+ * `kind: "key_missing"`.
+ */
+export function searchMods(
+  provider: "modrinth" | "curseforge",
+  query: string,
+  mcVersion: string | null,
+  loader: string | null,
+  offset: number,
+  limit: number,
+): Promise<SearchResult> {
+  return invoke<SearchResult>("search_mods", {
+    provider,
+    query,
+    mcVersion,
+    loader,
+    offset,
+    limit,
+  });
+}
+
+/**
+ * Fetch all versions of a mod project compatible with the given MC version + loader.
+ *
+ * `provider` accepts `"modrinth"` or `"curseforge"` (lowercase routing strings,
+ * distinct from the `ProviderKind` response value casing e.g. `"curseForge"`).
+ */
+export function getModVersions(
+  provider: "modrinth" | "curseforge",
+  projectId: string,
+  mcVersion: string | null,
+  loader: string | null,
+): Promise<ProjectVersion[]> {
+  return invoke<ProjectVersion[]>("get_mod_versions", {
+    provider,
+    projectId,
+    mcVersion,
+    loader,
+  });
+}
