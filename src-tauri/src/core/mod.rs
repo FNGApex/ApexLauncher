@@ -15,8 +15,10 @@
 //! - `forge_installer` — NeoForge/Forge headless installer runner (Phase 4 slice B).
 //! - `providers` — normalized mod-provider types + trait + HTTP seam (Phase 5 slice A).
 //! - `modrinth`  — Modrinth `ModProvider` implementation (Phase 5 slice A, CP2).
+//! - `curseforge` — CurseForge `ModProvider` implementation (Phase 5 slice A, CP3).
 
 pub mod auth;
+pub mod curseforge;
 pub mod download;
 pub mod forge_installer;
 pub mod instances;

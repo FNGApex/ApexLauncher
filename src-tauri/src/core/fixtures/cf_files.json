@@ -1,0 +1,69 @@
+{
+  "data": [
+    {
+      "id": 5034058,
+      "modId": 238222,
+      "displayName": "jei-1.20.1-forge-15.3.0.4.jar",
+      "fileName": "jei-1.20.1-forge-15.3.0.4.jar",
+      "fileDate": "2024-01-18T10:00:00.000Z",
+      "fileLength": 1234567,
+      "downloadCount": 1000000,
+      "downloadUrl": "https://edge.forgecdn.net/files/5034/058/jei-1.20.1-forge-15.3.0.4.jar",
+      "gameVersions": ["1.20.1", "Forge", "Java 17"],
+      "sortableGameVersions": [],
+      "dependencies": [
+        {
+          "modId": 308702,
+          "relationType": 3
+        }
+      ],
+      "isAvailable": true,
+      "isServerPack": false,
+      "fileFingerprint": 1234567890,
+      "modules": []
+    },
+    {
+      "id": 5034059,
+      "modId": 238222,
+      "displayName": "jei-1.21-neoforge-19.0.0.1.jar",
+      "fileName": "jei-1.21-neoforge-19.0.0.1.jar",
+      "fileDate": "2024-06-01T12:00:00.000Z",
+      "fileLength": 1300000,
+      "downloadCount": 500000,
+      "downloadUrl": "https://edge.forgecdn.net/files/5034/059/jei-1.21-neoforge-19.0.0.1.jar",
+      "gameVersions": ["1.21", "NeoForge", "Java 21"],
+      "sortableGameVersions": [],
+      "dependencies": [],
+      "isAvailable": true,
+      "isServerPack": false,
+      "fileFingerprint": 9876543210,
+      "modules": []
+    },
+    {
+      "id": 5034060,
+      "modId": 238222,
+      "displayName": "jei-1.20.1-fabric-15.3.0.4.jar",
+      "fileName": "jei-1.20.1-fabric-15.3.0.4.jar",
+      "fileDate": "2024-01-20T10:00:00.000Z",
+      "fileLength": 1100000,
+      "downloadCount": 200000,
+      "downloadUrl": null,
+      "gameVersions": ["1.20.1", "Fabric", "Quilt"],
+      "sortableGameVersions": [],
+      "dependencies": [
+        {
+          "modId": 394468,
+          "relationType": 2
+        },
+        {
+          "modId": 306612,
+          "relationType": 5
+        }
+      ],
+      "isAvailable": true,
+      "isServerPack": false,
+      "fileFingerprint": 1111111111,
+      "modules": []
+    }
+  ]
+}

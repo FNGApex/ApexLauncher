@@ -22,13 +22,6 @@ pub const CF_API_KEY_ENV: &str = "MODLOADER_CF_API_KEY";
 /// `settings_key` (if `Some` and non-blank), then `None`.
 ///
 /// Separated from env access so tests need no global env mutation.
-pub fn cf_api_key() -> Option<String> {
-    cf_api_key_from(
-        std::env::var(CF_API_KEY_ENV).ok(),
-        None, // settings value not available without AppHandle in this helper
-    )
-}
-
 /// Pure resolution logic used by both the live path and tests.
 ///
 /// `env_val`: value of `MODLOADER_CF_API_KEY` (pre-fetched by the caller).
