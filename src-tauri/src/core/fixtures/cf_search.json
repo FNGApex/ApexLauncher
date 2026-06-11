@@ -1,0 +1,72 @@
+{
+  "data": [
+    {
+      "id": 238222,
+      "gameId": 432,
+      "name": "Just Enough Items (JEI)",
+      "slug": "jei",
+      "summary": "JEI is an item and recipe viewing mod for Minecraft, built from the ground up for stability and performance.",
+      "downloadCount": 300000000,
+      "logo": {
+        "url": "https://media.forgecdn.net/avatars/thumbnails/29/69/256/256/636346904411966716.png"
+      },
+      "categories": [
+        { "id": 421, "name": "Map and Information" }
+      ],
+      "classId": 6,
+      "authors": [
+        { "id": 1, "name": "mezz" }
+      ],
+      "links": {
+        "websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/jei",
+        "wikiUrl": null,
+        "issuesUrl": null,
+        "sourceUrl": null
+      },
+      "status": 4,
+      "primaryCategoryId": 421,
+      "dateCreated": "2014-10-14T00:00:00Z",
+      "dateModified": "2024-01-18T10:00:00Z",
+      "dateReleased": "2024-01-18T10:00:00Z",
+      "allowModDistribution": true,
+      "isAvailable": true
+    },
+    {
+      "id": 32274,
+      "gameId": 432,
+      "name": "Optifine",
+      "slug": "optifine",
+      "summary": "OptiFine is a Minecraft optimization mod.",
+      "downloadCount": 500000000,
+      "logo": {
+        "url": "https://media.forgecdn.net/avatars/thumbnails/15/464/256/256/636234860591552004.png"
+      },
+      "categories": [
+        { "id": 422, "name": "Optimization" }
+      ],
+      "classId": 6,
+      "authors": [
+        { "id": 2, "name": "sp614x" }
+      ],
+      "links": {
+        "websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/optifine",
+        "wikiUrl": null,
+        "issuesUrl": null,
+        "sourceUrl": null
+      },
+      "status": 4,
+      "primaryCategoryId": 422,
+      "dateCreated": "2012-06-01T00:00:00Z",
+      "dateModified": "2024-01-10T00:00:00Z",
+      "dateReleased": "2024-01-10T00:00:00Z",
+      "allowModDistribution": false,
+      "isAvailable": true
+    }
+  ],
+  "pagination": {
+    "index": 0,
+    "pageSize": 20,
+    "resultCount": 2,
+    "totalCount": 2
+  }
+}

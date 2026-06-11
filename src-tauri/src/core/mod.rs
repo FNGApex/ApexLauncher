@@ -13,6 +13,7 @@
 //! - `auth`      — Microsoft OAuth 2.0 device-code authentication + token chain (Phase 3).
 //! - `loader_profile` — Fabric/Quilt loader profile fetch + parse (Phase 4 slice A).
 //! - `forge_installer` — NeoForge/Forge headless installer runner (Phase 4 slice B).
+//! - `providers` — normalized mod-provider types + trait + HTTP seam (Phase 5 slice A).
 
 pub mod auth;
 pub mod download;
@@ -23,6 +24,7 @@ pub mod launch;
 pub mod loader_profile;
 pub mod loaders;
 pub mod meta;
+pub mod providers;
 pub mod resolver;
 pub mod settings;
 pub mod store;
