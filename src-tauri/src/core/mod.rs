@@ -14,6 +14,7 @@
 //! - `loader_profile` — Fabric/Quilt loader profile fetch + parse (Phase 4 slice A).
 //! - `forge_installer` — NeoForge/Forge headless installer runner (Phase 4 slice B).
 //! - `providers` — normalized mod-provider types + trait + HTTP seam (Phase 5 slice A).
+//! - `modrinth`  — Modrinth `ModProvider` implementation (Phase 5 slice A, CP2).
 
 pub mod auth;
 pub mod download;
@@ -24,6 +25,7 @@ pub mod launch;
 pub mod loader_profile;
 pub mod loaders;
 pub mod meta;
+pub mod modrinth;
 pub mod providers;
 pub mod resolver;
 pub mod settings;
