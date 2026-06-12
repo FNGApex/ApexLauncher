@@ -437,24 +437,14 @@ export function cancelLogin(): Promise<void> {
   return invoke<void>("cancel_login");
 }
 
-/** List all persisted accounts. */
-export function listAccounts(): Promise<AccountMeta[]> {
-  return invoke<AccountMeta[]>("list_accounts");
+/** Return the persisted account, or null when not logged in. */
+export function getAccount(): Promise<AccountMeta | null> {
+  return invoke<AccountMeta | null>("get_account");
 }
 
-/** The id of the active account, or null when none is set. */
-export function getActiveAccountId(): Promise<string | null> {
-  return invoke<string | null>("get_active_account_id");
-}
-
-/** Remove a persisted account by id. */
-export function removeAccount(id: string): Promise<void> {
-  return invoke<void>("remove_account", { id });
-}
-
-/** Set the active account used at launch. */
-export function setActiveAccount(id: string): Promise<void> {
-  return invoke<void>("set_active_account", { id });
+/** Log out: clears the persisted account and OS keyring entry. */
+export function logout(): Promise<void> {
+  return invoke<void>("logout");
 }
 
 // --- Phase 5: provider browse. Mirrors core/providers.rs normalized types. ---
