@@ -17,7 +17,7 @@ export function Sidebar() {
           <Box className="size-5" />
         </div>
         <div className="leading-tight">
-          <div className="text-sm font-semibold">Modloader</div>
+          <div className="text-sm font-semibold">ApexLauncher</div>
           <div className="text-xs text-muted">Minecraft launcher</div>
         </div>
       </div>
