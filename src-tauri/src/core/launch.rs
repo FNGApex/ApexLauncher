@@ -55,7 +55,7 @@ pub fn offline_uuid() -> uuid::Uuid {
 pub struct LaunchPaths {
     /// Absolute path to `<instances>/<slug>/mc/` — the Minecraft working dir.
     pub game_directory: PathBuf,
-    /// Absolute path to `<data>/assets/`.
+    /// Absolute path to `<cache>/assets/`.
     pub assets_root: PathBuf,
     /// Absolute path to the per-instance natives extraction dir.
     /// CP2 will extract native jars here before launch.
@@ -68,17 +68,17 @@ pub struct LaunchPaths {
 }
 
 impl LaunchPaths {
-    /// Construct standard paths from an app data dir and instance slug.
+    /// Construct standard paths from the cache dir and instance slug.
     ///
-    /// `data_dir` — the Tauri app data directory.
+    /// `cache_dir` — the launcher cache directory (`<data>/cache/`); assets live here.
     /// `instances_dir` — the directory that holds all instance subdirs.
     /// `slug` — the instance slug (subdirectory name under `instances_dir`).
-    pub fn new(data_dir: &Path, instances_dir: &Path, slug: &str) -> Self {
+    pub fn new(cache_dir: &Path, instances_dir: &Path, slug: &str) -> Self {
         Self {
             game_directory: instances_dir.join(slug).join("mc"),
-            assets_root: data_dir.join("assets"),
+            assets_root: cache_dir.join("assets"),
             natives_directory: instances_dir.join(slug).join("natives"),
-            legacy_assets_root: data_dir.join("assets").join("virtual").join("legacy"),
+            legacy_assets_root: cache_dir.join("assets").join("virtual").join("legacy"),
         }
     }
 }

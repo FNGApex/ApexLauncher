@@ -23,8 +23,7 @@ fn client() -> reqwest::Client {
 }
 
 fn cache_path(app: &AppHandle, key: &str) -> Result<PathBuf, String> {
-    let dir = store::data_dir(app)?.join("meta-cache");
-    fs::create_dir_all(&dir).map_err(|e| format!("could not create meta-cache dir: {e}"))?;
+    let dir = store::cache_meta_dir(app)?;
     Ok(dir.join(key))
 }
 

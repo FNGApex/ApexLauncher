@@ -267,8 +267,8 @@ pub fn default_candidates(os: TargetOs, data_dir: &Path) -> Vec<PathBuf> {
         }
     }
 
-    // 4. Previously downloaded installs under <data>/java/<major>/.
-    let java_cache = data_dir.join("java");
+    // 4. Previously downloaded installs under <data>/cache/java/<major>/.
+    let java_cache = data_dir.join("cache").join("java");
     candidates.extend(expand_dir_children(&java_cache));
 
     candidates

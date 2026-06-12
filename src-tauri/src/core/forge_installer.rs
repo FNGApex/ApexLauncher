@@ -221,8 +221,8 @@ where
         return Ok(version_json);
     }
 
-    // Download the installer jar into a temp dir under data_dir.
-    let installer_dir = data_dir.join("installer-cache");
+    // Download the installer jar into the shared installers cache under data_dir.
+    let installer_dir = data_dir.join("installers");
     std::fs::create_dir_all(&installer_dir)
         .map_err(|e| format!("failed to create installer cache dir: {e}"))?;
 
@@ -530,7 +530,7 @@ mod tests {
         let cap_args = Arc::clone(&captured_args);
         let cap_cwd = Arc::clone(&captured_cwd);
 
-        let expected_jar = data_dir.join("installer-cache").join("neoforge-21.1.72-installer.jar");
+        let expected_jar = data_dir.join("installers").join("neoforge-21.1.72-installer.jar");
         let expected_target = data_dir.clone();
 
         // We must create the version.json to satisfy the post-spawn existence check.
@@ -552,7 +552,7 @@ mod tests {
             {
                 let data_dir = data_dir.clone();
                 move |_url, dest| async move {
-                    std::fs::create_dir_all(data_dir.join("installer-cache")).unwrap();
+                    std::fs::create_dir_all(data_dir.join("installers")).unwrap();
                     std::fs::write(&dest, b"fake-jar").unwrap();
                     Ok(())
                 }
@@ -618,7 +618,7 @@ mod tests {
             {
                 let data_dir = data_dir.clone();
                 move |_url, dest| async move {
-                    std::fs::create_dir_all(data_dir.join("installer-cache")).unwrap();
+                    std::fs::create_dir_all(data_dir.join("installers")).unwrap();
                     std::fs::write(&dest, b"fake-jar").unwrap();
                     Ok(())
                 }
@@ -669,7 +669,7 @@ mod tests {
             {
                 let data_dir = data_dir.clone();
                 move |_url, dest| async move {
-                    std::fs::create_dir_all(data_dir.join("installer-cache")).unwrap();
+                    std::fs::create_dir_all(data_dir.join("installers")).unwrap();
                     std::fs::write(&dest, b"fake-jar").unwrap();
                     Ok(())
                 }
@@ -724,7 +724,7 @@ mod tests {
             {
                 let data_dir = data_dir.clone();
                 move |_url, dest| async move {
-                    std::fs::create_dir_all(data_dir.join("installer-cache")).unwrap();
+                    std::fs::create_dir_all(data_dir.join("installers")).unwrap();
                     std::fs::write(&dest, b"fake").unwrap();
                     Ok(())
                 }
@@ -763,7 +763,7 @@ mod tests {
         let java_bin = PathBuf::from("/usr/bin/java");
 
         // Pre-create the installer cache dir and a leftover `.part` file.
-        let installer_dir = data_dir.join("installer-cache");
+        let installer_dir = data_dir.join("installers");
         std::fs::create_dir_all(&installer_dir).unwrap();
         let jar_name = installer_jar_name(InstallerLoaderKind::NeoForge, "21.1.72", "1.21.1");
         let jar_dest = installer_dir.join(&jar_name);
@@ -819,7 +819,7 @@ mod tests {
         let java_bin = PathBuf::from("/usr/bin/java");
 
         // Pre-create the installer cache dir and the completed jar.
-        let installer_dir = data_dir.join("installer-cache");
+        let installer_dir = data_dir.join("installers");
         std::fs::create_dir_all(&installer_dir).unwrap();
         let jar_name = installer_jar_name(InstallerLoaderKind::NeoForge, "21.1.72", "1.21.1");
         let jar_dest = installer_dir.join(&jar_name);
@@ -895,7 +895,7 @@ mod tests {
             {
                 let data_dir = data_dir.clone();
                 move |_url, dest| async move {
-                    std::fs::create_dir_all(data_dir.join("installer-cache")).unwrap();
+                    std::fs::create_dir_all(data_dir.join("installers")).unwrap();
                     std::fs::write(&dest, b"fake").unwrap();
                     Ok(())
                 }

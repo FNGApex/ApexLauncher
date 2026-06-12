@@ -388,9 +388,9 @@ async fn resolve_vanilla(
 ) -> Result<ResolveResult, String> {
     let spec = resolver::fetch_version_spec(&app, &version_id).await?;
     let asset_data = resolver::fetch_asset_index(&app, &spec.asset_index).await?;
-    let data_dir = core::store::data_dir(&app)?;
+    let cache_dir = core::store::cache_dir(&app)?;
     let target_os = resolver::host_os_name();
-    let (plan, launch) = resolver::assemble(&spec, &asset_data, target_os, &data_dir);
+    let (plan, launch) = resolver::assemble(&spec, &asset_data, target_os, &cache_dir);
     Ok(ResolveResult { plan, launch })
 }
 
@@ -521,15 +521,17 @@ async fn launch_instance(
     // --- 3. Resolve: manifest → DownloadPlan + LaunchMeta. ---
     let spec = resolver::fetch_version_spec(&app, &inst.minecraft).await?;
     let asset_data = resolver::fetch_asset_index(&app, &spec.asset_index).await?;
-    let data_dir = core::store::data_dir(&app)?;
+    // All shared artifacts (assets, libraries, versions, installers) live under
+    // cache_dir — pass it wherever consumers previously received data_dir.
+    let cache_dir = core::store::cache_dir(&app)?;
     let target_os = resolver::host_os_name();
-    let (mut plan, mut launch_meta) = resolver::assemble(&spec, &asset_data, target_os, &data_dir);
+    let (mut plan, mut launch_meta) = resolver::assemble(&spec, &asset_data, target_os, &cache_dir);
 
     // --- 3b. Merge loader profile (fabric / quilt with a pinned version). ---
     if inst.loader.kind == "fabric" || inst.loader.kind == "quilt" {
         if let Some(ref v) = inst.loader.version {
             let profile = loader_profile::fetch_profile(&app, &inst.loader.kind, &inst.minecraft, v).await?;
-            resolver::merge_loader_profile(&mut plan, &mut launch_meta, &profile, target_os, &data_dir);
+            resolver::merge_loader_profile(&mut plan, &mut launch_meta, &profile, target_os, &cache_dir);
         }
     }
 
@@ -563,13 +565,13 @@ async fn launch_instance(
             loader_version,
             &inst.minecraft,
             &java_for_install.path,
-            &data_dir,
+            &cache_dir,
             &install_sink,
         )
         .await?;
 
         let profile = loader_profile::load_forge_profile(&version_json_path)?;
-        resolver::merge_loader_profile(&mut plan, &mut launch_meta, &profile, target_os, &data_dir);
+        resolver::merge_loader_profile(&mut plan, &mut launch_meta, &profile, target_os, &cache_dir);
     }
 
     // --- 4. Download: execute the plan; inspect outcomes before proceeding. ---
@@ -601,7 +603,7 @@ async fn launch_instance(
 
     // --- 6. Resolve paths. ---
     let instances_dir = core::store::instances_dir(&app)?;
-    let paths = launch::LaunchPaths::new(&data_dir, &instances_dir, &inst.slug);
+    let paths = launch::LaunchPaths::new(&cache_dir, &instances_dir, &inst.slug);
 
     // --- 7. Extract natives. ---
     launch::extract_natives(&launch_meta.natives, &paths.natives_directory)?;
