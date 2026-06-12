@@ -92,4 +92,39 @@ reorg is incremental and revertible per slice.
 
 ## Change log
 
-<!-- Populated on first amendment after approval. -->
+### 2026-06-12 — Slices A+B+C1 shipped; C2 deferred
+
+**What changed:** Implemented slices A (rebrand + cache layout), B (single-account auth), and C1 (materialize helper) via /subagent-implementation. C2 (launch wiring) deferred at a pause point — tracked as plan followup `storage-auth-reorg-c2`.
+
+**Why:** User paused the loop before the live-launch-path change (C2 is the riskiest checkpoint). A+B+C1 are independently green and committable; C2 builds on C1 and can resume later.
+
+**Not superseded:** C2's checkpoint contract in the body remains current — it is deferred, not cut.
+
+## Implementation log
+
+### partial (A+B+C1 shipped, C2 deferred) — 2026-06-12
+
+Built across 6 checkpoint iterations + 1 polish pass of /subagent-implementation on branch `reorg/storage-auth-apexlauncher`. Commits (chronological):
+
+- `34b402c` — A1 brand data root ApexLauncher + cache/ layout helpers
+- `43f40f6` — A2 repoint all shared-artifact consumers under cache/
+- `ea33ee0` — A3 rebrand modloader → ApexLauncher (bundle id, productName, title, UI)
+- `e48b7e4` — B1 single persistent MS account (store + auth.rs + lib.rs commands)
+- `0cbb9b1` — B2 sidebar login/logout control; drop Accounts page
+- `5d1b1c6` — C1 hardlink-with-copy-fallback materialize helper
+- `76d5852` — polish: resolver param rename, cache_dir test, stale comments
+- `4f6d514` — followups: defer C2, track cp4 failure
+
+**Out-of-scope work performed during this build:**
+- `launch.rs` identity resolution updated in B1 (cohesion-required: it consumes the auth store API that B1 reshaped).
+- Two unrelated bug fixes committed to `main` before the loop: XSTS `xid`-optional (`be31297`), Forge version-id convention (`df5c372`) — found during live testing this session.
+
+**Unforeseens — surprises that emerged during implementation:**
+- Data root resolution used Tauri `app_data_dir()` (identifier-appended), so a friendly `ApexLauncher` folder required `path().data_dir()` + explicit join, not just changing the bundle id. Handled in A1.
+- Assets/libraries were already shared at the data root — slice C is materialization + the `cache/` boundary, not de-duplication. Captured in the design's current-state table.
+- Spec B1/B2 merged at implementation time: the `AccountStore` API change forces the Tauri command change, so they cannot be green independently.
+- `cp4_concurrency_bound_not_exceeded` fails deterministically on this host — confirmed pre-existing (fails at base `df5c372`), not a regression.
+
+**Deferred items still open:**
+- `storage-auth-reorg-c2` (kind: plan) — slice C2 launch wiring, with F-4/F-6/F-7 (cache-helper usage, materialize fallback/idempotency hardening) folded in.
+- `download-cp4-concurrency-failure` (kind: finding) — pre-existing mock-race test failure.
