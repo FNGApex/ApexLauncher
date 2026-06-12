@@ -137,7 +137,7 @@ impl LaunchIdentity {
 /// a mock client and a fake-keyring-backed store.
 ///
 /// The caller (normally `launch_instance` in `lib.rs`) is responsible for
-/// persisting any changes made to the store (via `add_account`) and for
+/// persisting any changes made to the store (via `set_account`) and for
 /// holding any lock around the store for the duration of this call.
 pub async fn resolve_launch_identity(
     store: &mut AccountStore,
@@ -148,13 +148,12 @@ pub async fn resolve_launch_identity(
         return Ok(LaunchIdentity::offline());
     }
 
-    let account_meta = match store.get_active_account() {
-        None => return Ok(LaunchIdentity::offline()),
-        Some(m) => m.clone(),
-    };
+    if store.get_account().is_none() {
+        return Ok(LaunchIdentity::offline());
+    }
 
     // MC token is never persisted — always re-derive via refresh.
-    let refresh_token = store.get_refresh_token(&account_meta.id)?;
+    let refresh_token = store.get_refresh_token()?;
 
     let ms_tokens = crate::core::auth::refresh_ms_token(http, crate::core::auth::MS_TOKEN_URL, &refresh_token).await?;
     let new_ms_refresh = ms_tokens.refresh_token.clone();
@@ -166,7 +165,7 @@ pub async fn resolve_launch_identity(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let updated_meta = crate::core::auth::AccountMeta::from_account(&account, now_secs);
-    store.add_account(updated_meta, &new_ms_refresh)?;
+    store.set_account(updated_meta, &new_ms_refresh)?;
 
     Ok(LaunchIdentity {
         player_name: account.username,
@@ -1905,25 +1904,22 @@ mod tests {
         ]
     }
 
-    fn make_store_with_account(dir: &TempDir, account_id: &str, refresh_token: &str) -> AccountStore {
-        let path = dir.path().join("accounts.json");
+    fn make_store_with_account(dir: &TempDir, _account_id: &str, refresh_token: &str) -> AccountStore {
+        let path = dir.path().join("account.json");
         let mut store = AccountStore::load(path, Box::new(FakeKeyring::new()))
             .expect("AccountStore::load should succeed");
         let meta = AccountMeta {
-            id: account_id.to_owned(),
+            id: FIXTURE_ACCOUNT_ID.to_owned(),
             username: "SomePlayer".to_owned(),
             xuid: "xuid_old".to_owned(),
             mc_token_expires: None, // never cached → always refresh
         };
-        store.add_account(meta, refresh_token).expect("add_account");
-        store.set_active_account(account_id).expect("set_active");
+        store.set_account(meta, refresh_token).expect("set_account");
         store
     }
 
     /// The MC profile fixture returns `"id": "uuid1234"` — this is the account id
-    /// that `xbox_chain` returns in `Account.id`. The store account id must match
-    /// so that `add_account` (which replaces by id) updates the same entry and
-    /// `get_active_account` (which looks up by `active_account_id`) still finds it.
+    /// that `xbox_chain` returns in `Account.id`.
     const FIXTURE_ACCOUNT_ID: &str = "uuid1234";
 
     /// offline = true → returns offline identity regardless of store contents.
@@ -1947,11 +1943,11 @@ mod tests {
         assert_eq!(identity.access_token, "0");
     }
 
-    /// No active account → offline identity (no HTTP calls).
+    /// No account → offline identity (no HTTP calls).
     #[tokio::test]
     async fn cp4_resolve_no_active_account_returns_offline() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("accounts.json");
+        let path = dir.path().join("account.json");
         let mut store = AccountStore::load(path, Box::new(FakeKeyring::new()))
             .expect("load");
         let http = MockAuthClient::new(vec![]); // no HTTP calls expected
@@ -1969,8 +1965,8 @@ mod tests {
     async fn cp4_resolve_active_account_refresh_at_launch() {
         let dir = TempDir::new().unwrap();
         // Account id must match the MC profile fixture's `"id"` field ("uuid1234")
-        // so that add_account replaces the existing entry (same id) and
-        // get_active_account still resolves after the refresh.
+        // so that set_account overwrites the existing entry and
+        // get_account still resolves after the refresh.
         let mut store = make_store_with_account(&dir, FIXTURE_ACCOUNT_ID, "stored_refresh_tok");
         let http = MockAuthClient::new(xbox_chain_responses());
 
@@ -1992,12 +1988,12 @@ mod tests {
         );
 
         // Store must have been updated with refreshed metadata.
-        let updated = store.get_active_account().expect("active account still set");
+        let updated = store.get_account().expect("account still set after refresh");
         assert_eq!(updated.username, "OnlinePlayer", "store updated with new username");
         assert_eq!(updated.xuid, "xuid_abc", "store updated with new xuid");
 
-        // New MS refresh token must be in keyring under the account id.
-        let new_rt = store.get_refresh_token(FIXTURE_ACCOUNT_ID).expect("refresh token in keyring");
+        // New MS refresh token must be in keyring.
+        let new_rt = store.get_refresh_token().expect("refresh token in keyring");
         assert_eq!(new_rt, "ms_refresh_new", "keyring updated with new MS refresh token");
     }
 }

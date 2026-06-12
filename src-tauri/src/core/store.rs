@@ -113,14 +113,14 @@ pub fn java_dir(app: &AppHandle) -> Result<PathBuf, String> {
     cache_java_dir(app)
 }
 
-/// `<data>/accounts.json` — the multi-account metadata store.
+/// `<data>/account.json` — the single-account metadata store.
 ///
 /// Ensures the parent data dir exists; does NOT create the file itself (it is
 /// created lazily on the first write).
-pub fn accounts_file(app: &AppHandle) -> Result<PathBuf, String> {
+pub fn account_file(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = data_dir(app)?;
     fs::create_dir_all(&dir).map_err(|e| format!("could not create app data dir: {e}"))?;
-    Ok(dir.join("accounts.json"))
+    Ok(dir.join("account.json"))
 }
 
 // ---------------------------------------------------------------------------

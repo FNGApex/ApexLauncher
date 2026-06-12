@@ -209,7 +209,7 @@ pub enum AuthError {
     #[error("keyring error: {0}")]
     Keyring(String),
 
-    /// Account store I/O or parse failure (reading/writing `accounts.json`).
+    /// Account store I/O or parse failure (reading/writing `account.json`).
     #[error("account store error: {0}")]
     Store(String),
 
@@ -612,7 +612,7 @@ fn map_oauth_error<T>(err: &str) -> Result<T, AuthError> {
 
 // ── CP3: Account store (persistence + keyring seam) ──────────────────────────
 
-/// Non-secret account metadata written to `accounts.json`.
+/// Non-secret account metadata written to `account.json`.
 ///
 /// The refresh token and MC access token are NOT stored here: the refresh token
 /// lives in the OS keyring (via [`KeyringBackend`]); the MC access token is
@@ -627,7 +627,7 @@ pub struct AccountMeta {
     /// Xbox user ID.
     pub xuid: String,
     /// Unix timestamp (seconds) at which the MC token expires; `None` if unknown.
-    /// Alias keeps accounts.json files written before the camelCase rename loadable.
+    /// Alias keeps account.json files written before the camelCase rename loadable.
     #[serde(alias = "mc_token_expires")]
     pub mc_token_expires: Option<u64>,
 }
@@ -646,13 +646,6 @@ impl AccountMeta {
     }
 }
 
-/// On-disk shape of `accounts.json`.
-#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
-struct PersistedStore {
-    accounts: Vec<AccountMeta>,
-    active_account_id: Option<String>,
-}
-
 /// Injectable seam for OS keyring access so tests never call the real keyring.
 pub trait KeyringBackend: Send + Sync {
     /// Store `secret` for `account_id`. Overwrites any prior value.
@@ -667,6 +660,11 @@ pub trait KeyringBackend: Send + Sync {
 pub struct SystemKeyringBackend;
 
 const KEYRING_SERVICE: &str = "modloader";
+
+/// Fixed keyring key used for the single account's refresh token.
+/// Using a constant means the key does not depend on the account id, which
+/// simplifies logout (no need to track the id just to delete the key).
+const KEYRING_ACCOUNT_KEY: &str = "current_account";
 
 impl KeyringBackend for SystemKeyringBackend {
     fn store_secret(&self, account_id: &str, secret: &str) -> Result<(), AuthError> {
@@ -697,15 +695,15 @@ impl KeyringBackend for SystemKeyringBackend {
     }
 }
 
-/// Multi-account store: persists metadata to `accounts.json`, secrets to keyring.
+/// Single-account store: persists `AccountMeta` to `account.json`, refresh token to keyring.
 ///
-/// The in-memory state mirrors the last-written file. The store is not thread-safe
-/// by itself; callers must serialize access (e.g. a `Mutex<AccountStore>` in the
-/// Tauri state — wired in CP4).
+/// One account at a time. Login replaces any prior account. Logout clears both the
+/// JSON file and the keyring entry. The store is not thread-safe by itself; callers
+/// must serialize access (e.g. a `Mutex<AccountStore>` in the Tauri state).
 pub struct AccountStore {
     path: std::path::PathBuf,
     keyring: Box<dyn KeyringBackend>,
-    state: PersistedStore,
+    account: Option<AccountMeta>,
 }
 
 impl AccountStore {
@@ -714,104 +712,73 @@ impl AccountStore {
         path: std::path::PathBuf,
         keyring: Box<dyn KeyringBackend>,
     ) -> Result<Self, AuthError> {
-        let state = if path.exists() {
+        let account = if path.exists() {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| AuthError::Store(e.to_string()))?;
-            serde_json::from_str::<PersistedStore>(&raw)
-                .map_err(|e| AuthError::Store(format!("accounts.json parse error: {e}")))?
+            let meta = serde_json::from_str::<AccountMeta>(&raw)
+                .map_err(|e| AuthError::Store(format!("account.json parse error: {e}")))?;
+            Some(meta)
         } else {
-            PersistedStore::default()
+            None
         };
-        Ok(AccountStore { path, keyring, state })
+        Ok(AccountStore { path, keyring, account })
     }
 
     /// Construct an in-memory-only empty store (no file I/O).
     ///
-    /// Used when `load` fails (e.g. corrupt `accounts.json`) to start the app
-    /// with an empty account list rather than panicking. The path is kept so that
-    /// any future writes go to the correct location.
+    /// Used when `load` fails (e.g. corrupt `account.json`) to start the app
+    /// without panicking. The path is kept so future writes go to the correct location.
     pub fn new_empty(path: std::path::PathBuf, keyring: Box<dyn KeyringBackend>) -> Self {
-        AccountStore {
-            path,
-            keyring,
-            state: PersistedStore::default(),
-        }
+        AccountStore { path, keyring, account: None }
     }
 
-    /// Persist the current state to `accounts.json`.
+    /// Persist `account` to `account.json`.
     fn save(&self) -> Result<(), AuthError> {
-        let json = serde_json::to_string_pretty(&self.state)
+        let meta = match &self.account {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+        let json = serde_json::to_string_pretty(meta)
             .map_err(|e| AuthError::Store(e.to_string()))?;
         std::fs::write(&self.path, json).map_err(|e| AuthError::Store(e.to_string()))
     }
 
-    /// Add `meta` and store `refresh_token` in the keyring.
-    /// Replaces any existing entry with the same id.
-    pub fn add_account(&mut self, meta: AccountMeta, refresh_token: &str) -> Result<(), AuthError> {
+    /// Store the single account: write `AccountMeta` to `account.json` and the
+    /// refresh token to the keyring under the fixed key. Overwrites any prior account.
+    pub fn set_account(&mut self, meta: AccountMeta, refresh_token: &str) -> Result<(), AuthError> {
         // Store secret first — if keyring fails, don't persist stale metadata.
-        self.keyring.store_secret(&meta.id, refresh_token)?;
-        // Replace or insert.
-        if let Some(existing) = self.state.accounts.iter_mut().find(|a| a.id == meta.id) {
-            *existing = meta;
-        } else {
-            self.state.accounts.push(meta);
-        }
+        self.keyring.store_secret(KEYRING_ACCOUNT_KEY, refresh_token)?;
+        self.account = Some(meta);
         self.save()
     }
 
-    /// List all account metadata (no secrets).
-    pub fn list_accounts(&self) -> &[AccountMeta] {
-        &self.state.accounts
+    /// The current account metadata, or `None` if not logged in.
+    pub fn get_account(&self) -> Option<&AccountMeta> {
+        self.account.as_ref()
     }
 
-    /// Remove the account with `id`. Deletes the keyring secret too.
-    /// If this was the active account, clears `active_account_id`.
-    ///
-    /// Ordering (F-10 fix): keyring delete happens first. If it fails, state and
-    /// disk are left unchanged — no desync. Only after a successful keyring delete
-    /// are the in-memory state and disk updated.
-    pub fn remove_account(&mut self, id: &str) -> Result<(), AuthError> {
-        // Step 1: delete the keyring secret first. Not-found is fine.
-        // If this fails, we stop here — state and disk are not mutated.
-        self.keyring.delete_secret(id)?;
+    /// Clear the account: delete `account.json` and the keyring entry. Idempotent.
+    pub fn logout(&mut self) -> Result<(), AuthError> {
+        // Delete keyring first. If it fails, leave the file intact (no desync).
+        // Not-found is tolerated by the KeyringBackend contract.
+        self.keyring.delete_secret(KEYRING_ACCOUNT_KEY)?;
 
-        // Step 2: mutate in-memory state only after the keyring step succeeded.
-        self.state.accounts.retain(|a| a.id != id);
-        if self.state.active_account_id.as_deref() == Some(id) {
-            self.state.active_account_id = None;
+        // Remove the file if it exists.
+        if self.path.exists() {
+            std::fs::remove_file(&self.path)
+                .map_err(|e| AuthError::Store(format!("could not delete account.json: {e}")))?;
         }
 
-        // Step 3: persist.
-        self.save()
+        self.account = None;
+        Ok(())
     }
 
-    /// Set the active account by id. Returns an error if the id is not in the store.
-    pub fn set_active_account(&mut self, id: &str) -> Result<(), AuthError> {
-        if !self.state.accounts.iter().any(|a| a.id == id) {
-            return Err(AuthError::Store(format!(
-                "account {id} not found in store"
-            )));
+    /// Retrieve the current account's refresh token from the keyring.
+    pub fn get_refresh_token(&self) -> Result<String, AuthError> {
+        if self.account.is_none() {
+            return Err(AuthError::Store("no account logged in".to_owned()));
         }
-        self.state.active_account_id = Some(id.to_owned());
-        self.save()
-    }
-
-    /// The id of the active account, if one is set.
-    pub fn active_account_id(&self) -> Option<&str> {
-        self.state.active_account_id.as_deref()
-    }
-
-    /// Get the active account metadata, if one is set.
-    pub fn get_active_account(&self) -> Option<&AccountMeta> {
-        self.state
-            .active_account_id
-            .as_deref()
-            .and_then(|id| self.state.accounts.iter().find(|a| a.id == id))
-    }
-
-    /// Retrieve the refresh token for `account_id` from the keyring.
-    pub fn get_refresh_token(&self, account_id: &str) -> Result<String, AuthError> {
-        self.keyring.load_secret(account_id)
+        self.keyring.load_secret(KEYRING_ACCOUNT_KEY)
     }
 }
 
@@ -1396,6 +1363,12 @@ mod tests {
                 store: StdMutex::new(HashMap::new()),
             }
         }
+
+        /// Read a key directly — used by tests to inspect keyring state without
+        /// going through `AccountStore`, which guards on `account.is_some()`.
+        fn get(&self, key: &str) -> Option<String> {
+            self.store.lock().unwrap().get(key).cloned()
+        }
     }
 
     impl KeyringBackend for FakeKeyring {
@@ -1419,6 +1392,31 @@ mod tests {
         fn delete_secret(&self, account_id: &str) -> Result<(), AuthError> {
             self.store.lock().unwrap().remove(account_id);
             Ok(())
+        }
+    }
+
+    /// Arc-wrapped `FakeKeyring` so tests retain a handle after passing ownership
+    /// to `AccountStore` via `Box<dyn KeyringBackend>`.
+    struct SharedFakeKeyring(Arc<FakeKeyring>);
+
+    impl SharedFakeKeyring {
+        fn new() -> (Self, Arc<FakeKeyring>) {
+            let inner = Arc::new(FakeKeyring::new());
+            (SharedFakeKeyring(Arc::clone(&inner)), inner)
+        }
+    }
+
+    impl KeyringBackend for SharedFakeKeyring {
+        fn store_secret(&self, account_id: &str, secret: &str) -> Result<(), AuthError> {
+            self.0.store_secret(account_id, secret)
+        }
+
+        fn load_secret(&self, account_id: &str) -> Result<String, AuthError> {
+            self.0.load_secret(account_id)
+        }
+
+        fn delete_secret(&self, account_id: &str) -> Result<(), AuthError> {
+            self.0.delete_secret(account_id)
         }
     }
 
@@ -1448,61 +1446,6 @@ mod tests {
         }
     }
 
-    fn make_store(dir: &TempDir) -> AccountStore {
-        let path = dir.path().join("accounts.json");
-        AccountStore::load(path, Box::new(FakeKeyring::new()))
-            .expect("AccountStore::load should succeed on a fresh dir")
-    }
-
-    // ── Test: load from empty dir starts empty ────────────────────────────────
-
-    #[test]
-    fn cp3_load_empty_dir_is_empty() {
-        let dir = TempDir::new().unwrap();
-        let store = make_store(&dir);
-        assert!(store.list_accounts().is_empty());
-        assert!(store.get_active_account().is_none());
-    }
-
-    // ── Test: add → list round-trip ───────────────────────────────────────────
-
-    #[test]
-    fn cp3_add_then_list_round_trip() {
-        let dir = TempDir::new().unwrap();
-        let mut store = make_store(&dir);
-
-        let meta = make_meta("acc-1", "Steve");
-        store
-            .add_account(meta.clone(), "refresh_abc")
-            .expect("add_account should succeed");
-
-        let accounts = store.list_accounts();
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0], meta);
-    }
-
-    // ── Test: add → reload from disk round-trip ───────────────────────────────
-
-    #[test]
-    fn cp3_add_persists_to_disk_and_reloads() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("accounts.json");
-
-        // Write via first store instance.
-        {
-            let mut store = AccountStore::load(path.clone(), Box::new(FakeKeyring::new()))
-                .expect("initial load");
-            store
-                .add_account(make_meta("acc-1", "Steve"), "refresh_abc")
-                .expect("add");
-        }
-
-        // Load a fresh instance from the same path.
-        let store2 = AccountStore::load(path, Box::new(FakeKeyring::new())).expect("reload");
-        assert_eq!(store2.list_accounts().len(), 1);
-        assert_eq!(store2.list_accounts()[0].id, "acc-1");
-    }
-
     // ── Test: AccountMeta IPC shape is camelCase; legacy disk format still loads ──
 
     #[test]
@@ -1520,7 +1463,7 @@ mod tests {
 
     #[test]
     fn cp5_account_meta_reads_legacy_snake_case_disk_format() {
-        // accounts.json files written before the camelCase rename used
+        // account.json files written before the camelCase rename used
         // `mc_token_expires`; the alias keeps them loadable.
         let legacy =
             r#"{"id":"acc-1","username":"Steve","xuid":"xuid_acc-1","mc_token_expires":12345}"#;
@@ -1528,213 +1471,18 @@ mod tests {
         assert_eq!(meta.mc_token_expires, Some(12345));
     }
 
-    // ── Test: refresh token in keyring, NOT in accounts.json ─────────────────
-
-    #[test]
-    fn cp3_refresh_token_not_in_accounts_json() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("accounts.json");
-        let mut store =
-            AccountStore::load(path.clone(), Box::new(FakeKeyring::new())).expect("load");
-
-        store
-            .add_account(make_meta("acc-1", "Steve"), "super_secret_refresh")
-            .expect("add");
-
-        // Read raw file contents and assert the refresh token is absent.
-        let raw = std::fs::read_to_string(&path).expect("read accounts.json");
-        assert!(
-            !raw.contains("super_secret_refresh"),
-            "refresh token must not appear in accounts.json; got: {raw}"
-        );
-        // Also assert the mc_access_token is absent (not in AccountMeta).
-        assert!(
-            !raw.contains("mc_access_token"),
-            "mc_access_token must not appear in accounts.json; got: {raw}"
-        );
-    }
-
-    // ── Test: get_refresh_token retrieves via keyring ─────────────────────────
-
-    #[test]
-    fn cp3_get_refresh_token_round_trips_via_keyring() {
-        let dir = TempDir::new().unwrap();
-        let mut store = make_store(&dir);
-
-        store
-            .add_account(make_meta("acc-1", "Steve"), "my_refresh_token")
-            .expect("add");
-
-        let token = store
-            .get_refresh_token("acc-1")
-            .expect("get_refresh_token should succeed");
-        assert_eq!(token, "my_refresh_token");
-    }
-
-    // ── Test: remove_account drops metadata + keyring secret ─────────────────
-
-    #[test]
-    fn cp3_remove_account_drops_metadata_and_secret() {
-        let dir = TempDir::new().unwrap();
-        let mut store = make_store(&dir);
-
-        store
-            .add_account(make_meta("acc-1", "Steve"), "refresh_1")
-            .expect("add");
-        store
-            .add_account(make_meta("acc-2", "Alex"), "refresh_2")
-            .expect("add");
-
-        store.remove_account("acc-1").expect("remove");
-
-        let accounts = store.list_accounts();
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0].id, "acc-2");
-
-        // Keyring secret should be gone.
-        let err = store
-            .get_refresh_token("acc-1")
-            .expect_err("removed account's secret must be deleted");
-        assert!(
-            matches!(err, AuthError::Keyring(_)),
-            "expected Keyring error, got: {err}"
-        );
-    }
-
-    // ── Test: set_active / get_active ─────────────────────────────────────────
-
-    #[test]
-    fn cp3_set_and_get_active_account() {
-        let dir = TempDir::new().unwrap();
-        let mut store = make_store(&dir);
-
-        store
-            .add_account(make_meta("acc-1", "Steve"), "r1")
-            .expect("add");
-        store
-            .add_account(make_meta("acc-2", "Alex"), "r2")
-            .expect("add");
-
-        store.set_active_account("acc-2").expect("set active");
-
-        let active = store.get_active_account().expect("active must be set");
-        assert_eq!(active.id, "acc-2");
-        assert_eq!(active.username, "Alex");
-    }
-
-    // ── Test: remove active account clears active_account_id ─────────────────
-
-    #[test]
-    fn cp3_remove_active_clears_active_id() {
-        let dir = TempDir::new().unwrap();
-        let mut store = make_store(&dir);
-
-        store
-            .add_account(make_meta("acc-1", "Steve"), "r1")
-            .expect("add");
-        store.set_active_account("acc-1").expect("set active");
-        assert!(store.get_active_account().is_some());
-
-        store.remove_account("acc-1").expect("remove");
-        assert!(store.get_active_account().is_none());
-    }
-
-    // ── Test: active_account_id accessor reflects current selection ──────────
-
-    #[test]
-    fn cp3_active_account_id_accessor_reflects_selection() {
-        let dir = TempDir::new().unwrap();
-        let mut store = make_store(&dir);
-
-        // No selection yet.
-        assert_eq!(store.active_account_id(), None);
-
-        store
-            .add_account(make_meta("acc-1", "Steve"), "r1")
-            .expect("add");
-        store.set_active_account("acc-1").expect("set active");
-        assert_eq!(store.active_account_id(), Some("acc-1"));
-
-        // Removing the active account clears the id.
-        store.remove_account("acc-1").expect("remove");
-        assert_eq!(store.active_account_id(), None);
-    }
-
-    // ── Test: set_active with unknown id returns Store error ─────────────────
-
-    #[test]
-    fn cp3_set_active_unknown_id_returns_store_error() {
-        let dir = TempDir::new().unwrap();
-        let mut store = make_store(&dir);
-
-        let err = store
-            .set_active_account("nonexistent")
-            .expect_err("set_active with unknown id must fail");
-        assert!(
-            matches!(err, AuthError::Store(_)),
-            "expected Store error, got: {err}"
-        );
-    }
-
-    // ── Test: add/list/remove round-trip with multiple accounts ──────────────
-
-    #[test]
-    fn cp3_add_list_remove_list_multiple() {
-        let dir = TempDir::new().unwrap();
-        let mut store = make_store(&dir);
-
-        store
-            .add_account(make_meta("a1", "Alice"), "ra1")
-            .expect("add a1");
-        store
-            .add_account(make_meta("a2", "Bob"), "ra2")
-            .expect("add a2");
-        store
-            .add_account(make_meta("a3", "Carol"), "ra3")
-            .expect("add a3");
-
-        assert_eq!(store.list_accounts().len(), 3);
-
-        store.remove_account("a2").expect("remove a2");
-        let remaining: Vec<_> = store.list_accounts().iter().map(|a| &a.id).collect();
-        assert_eq!(remaining, vec!["a1", "a3"]);
-    }
-
-    // ── Test: active_account_id persists across reload ────────────────────────
-
-    #[test]
-    fn cp3_active_account_id_persists_across_reload() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("accounts.json");
-
-        {
-            let mut store = AccountStore::load(path.clone(), Box::new(FakeKeyring::new()))
-                .expect("load");
-            store
-                .add_account(make_meta("acc-1", "Steve"), "r1")
-                .expect("add");
-            store.set_active_account("acc-1").expect("set active");
-        }
-
-        // Reload and verify active_account_id survived.
-        let store2 =
-            AccountStore::load(path, Box::new(FakeKeyring::new())).expect("reload");
-        let active = store2.get_active_account().expect("active must survive reload");
-        assert_eq!(active.id, "acc-1");
-    }
-
     // ── Test: failing keyring surfaces named Keyring error variant ────────────
 
     #[test]
     fn cp3_failing_keyring_surfaces_named_keyring_error() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("accounts.json");
+        let path = dir.path().join("account.json");
         let mut store =
             AccountStore::load(path, Box::new(FailingKeyring)).expect("load");
 
         let err = store
-            .add_account(make_meta("acc-1", "Steve"), "refresh")
-            .expect_err("add_account with failing keyring must error");
+            .set_account(make_meta("acc-1", "Steve"), "refresh")
+            .expect_err("set_account with failing keyring must error");
 
         // Must be the named Keyring variant — not a panic, not a silent fallback.
         assert!(
@@ -1743,37 +1491,9 @@ mod tests {
         );
     }
 
-    // ── Test: duplicate add replaces existing entry ───────────────────────────
-
-    #[test]
-    fn cp3_add_duplicate_id_replaces_entry() {
-        let dir = TempDir::new().unwrap();
-        let mut store = make_store(&dir);
-
-        store
-            .add_account(make_meta("acc-1", "Steve"), "r1")
-            .expect("initial add");
-        store
-            .add_account(
-                AccountMeta {
-                    id: "acc-1".to_owned(),
-                    username: "Steve_Updated".to_owned(),
-                    xuid: "new_xuid".to_owned(),
-                    mc_token_expires: Some(12345),
-                },
-                "r1_new",
-            )
-            .expect("update add");
-
-        let accounts = store.list_accounts();
-        assert_eq!(accounts.len(), 1, "duplicate add must not create a second entry");
-        assert_eq!(accounts[0].username, "Steve_Updated");
-    }
-
-    // ── Test: F-10 — remove_account keyring failure leaves state intact ───────
+    // ── Test: logout keyring failure leaves state intact ──────────────────────
     //
     // A keyring backend that stores successfully but fails on delete.
-    // Simulates the failure case that caused the F-10 ordering bug.
 
     struct StoreOkDeleteFailKeyring {
         store: StdMutex<HashMap<String, String>>,
@@ -1811,21 +1531,21 @@ mod tests {
     }
 
     #[test]
-    fn cp3_f10_remove_account_keyring_failure_leaves_state_unchanged() {
+    fn cp3_logout_keyring_failure_leaves_state_unchanged() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("accounts.json");
+        let path = dir.path().join("account.json");
         let mut store =
             AccountStore::load(path.clone(), Box::new(StoreOkDeleteFailKeyring::new()))
                 .expect("load");
 
         store
-            .add_account(make_meta("acc-1", "Steve"), "refresh_abc")
-            .expect("add_account must succeed with StoreOk backend");
+            .set_account(make_meta("acc-1", "Steve"), "refresh_abc")
+            .expect("set_account must succeed with StoreOk backend");
 
-        // Attempt remove — keyring delete fails.
+        // Attempt logout — keyring delete fails.
         let err = store
-            .remove_account("acc-1")
-            .expect_err("remove_account must fail when keyring delete fails");
+            .logout()
+            .expect_err("logout must fail when keyring delete fails");
 
         assert!(
             matches!(err, AuthError::Keyring(_)),
@@ -1833,20 +1553,18 @@ mod tests {
         );
 
         // State must be unchanged — account still present in memory.
-        assert_eq!(
-            store.list_accounts().len(),
-            1,
-            "account must still be in-memory after failed remove"
+        assert!(
+            store.get_account().is_some(),
+            "account must still be in-memory after failed logout"
         );
 
         // Disk must also be unchanged — reload and verify.
         let store2 =
             AccountStore::load(path, Box::new(StoreOkDeleteFailKeyring::new()))
                 .expect("reload");
-        assert_eq!(
-            store2.list_accounts().len(),
-            1,
-            "account must still be on disk after failed remove"
+        assert!(
+            store2.get_account().is_some(),
+            "account must still be on disk after failed logout"
         );
     }
 
@@ -1916,5 +1634,171 @@ mod tests {
         );
         // A set-but-empty override must not produce an empty client_id.
         assert_eq!(ms_client_id_from(Some("   ".into())), DEFAULT_MS_CLIENT_ID);
+    }
+
+    // ── B1 TDD anchor: single-account store set→get round-trip ───────────────
+    // This test is written BEFORE the single-account store exists; it fails until
+    // AccountStore is replaced with the single-account API.
+
+    fn make_single_store(dir: &TempDir) -> AccountStore {
+        let path = dir.path().join("account.json");
+        AccountStore::load(path, Box::new(FakeKeyring::new()))
+            .expect("AccountStore::load should succeed on a fresh dir")
+    }
+
+    #[test]
+    fn b1_set_then_get_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let mut store = make_single_store(&dir);
+
+        assert!(store.get_account().is_none(), "fresh store must be empty");
+
+        let meta = make_meta("acc-1", "Steve");
+        store
+            .set_account(meta.clone(), "refresh_abc")
+            .expect("set_account should succeed");
+
+        let got = store.get_account().expect("get_account must return Some after set");
+        assert_eq!(*got, meta);
+    }
+
+    #[test]
+    fn b1_logout_clears_json_and_keyring() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("account.json");
+        let (shared, keyring_handle) = SharedFakeKeyring::new();
+        let mut store = AccountStore::load(path.clone(), Box::new(shared)).expect("load");
+
+        store
+            .set_account(make_meta("acc-1", "Steve"), "refresh_abc")
+            .expect("set");
+
+        // Confirm file exists before logout.
+        assert!(path.exists(), "account.json must exist after set");
+        // Confirm keyring secret was stored.
+        assert_eq!(
+            keyring_handle.get(KEYRING_ACCOUNT_KEY),
+            Some("refresh_abc".to_owned()),
+            "keyring must hold secret after set"
+        );
+
+        store.logout().expect("logout should succeed");
+
+        // File must be gone.
+        assert!(!path.exists(), "account.json must be deleted after logout");
+
+        // Account must be gone from memory.
+        assert!(store.get_account().is_none(), "get_account must return None after logout");
+
+        // Keyring entry must be deleted — inspect the FakeKeyring directly so the
+        // assert is not short-circuited by `get_refresh_token`'s account guard.
+        assert_eq!(
+            keyring_handle.get(KEYRING_ACCOUNT_KEY),
+            None,
+            "keyring entry must be deleted after logout"
+        );
+    }
+
+    #[test]
+    fn b1_logout_idempotent_when_already_logged_out() {
+        let dir = TempDir::new().unwrap();
+        let mut store = make_single_store(&dir);
+
+        // No account set; logout should succeed without error.
+        store.logout().expect("logout on empty store must not error");
+        store.logout().expect("second logout must also not error");
+    }
+
+    #[test]
+    fn b1_login_replaces_prior_account() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("account.json");
+        let mut store = AccountStore::load(path.clone(), Box::new(FakeKeyring::new()))
+            .expect("load");
+
+        store
+            .set_account(make_meta("acc-1", "Steve"), "refresh_1")
+            .expect("set first");
+
+        store
+            .set_account(make_meta("acc-2", "Alex"), "refresh_2")
+            .expect("set second replaces first");
+
+        let got = store.get_account().expect("must have account");
+        assert_eq!(got.id, "acc-2", "second account must replace first");
+        assert_eq!(got.username, "Alex");
+
+        // Keyring must hold the second token, not the first.
+        let token = store.get_refresh_token().expect("get_refresh_token must succeed");
+        assert_eq!(token, "refresh_2", "keyring must contain the replacement refresh token");
+    }
+
+    #[test]
+    fn b1_set_persists_to_disk_and_reloads() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("account.json");
+
+        {
+            let mut store = AccountStore::load(path.clone(), Box::new(FakeKeyring::new()))
+                .expect("load");
+            store
+                .set_account(make_meta("acc-1", "Steve"), "refresh_abc")
+                .expect("set");
+        }
+
+        // Fresh load from disk.
+        let store2 = AccountStore::load(path, Box::new(FakeKeyring::new())).expect("reload");
+        let got = store2.get_account().expect("must reload account from disk");
+        assert_eq!(got.id, "acc-1");
+        assert_eq!(got.username, "Steve");
+    }
+
+    #[test]
+    fn b1_get_refresh_token_round_trips_via_keyring() {
+        let dir = TempDir::new().unwrap();
+        let mut store = make_single_store(&dir);
+
+        store
+            .set_account(make_meta("acc-1", "Steve"), "my_refresh_token")
+            .expect("set");
+
+        let token = store
+            .get_refresh_token()
+            .expect("get_refresh_token should succeed");
+        assert_eq!(token, "my_refresh_token");
+    }
+
+    #[test]
+    fn b1_failing_keyring_surfaces_keyring_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("account.json");
+        let mut store = AccountStore::load(path, Box::new(FailingKeyring)).expect("load");
+
+        let err = store
+            .set_account(make_meta("acc-1", "Steve"), "refresh")
+            .expect_err("set_account with failing keyring must error");
+
+        assert!(
+            matches!(err, AuthError::Keyring(_)),
+            "expected AuthError::Keyring, got: {err}"
+        );
+    }
+
+    #[test]
+    fn b1_refresh_token_not_in_account_json() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("account.json");
+        let mut store = AccountStore::load(path.clone(), Box::new(FakeKeyring::new()))
+            .expect("load");
+
+        store
+            .set_account(make_meta("acc-1", "Steve"), "super_secret_refresh")
+            .expect("set");
+
+        let raw = std::fs::read_to_string(&path).expect("read account.json");
+        assert!(
+            !raw.contains("super_secret_refresh"),
+            "refresh token must not appear in account.json; got: {raw}"
+        );
     }
 }

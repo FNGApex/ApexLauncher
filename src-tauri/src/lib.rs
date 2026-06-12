@@ -187,7 +187,7 @@ async fn begin_login(
 
     let mut guard = store_state.lock().await;
     guard
-        .add_account(meta.clone(), &ms_refresh_token)
+        .set_account(meta.clone(), &ms_refresh_token)
         .map_err(AuthCommandError::from)?;
 
     Ok(meta)
@@ -205,42 +205,22 @@ fn cancel_login(cancel_state: tauri::State<'_, CancelToken>) {
     }
 }
 
-/// List all stored accounts (metadata only — no secrets).
+/// Get the current account metadata, or `None` if not logged in.
 #[tauri::command]
-async fn list_accounts(
+async fn get_account(
     store_state: tauri::State<'_, SharedAccountStore>,
-) -> Result<Vec<AccountMeta>, AuthCommandError> {
+) -> Result<Option<AccountMeta>, AuthCommandError> {
     let guard = store_state.lock().await;
-    Ok(guard.list_accounts().to_vec())
+    Ok(guard.get_account().cloned())
 }
 
-/// The id of the active account, if one is set. `None` when no account is active.
+/// Log out: clear `account.json` and the keyring entry.
 #[tauri::command]
-async fn get_active_account_id(
+async fn logout(
     store_state: tauri::State<'_, SharedAccountStore>,
-) -> Result<Option<String>, AuthCommandError> {
-    let guard = store_state.lock().await;
-    Ok(guard.active_account_id().map(str::to_owned))
-}
-
-/// Remove an account by id.
-#[tauri::command]
-async fn remove_account(
-    store_state: tauri::State<'_, SharedAccountStore>,
-    id: String,
 ) -> Result<(), AuthCommandError> {
     let mut guard = store_state.lock().await;
-    guard.remove_account(&id).map_err(AuthCommandError::from)
-}
-
-/// Set the active account by id.
-#[tauri::command]
-async fn set_active_account(
-    store_state: tauri::State<'_, SharedAccountStore>,
-    id: String,
-) -> Result<(), AuthCommandError> {
-    let mut guard = store_state.lock().await;
-    guard.set_active_account(&id).map_err(AuthCommandError::from)
+    guard.logout().map_err(AuthCommandError::from)
 }
 
 /// Basic app metadata, surfaced to the UI as the Phase-0 IPC smoke test.
@@ -867,16 +847,16 @@ pub fn run() {
             //
             // If the keyring is unavailable at runtime (e.g. WSL without
             // secret-service), login will fail loud — no silent plaintext fallback.
-            let accounts_path = core::store::accounts_file(app.handle())
-                .expect("failed to resolve accounts file path");
-            let store = AccountStore::load(accounts_path.clone(), Box::new(auth::SystemKeyringBackend))
+            let account_path = core::store::account_file(app.handle())
+                .expect("failed to resolve account file path");
+            let store = AccountStore::load(account_path.clone(), Box::new(auth::SystemKeyringBackend))
                 .unwrap_or_else(|e| {
-                    // Load failed (e.g. corrupt accounts.json). Start with an empty
+                    // Load failed (e.g. corrupt account.json). Start with an empty
                     // in-memory store so the app boots without panicking. The path is
                     // kept so future writes (on next successful login) go to the right
                     // location.
-                    eprintln!("auth: could not load accounts.json ({e}); starting with empty store");
-                    AccountStore::new_empty(accounts_path, Box::new(auth::SystemKeyringBackend))
+                    eprintln!("auth: could not load account.json ({e}); starting with empty store");
+                    AccountStore::new_empty(account_path, Box::new(auth::SystemKeyringBackend))
                 });
             let shared: SharedAccountStore = Arc::new(tokio::sync::Mutex::new(store));
             app.manage(shared);
@@ -900,10 +880,8 @@ pub fn run() {
             kill_instance,
             begin_login,
             cancel_login,
-            list_accounts,
-            get_active_account_id,
-            remove_account,
-            set_active_account,
+            get_account,
+            logout,
             search_mods,
             get_mod_versions
         ])
