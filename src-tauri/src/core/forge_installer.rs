@@ -99,11 +99,15 @@ pub fn installer_url(kind: InstallerLoaderKind, loader_version: &str, mc_version
 /// and the `versions/<id>/<id>.json` file name.
 ///
 /// NeoForge: `neoforge-<v>`
-/// Forge:    `forge-<mc_ver>-<v>`
+/// Forge:    `<mc_ver>-forge-<v>`
+///
+/// Forge's installer writes the version profile to
+/// `versions/<mc_ver>-forge-<v>/<mc_ver>-forge-<v>.json`. The MC version comes
+/// first — `1.21.1-forge-54.0.21`, not `forge-1.21.1-54.0.21`.
 pub fn loader_version_id(kind: InstallerLoaderKind, loader_version: &str, mc_version: &str) -> String {
     match kind {
         InstallerLoaderKind::NeoForge => format!("neoforge-{loader_version}"),
-        InstallerLoaderKind::Forge => format!("forge-{mc_version}-{loader_version}"),
+        InstallerLoaderKind::Forge => format!("{mc_version}-forge-{loader_version}"),
     }
 }
 
@@ -464,9 +468,11 @@ mod tests {
 
     #[test]
     fn forge_version_id() {
+        // Forge's installer writes versions/<mc>-forge-<loader>/, e.g.
+        // `1.21.1-forge-54.0.21` — NOT `forge-1.21.1-54.0.21`.
         assert_eq!(
             loader_version_id(InstallerLoaderKind::Forge, "54.0.21", "1.21.1"),
-            "forge-1.21.1-54.0.21"
+            "1.21.1-forge-54.0.21"
         );
     }
 
@@ -701,7 +707,7 @@ mod tests {
         let data_dir = dir.path().to_path_buf();
         let java_bin = PathBuf::from("/usr/bin/java");
 
-        let version_id = "forge-1.21.1-54.0.21";
+        let version_id = "1.21.1-forge-54.0.21";
         let version_dir = data_dir.join("versions").join(version_id);
         let sink = Arc::new(CapturingInstallSink::new());
 
