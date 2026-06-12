@@ -413,7 +413,7 @@ impl AssetIndexData {
 
 /// Map the parsed `objects` map to a flat list of [`DownloadItem`]s.
 ///
-/// `data_dir` is the app data directory (e.g. `~/.local/share/modloader/`).
+/// `data_dir` is the cache dir (`<data>/cache/`).
 /// Each object is placed at `<data_dir>/assets/objects/<2hex>/<sha1>`.
 pub fn asset_objects_to_items(
     objects: &std::collections::HashMap<String, AssetObject>,
@@ -567,19 +567,19 @@ fn flatten_arg_entry(entry: &ArgumentEntry, target_os: &str) -> Vec<String> {
 /// and `LaunchMeta`.  No network calls, no `AppHandle`.
 ///
 /// `target_os` is a Mojang OS name (`"linux"`, `"windows"`, `"osx"`).
-/// `data_dir` is the app data directory (all dest paths are anchored here).
+/// `cache_dir` is the cache dir (`<data>/cache/`); all dest paths are anchored here.
 pub fn assemble(
     spec: &VersionSpec,
     assets: &AssetIndexData,
     target_os: &str,
-    data_dir: &std::path::Path,
+    cache_dir: &std::path::Path,
 ) -> (crate::core::download::DownloadPlan, LaunchMeta) {
     use crate::core::download::{DownloadItem, DownloadPlan, ExpectedHash};
 
     let mut items: Vec<DownloadItem> = Vec::new();
 
     // 1. Client jar.
-    let client_dest = data_dir
+    let client_dest = cache_dir
         .join("versions")
         .join(&spec.id)
         .join(format!("{}.jar", spec.id));
@@ -595,7 +595,7 @@ pub fn assemble(
     for entry in &cp {
         items.push(DownloadItem {
             url: entry.url.clone(),
-            dest: data_dir.join("libraries").join(&entry.maven_path),
+            dest: cache_dir.join("libraries").join(&entry.maven_path),
             expected_hash: Some(ExpectedHash::Sha1(entry.sha1.clone())),
             size: Some(entry.size),
         });
@@ -606,22 +606,22 @@ pub fn assemble(
     for entry in &nat {
         items.push(DownloadItem {
             url: entry.url.clone(),
-            dest: data_dir.join("libraries").join(&entry.maven_path),
+            dest: cache_dir.join("libraries").join(&entry.maven_path),
             expected_hash: Some(ExpectedHash::Sha1(entry.sha1.clone())),
             size: Some(entry.size),
         });
     }
 
     // 4. Asset index file.
-    items.push(asset_index_file_item(&spec.asset_index, data_dir));
+    items.push(asset_index_file_item(&spec.asset_index, cache_dir));
 
     // 5. Asset objects.
-    items.extend(asset_objects_to_items(&assets.objects, data_dir));
+    items.extend(asset_objects_to_items(&assets.objects, cache_dir));
 
     // 6. Logging config (optional).
     let logging_config_path: Option<String> = if let Some(logging) = &spec.logging {
         if let Some(client) = &logging.client {
-            let dest = data_dir
+            let dest = cache_dir
                 .join("assets")
                 .join("log_configs")
                 .join(&client.file.id);
@@ -643,7 +643,7 @@ pub fn assemble(
     let mut classpath: Vec<String> = cp
         .iter()
         .map(|e| {
-            data_dir
+            cache_dir
                 .join("libraries")
                 .join(&e.maven_path)
                 .to_string_lossy()
@@ -656,7 +656,7 @@ pub fn assemble(
     let natives: Vec<String> = nat
         .iter()
         .map(|e| {
-            data_dir
+            cache_dir
                 .join("libraries")
                 .join(&e.maven_path)
                 .to_string_lossy()
@@ -722,13 +722,14 @@ pub fn assemble(
 ///    same [`flatten_arg_entry`] machinery used by `assemble`, then appended to
 ///    `launch.jvm_args` / `launch.game_args` after the existing vanilla args.
 ///
+/// `cache_dir` is the cache dir (`<data>/cache/`).
 /// No network access. Pure function — safe to unit-test without an `AppHandle`.
 pub fn merge_loader_profile(
     plan: &mut crate::core::download::DownloadPlan,
     launch: &mut LaunchMeta,
     profile: &crate::core::loader_profile::LoaderProfile,
     target_os: &str,
-    data_dir: &std::path::Path,
+    cache_dir: &std::path::Path,
 ) {
     use crate::core::download::DownloadItem;
     use crate::core::loader_profile::maven_coord_to_path;
@@ -744,7 +745,7 @@ pub fn merge_loader_profile(
 
     for lib in &profile.libraries {
         let maven_path = maven_coord_to_path(&lib.name);
-        let dest = data_dir.join("libraries").join(&maven_path);
+        let dest = cache_dir.join("libraries").join(&maven_path);
 
         // Libraries with a present, non-empty url get a DownloadItem; libraries
         // with url=None or url="" (processor-produced, no download URL) are added

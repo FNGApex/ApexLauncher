@@ -290,7 +290,7 @@ mod tests {
 
     // Helper: return the platform EXDEV errno value.
     fn libc_exdev() -> i32 {
-        // EXDEV = 18 on Linux and macOS.
+        // EXDEV = 18 on Linux, macOS, and Windows (ERROR_NOT_SAME_DEVICE).
         18
     }
 }

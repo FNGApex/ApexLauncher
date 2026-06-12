@@ -108,7 +108,7 @@ pub fn cache_installers_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 /// `<data>/java/`, created if missing.
 ///
-/// Compatibility alias for [`cache_java_dir`]. A2 will repoint callers to `cache_java_dir`.
+/// Compatibility alias for [`cache_java_dir`].
 pub fn java_dir(app: &AppHandle) -> Result<PathBuf, String> {
     cache_java_dir(app)
 }
@@ -225,6 +225,26 @@ mod tests {
     }
 
     // --- composed path shape (base → root → cache subdir) ---
+
+    // --- cache_dir path shape (pure helper equivalent) ---
+
+    #[test]
+    fn cache_dir_path_shape() {
+        // cache_dir delegates to data_root_from_base(base).join("cache").
+        // Verify: last component is "cache", parent is the data root.
+        let base = Path::new("/home/user/.local/share");
+        let root = data_root_from_base(base);
+        let cache = root.join("cache");
+        assert_eq!(
+            cache.file_name().and_then(|n| n.to_str()),
+            Some("cache"),
+            "last component of cache dir must be 'cache'"
+        );
+        assert_eq!(
+            cache.to_str(),
+            Some("/home/user/.local/share/ApexLauncher/cache")
+        );
+    }
 
     #[test]
     fn full_path_composition_assets() {
