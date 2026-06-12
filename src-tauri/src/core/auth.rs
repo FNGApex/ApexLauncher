@@ -138,7 +138,10 @@ struct XstsDisplayClaims {
 #[derive(Debug, serde::Deserialize)]
 struct XstsXui {
     /// Xbox user ID. Field name is `xid` in XSTS claims (not `xuid`).
-    xid: String,
+    /// Optional: some accounts return `xui[0]` with only `uhs` and no `xid`.
+    /// The Minecraft identity token does not use xuid, so absence is tolerated.
+    #[serde(default)]
+    xid: Option<String>,
 }
 
 /// XSTS error body (returned inside a 401 response).
@@ -502,9 +505,9 @@ async fn xsts_authorize(
         .xui
         .into_iter()
         .next()
-        .map(|x| x.xid)
+        .map(|x| x.xid.unwrap_or_default())
         .ok_or_else(|| {
-            AuthError::BadResponse("XSTS response missing xui[0].xid".to_owned())
+            AuthError::BadResponse("XSTS response missing xui[0]".to_owned())
         })?;
 
     Ok((xsts.token, xuid))
@@ -1199,6 +1202,28 @@ mod tests {
         assert_eq!(token, "xsts_token_abc");
         // This assertion verifies the `xid` field is parsed correctly.
         assert_eq!(xuid, "xbox_user_id_1234");
+    }
+
+    #[tokio::test]
+    async fn cp2_xsts_without_xid_succeeds_with_empty_xuid() {
+        // Some Microsoft accounts return an XSTS DisplayClaims `xui[0]` with
+        // only `uhs` and no `xid`. The Minecraft identity token does not use
+        // xuid, so the flow must tolerate its absence instead of failing.
+        let body = r#"{
+            "IssueInstant": "2026-06-12T06:40:19.0787317Z",
+            "NotAfter":     "2026-06-12T22:40:19.0787317Z",
+            "Token":        "xsts_token_no_xid",
+            "DisplayClaims": {
+                "xui": [{ "uhs": "1162757871890020810" }]
+            }
+        }"#;
+        let client = MockAuthClient::new(vec![MockResp::ok(body.to_owned())]);
+        let (token, xuid) = xsts_authorize(&client, "xbl_token_abc")
+            .await
+            .expect("XSTS authorize should tolerate a missing xid");
+
+        assert_eq!(token, "xsts_token_no_xid");
+        assert_eq!(xuid, "");
     }
 
     #[tokio::test]
