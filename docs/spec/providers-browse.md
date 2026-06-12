@@ -22,7 +22,8 @@ scroll, inspect versions. Installation is slice B.
 - [ ] `ModProvider` trait compiles; both Modrinth and CurseForge implementations satisfy it
       with a mock-injectable HTTP seam (same async_trait pattern as `AuthHttpClient`,
       `auth.rs:226`).
-- [ ] `search_mods` Tauri command returns `Vec<ProjectSummary>` for Modrinth (no key) and
+- [ ] `search_mods` Tauri command returns a `SearchResult` (hits: `Vec<ProjectSummary>`,
+      plus `offset`/`total` for the pagination contract) for Modrinth (no key) and
       CurseForge (key present), passing the query, MC version, loader, offset, and limit
       parameters through to the respective APIs.
 - [ ] `get_mod_versions` Tauri command returns `Vec<ProjectVersion>` filtered to versions
@@ -94,3 +95,42 @@ live there. B forks normalization; C leaks the key. Full rationale and sub-decis
 ## Change log
 
 <!-- new entries prepended below this line: ### YYYY-MM-DD — <title> -->
+
+### 2026-06-11 — search_mods returns SearchResult, not bare Vec
+
+**What changed**: success criterion for `search_mods` now specifies `SearchResult`
+(hits + offset + total) as the return shape.
+
+**Why**: the spec's own pagination contract ("normalize to offset/limit/total",
+Recommendation table) requires `total` to reach the UI for infinite scroll; a bare
+`Vec<ProjectSummary>` drops it. CP1 already shipped `SearchResult` as the normalized
+shape. Caught at CP4 brief-writing.
+
+**Superseded**: "`search_mods` returns `Vec<ProjectSummary>`".
+
+## Implementation log
+
+### shipped (code-complete; manual UI verify pending) — 2026-06-11
+
+Built across 7 iterations of /subagent-implementation. Commits (chronological):
+
+- `97ec5d9` — CP1 normalized types, ModProvider trait, HTTP seam (21 tests)
+- `d05b8f4` — CP2 Modrinth client: faceted search + filtered versions (15 tests)
+- `0a21572` — CP3 CurseForge client: x-api-key, gameVersions split, url:None (23 tests)
+- `1bea547` — CP4 Tauri commands + ipc.ts mirrors (2 rounds: kind-string tests were missing; 4 tests)
+- `8ef2fa6` — CP5 live Browse page (2 rounds: `as`-cast removal per repo TS rule)
+- `d2479e4` — polish pass closing review ledger F-2..F-9 (user fix-now disposition; 4 tests)
+
+Suite: 226 → 293 Rust tests; `npm run build` clean throughout.
+
+**Out-of-scope work performed during this build:**
+- none
+
+**Unforeseens — surprises that emerged during implementation:**
+- Spec self-contradiction caught at CP4: success criterion said `Vec<ProjectSummary>` while the pagination contract needs `total` — amended to `SearchResult` (see Change log).
+- No frontend test infrastructure exists; CP5 verified by tsc + build + line review instead of TDD.
+- CP4 round 1 shipped zero tests for the IPC kind strings; reviewer blocked, round 2 added them and a distinct `unknown_provider` kind.
+
+**Deferred items still open:**
+- none deferred. Dropped at triage (reason: premature at current scale, revisit if Browse shows latency in manual verify): F-7 reqwest client per command call, F-10 IntersectionObserver re-attach churn, F-11 error/loading branch order.
+- Open verification gates (not findings): manual UI verify in `npm run tauri dev` (debounce, infinite scroll, All-tab columns, CF key-missing state) and live CF testing once the CurseForge API key arrives (external gate, console.curseforge.com).
