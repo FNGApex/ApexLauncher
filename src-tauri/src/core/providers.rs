@@ -209,6 +209,11 @@ pub enum ProviderError {
     /// The CurseForge API key is missing from both the env var and settings.
     #[error("CurseForge API key is not configured")]
     KeyMissing,
+    /// A transport-level failure (connection refused, timeout, TLS error, etc.).
+    /// Distinct from `BadResponse` which means the HTTP exchange completed but
+    /// the body could not be parsed.
+    #[error("network error: {0}")]
+    Network(String),
     /// The provider returned an unexpected HTTP status.
     #[error("HTTP {status}: {body}")]
     HttpStatus { status: u16, body: String },
@@ -219,7 +224,7 @@ pub enum ProviderError {
 
 impl From<reqwest::Error> for ProviderError {
     fn from(e: reqwest::Error) -> Self {
-        ProviderError::BadResponse(e.to_string())
+        ProviderError::Network(e.to_string())
     }
 }
 
@@ -480,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn modrinth_fixture_second_hit_no_icon_url_is_some() {
+    fn modrinth_fixture_second_hit_has_icon_url() {
         // fabric-api fixture has an icon_url set
         let json = modrinth_search_fixture();
         let resp: MrSearchResponse = serde_json::from_str(&json).expect("parse failed");

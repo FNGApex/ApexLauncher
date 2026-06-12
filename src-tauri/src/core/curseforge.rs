@@ -40,14 +40,19 @@ const MODS_CLASS_ID: u32 = 6;
 
 /// Returns `true` if the entry looks like a Minecraft version string.
 ///
-/// Rule: first character is a digit and the second character is `.`.
-/// Examples that match: `"1.20.1"`, `"1.21"`, `"1.7.10"`.
+/// Rule: entry matches `/^\d+\.\d+/` — one or more leading digits followed by a dot
+/// and at least one more digit.
+/// Examples that match: `"1.20.1"`, `"1.21"`, `"1.7.10"`, `"10.2"`, `"21.1"`.
+/// Examples that do not match: `"Forge"`, `"Java 17"`, `"1x.2"`, `".21"`.
 fn is_mc_version(entry: &str) -> bool {
-    let mut chars = entry.chars();
-    match (chars.next(), chars.next()) {
-        (Some(c1), Some(c2)) => c1.is_ascii_digit() && c2 == '.',
-        _ => false,
+    let bytes = entry.as_bytes();
+    // Skip leading digits (must have at least one).
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
     }
+    // Must have consumed at least one digit, then a dot, then at least one more digit.
+    i > 0 && bytes.get(i) == Some(&b'.') && bytes.get(i + 1).map_or(false, |b| b.is_ascii_digit())
 }
 
 /// Returns the normalized loader tag if `entry` is a known loader name,
@@ -469,6 +474,29 @@ mod tests {
         assert!(loaders.is_empty(), "loaders should be empty: {:?}", loaders);
     }
 
+    // ── is_mc_version spec-alignment tests (rule: /^\d+\.\d+/) ──────────────
+
+    #[test]
+    fn is_mc_version_two_digit_major_accepted() {
+        // "10.2" has a two-digit leading segment — old impl rejected this; spec accepts it.
+        let (mc, _) = split_game_versions(&["10.2".to_string()]);
+        assert_eq!(mc, vec!["10.2"], "two-digit major version must be accepted");
+    }
+
+    #[test]
+    fn is_mc_version_non_digit_after_first_digit_rejected() {
+        // "1x.2" starts with a digit but has a non-digit before the dot — must be rejected.
+        let (mc, _) = split_game_versions(&["1x.2".to_string()]);
+        assert!(mc.is_empty(), "\"1x.2\" must not be classified as MC version");
+    }
+
+    #[test]
+    fn is_mc_version_multi_digit_segments_accepted() {
+        // e.g. "21.1" — a hypothetical future major version
+        let (mc, _) = split_game_versions(&["21.1".to_string()]);
+        assert_eq!(mc, vec!["21.1"], "21.1 must be accepted");
+    }
+
     #[test]
     fn split_mixed_array_correct() {
         // Real CF file entry: ["1.20.1", "Forge", "Java 17"]
@@ -609,6 +637,7 @@ mod tests {
         assert_eq!(jei.id, "238222");
         assert_eq!(jei.slug, "jei");
         assert_eq!(jei.name, "Just Enough Items (JEI)");
+        assert_eq!(jei.summary, "JEI is an item and recipe viewing mod for Minecraft, built from the ground up for stability and performance.");
         assert_eq!(jei.downloads, 300_000_000);
         assert!(jei.icon_url.is_some(), "logo url should be mapped");
         assert!(

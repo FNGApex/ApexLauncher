@@ -693,6 +693,7 @@ impl From<ProviderError> for ProviderCommandError {
     fn from(e: ProviderError) -> Self {
         let kind = match &e {
             ProviderError::KeyMissing => "key_missing",
+            ProviderError::Network(_) => "network",
             ProviderError::HttpStatus { .. } => "http_status",
             ProviderError::BadResponse(_) => "bad_response",
         };
@@ -706,6 +707,17 @@ impl From<ProviderError> for ProviderCommandError {
 impl std::fmt::Display for ProviderCommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[{}] {}", self.kind, self.message)
+    }
+}
+
+/// Build the `unknown_provider` error for an unrecognised provider string.
+///
+/// Extracted so both commands share the same error path and tests can exercise
+/// the real construction logic (not a hand-rolled constant).
+fn unknown_provider_err(other: &str) -> ProviderCommandError {
+    ProviderCommandError {
+        kind: "unknown_provider".to_string(),
+        message: format!("unknown provider: {other:?}"),
     }
 }
 
@@ -741,10 +753,7 @@ async fn search_mods(
             let p = CurseForgeProvider::new(key);
             p.search(&http, &params).await.map_err(ProviderCommandError::from)
         }
-        other => Err(ProviderCommandError {
-            kind: "unknown_provider".to_string(),
-            message: format!("unknown provider: {other:?}"),
-        }),
+        other => Err(unknown_provider_err(other)),
     }
 }
 
@@ -779,10 +788,7 @@ async fn get_mod_versions(
                 .await
                 .map_err(ProviderCommandError::from)
         }
-        other => Err(ProviderCommandError {
-            kind: "unknown_provider".to_string(),
-            message: format!("unknown provider: {other:?}"),
-        }),
+        other => Err(unknown_provider_err(other)),
     }
 }
 
@@ -799,6 +805,15 @@ mod tests {
     fn provider_error_key_missing_kind() {
         let cmd = ProviderCommandError::from(ProviderError::KeyMissing);
         assert_eq!(cmd.kind, "key_missing");
+    }
+
+    #[test]
+    fn provider_error_network_kind() {
+        // Transport failure (connection refused, TLS error, timeout) maps to "network",
+        // NOT "bad_response". The frontend uses this kind to show a connectivity message.
+        let cmd = ProviderCommandError::from(ProviderError::Network("connection refused".to_string()));
+        assert_eq!(cmd.kind, "network");
+        assert_ne!(cmd.kind, "bad_response");
     }
 
     #[test]
@@ -821,12 +836,12 @@ mod tests {
         // The unknown-provider path must NOT reuse "bad_response" — the frontend
         // uses the kind to decide whether to show "API key required" vs a generic
         // error, and "bad_response" would mask a misconfigured provider string.
-        let cmd = ProviderCommandError {
-            kind: "unknown_provider".to_string(),
-            message: "unknown provider: \"bogus\"".to_string(),
-        };
+        // Exercises the real helper so a regression (e.g. returning "bad_response")
+        // fails here, not just in production.
+        let cmd = unknown_provider_err("bogus");
         assert_eq!(cmd.kind, "unknown_provider");
         assert_ne!(cmd.kind, "bad_response");
+        assert!(cmd.message.contains("bogus"), "message should name the bad provider: {}", cmd.message);
     }
 }
 

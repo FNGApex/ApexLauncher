@@ -14,7 +14,7 @@
 use serde::Deserialize;
 
 use crate::core::providers::{
-    Dependency, ModProvider, ProjectVersion, ProviderError, ProviderHttpClient,
+    Dependency, ModProvider, MrSearchResponse, ProjectVersion, ProviderError, ProviderHttpClient,
     ProviderKind, SearchParams, SearchResult, VersionFile,
 };
 
@@ -226,7 +226,7 @@ impl ModProvider for ModrinthProvider {
             return Err(ProviderError::HttpStatus { status, body });
         }
 
-        let raw: crate::core::providers::MrSearchResponse =
+        let raw: MrSearchResponse =
             serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
 
         let hits = raw.hits.into_iter().map(|h| h.into_summary()).collect();

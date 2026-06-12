@@ -462,6 +462,10 @@ export function setActiveAccount(id: string): Promise<void> {
 /**
  * Which backend owns a search result or version.
  * Matches the `ProviderKind` Rust enum serialized as camelCase strings.
+ *
+ * NOTE: these are RESPONSE values ("curseForge" camelCase), not the lowercase
+ * routing params accepted by `searchMods`/`getModVersions` ("curseforge").
+ * Keep the two usages distinct — the routing params are plain strings, not this type.
  */
 export type ProviderKind = "modrinth" | "curseForge";
 
