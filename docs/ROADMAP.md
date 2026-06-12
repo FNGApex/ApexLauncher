@@ -69,10 +69,13 @@ Done early so the create-instance flow picks real versions/builds:
 - ⚠️ **Apply for the free CurseForge API key now** (<https://console.curseforge.com>) — it's
   the first phase that calls the CF API. Store it backend-side (env/Tauri secret), never in
   the frontend bundle; keep it out of git. Modrinth needs no key.
-- Modrinth + CurseForge clients behind the `ModProvider` trait.
-- Unified Browse page (search, provider filter, MC/loader facets, infinite scroll).
+- Modrinth + CurseForge clients behind the `ModProvider` trait. ✔ (slice A —
+  `docs/spec/providers-browse.md`)
+- Unified Browse page (search, provider filter, MC/loader facets, infinite scroll). ✔ code-complete;
+  manual UI verify + live CF run (needs the API key) pending
 - Add a mod to an instance with dependency resolution; enable/disable/update; surface
-  CF "download disabled" → open-in-browser fallback.
+  CF "download disabled" → open-in-browser fallback. (slice B — spec to be authored:
+  `docs/spec/mod-install.md`)
 - **Done when:** you can search, add Sodium (Modrinth) + a CF mod, and launch.
 
 ## Phase 6 — Modpack import (the headline feature)
