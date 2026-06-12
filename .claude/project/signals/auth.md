@@ -33,7 +33,7 @@ Implements Microsoft OAuth 2.0 device-code flow → Xbox Live chain → Minecraf
 
 - `docs/spec/authentication.md` — implementation contract: goal, non-goals, success criteria (12 criteria), checkpoints CP1–CP5 with file ranges and verification conditions, risks table, open questions, change log
 - `docs/design/authentication.md` — design doc: problem statement, goals/non-goals, token-chain diagram, approach comparisons (token storage A1–A3, UX threading B1–B2, HTTP client C1–C2), chosen approach rationale, checkpoint table, risk table
-- `docs/design/auth-client-id-blocker.md` — ongoing blocker log: AADSTS700016 root cause, Azure app registration steps, Mojang `login_with_xbox` approval gate (form at `aka.ms/mce-reviewappid`, submitted 2026-06-09, awaiting approval), test plan for post-approval verification
+- `docs/design/auth-client-id-blocker.md` — ongoing blocker log: AADSTS700016 root cause, Azure app registration steps, Mojang `login_with_xbox` approval gate (form at `aka.ms/mce-reviewappid`, submitted 2026-06-09, approved 2026-06-11), test plan for post-approval verification
 
 ## Coupling
 
@@ -44,7 +44,7 @@ Implements Microsoft OAuth 2.0 device-code flow → Xbox Live chain → Minecraf
 
 ## Conventions worth knowing
 
-- Azure `client_id` defaults to `82a79499-8c2e-49b8-9e42-1dd9d56252f2` — registered modloader Azure app GUID (constant `DEFAULT_MS_CLIENT_ID` in `auth.rs:22`). Can be overridden at runtime via `MODLOADER_MS_CLIENT_ID` env var (resolved by `ms_client_id()` in `auth.rs:28`). Mojang approval gate still pending (see `docs/design/auth-client-id-blocker.md`).
+- Azure `client_id` defaults to `82a79499-8c2e-49b8-9e42-1dd9d56252f2` — registered modloader Azure app GUID (constant `DEFAULT_MS_CLIENT_ID` in `auth.rs:22`). Can be overridden at runtime via `MODLOADER_MS_CLIENT_ID` env var (resolved by `ms_client_id()` in `auth.rs:28`). Mojang approved this client ID 2026-06-11 — `login_with_xbox` 403 gate cleared; only end-to-end re-test remains (see `docs/design/auth-client-id-blocker.md`).
 - Refresh token stored in keyring under key `account_id` (Minecraft UUID), service name `"modloader"` (constant `KEYRING_SERVICE`). MC access token and MS refresh token are never written to `accounts.json`.
 - `AccountStore` is not thread-safe internally; callers serialize access via `tokio::sync::Mutex<AccountStore>` in Tauri managed state.
 - `remove_account` ordering (F-10 fix): keyring delete happens first; if it fails, in-memory state and disk are left unchanged — no desync.

@@ -1,7 +1,10 @@
 # Auth blocker: Microsoft sign-in fails with AADSTS700016
 
-**Status:** open blocker. Discovered 2026-06-09 testing the Phase 3 auth flow against a real
-Microsoft account. Phase 3 code is otherwise complete; this is a configuration/credential gap,
+**Status:** resolved pending final verification. Discovered 2026-06-09 testing the Phase 3 auth
+flow against a real Microsoft account. Mojang approved the registered client ID
+`82a79499-8c2e-49b8-9e42-1dd9d56252f2` on 2026-06-11 — the `login_with_xbox` 403 gate is cleared.
+Phase 3 code was already complete and wired; only the async approval remained. Last open item: an
+end-to-end re-test (add a real account, launch online). This was a configuration/credential gap,
 not a logic bug.
 
 ## Symptom
@@ -79,7 +82,7 @@ Consequence: submit the form immediately after registering the app — approval 
       `82a79499-8c2e-49b8-9e42-1dd9d56252f2`)*
 - [x] Submit the Mojang app-review form (https://aka.ms/mce-reviewappid) with that GUID;
       until approved, expect 403 at `login_with_xbox` and treat it as pending, not a bug.
-      *(submitted 2026-06-09 — awaiting approval)*
+      *(submitted 2026-06-09; **approved 2026-06-11** — 403 gate cleared)*
 - [x] Wire the client ID: `DEFAULT_MS_CLIENT_ID` const + `ms_client_id()` with
       `MODLOADER_MS_CLIENT_ID` env override (`auth.rs`). *(done 2026-06-09)*
 - [x] Fix the misleading comment at `auth.rs:15`. *(done 2026-06-09)*
