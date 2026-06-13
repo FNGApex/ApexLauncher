@@ -1,6 +1,6 @@
 ---
-generated_at: 2026-06-13T01:10:09Z
-atomic_version: 3.0.1
+generated_at: 2026-06-13T06:19:44Z
+atomic_version: 3.1.1
 ---
 # Deterministic signals
 
@@ -49,7 +49,7 @@ atomic_version: 3.0.1
 │   ├── router.tsx (1f8931e, 20L, 703ch, 703B)
 │   ├── styles.css (fd4a97f, 92L, 1984ch, 1984B)
 │   └── vite-env.d.ts (6599693, 1L, 38ch, 38B)
-├── src-tauri/ (7)
+├── src-tauri/ (8)
 │   ├── capabilities/ (1)
 │   │   └── default.json (50e6561, 10L, 220ch, 220B)
 │   ├── icons/ (16)
@@ -88,16 +88,22 @@ atomic_version: 3.0.1
 │   │   │   ├── providers.rs (fc68381, 666L, 23354ch, 24688B)
 │   │   │   ├── resolver.rs (9edaa4f, 1878L, 70403ch, 70493B)
 │   │   │   ├── settings.rs (93f09ba, 91L, 3082ch, 3084B)
-│   │   │   ├── store.rs (57c9a5b, 270L, 9438ch, 9448B)
+│   │   │   ├── store.rs (7495bd3, 285L, 10182ch, 10192B)
 │   │   │   └── versions.rs (eb8cfac, 51L, 1656ch, 1658B)
-│   │   ├── lib.rs (00db20d, 890L, 33016ch, 33080B)
+│   │   ├── lib.rs (f79569f, 893L, 33230ch, 33294B)
 │   │   └── main.rs (a29d976, 6L, 184ch, 184B)
+│   ├── tests/ (5)
+│   │   ├── platform_common.rs (72998d8, 37L, 1303ch, 1307B)
+│   │   ├── platform_linux.rs (1e75cb4, 13L, 485ch, 487B)
+│   │   ├── platform_macos.rs (2f67fcf, 13L, 484ch, 486B)
+│   │   ├── platform_unix.rs (284ca1f, 20L, 565ch, 567B)
+│   │   └── platform_windows.rs (670ca5b, 20L, 600ch, 602B)
 │   ├── Cargo.lock (6cefb0c, 5723L, 138800ch, 138800B)
 │   ├── Cargo.toml (b28d698, 43L, 1412ch, 1412B)
 │   ├── build.rs (487059e, 3L, 39ch, 39B)
 │   └── tauri.conf.json (42ac641, 35L, 704ch, 704B)
 ├── .gitignore (9823e36, 32L, 481ch, 483B)
-├── CLAUDE.md (35a7b46, 107L, 4194ch, 4291B)
+├── CLAUDE.md (44b2ed2, 110L, 4743ch, 4844B)
 ├── README.md (dcc56cc, 47L, 1960ch, 1985B)
 ├── index.html (b655c1c, 13L, 300ch, 300B)
 ├── package-lock.json (a13ba32, 2893L, 94356ch, 94356B)
@@ -113,10 +119,10 @@ atomic_version: 3.0.1
 
 ## Languages
 
-- Rust: 14774 LOC (62%), 21 files (27%)
-- JSON: 3683 LOC (15%), 17 files (22%)
-- Markdown: 2702 LOC (11%), 21 files (27%)
-- TypeScript: 2192 LOC (9%), 15 files (19%)
+- Rust: 14895 LOC (63%), 26 files (31%)
+- JSON: 3683 LOC (15%), 17 files (20%)
+- Markdown: 2705 LOC (11%), 21 files (25%)
+- TypeScript: 2192 LOC (9%), 15 files (18%)
 - CSS: 92 LOC (0%), 1 file (1%)
 - TOML: 43 LOC (0%), 1 file (1%)
 - HTML: 13 LOC (0%), 1 file (1%)

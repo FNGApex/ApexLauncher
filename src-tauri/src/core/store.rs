@@ -130,7 +130,22 @@ pub fn account_file(app: &AppHandle) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Component, Path};
+
+    /// Ordered `Normal` path segments, separator-agnostic.
+    ///
+    /// Path shape (segment order) is the contract these tests verify; the OS
+    /// separator is not. Comparing `to_str()` against a hardcoded `/` string
+    /// fails on Windows, where `Path::join` emits `\`. Comparing the `Normal`
+    /// components sidesteps that while still pinning the intended layout.
+    fn segments(p: &Path) -> Vec<&str> {
+        p.components()
+            .filter_map(|c| match c {
+                Component::Normal(s) => s.to_str(),
+                _ => None,
+            })
+            .collect()
+    }
 
     // --- data_root_from_base ---
 
@@ -165,8 +180,8 @@ mod tests {
         let base = Path::new("/Users/bear/Library/Application Support");
         let root = data_root_from_base(base);
         assert_eq!(
-            root.to_str(),
-            Some("/Users/bear/Library/Application Support/ApexLauncher")
+            segments(&root),
+            vec!["Users", "bear", "Library", "Application Support", "ApexLauncher"]
         );
     }
 
@@ -186,42 +201,42 @@ mod tests {
     fn cache_subdir_assets_shape() {
         let root = Path::new("/data/ApexLauncher");
         let p = cache_subdir_path(root, "assets");
-        assert_eq!(p.to_str(), Some("/data/ApexLauncher/cache/assets"));
+        assert_eq!(segments(&p), vec!["data", "ApexLauncher", "cache", "assets"]);
     }
 
     #[test]
     fn cache_subdir_libraries_shape() {
         let root = Path::new("/data/ApexLauncher");
         let p = cache_subdir_path(root, "libraries");
-        assert_eq!(p.to_str(), Some("/data/ApexLauncher/cache/libraries"));
+        assert_eq!(segments(&p), vec!["data", "ApexLauncher", "cache", "libraries"]);
     }
 
     #[test]
     fn cache_subdir_versions_shape() {
         let root = Path::new("/data/ApexLauncher");
         let p = cache_subdir_path(root, "versions");
-        assert_eq!(p.to_str(), Some("/data/ApexLauncher/cache/versions"));
+        assert_eq!(segments(&p), vec!["data", "ApexLauncher", "cache", "versions"]);
     }
 
     #[test]
     fn cache_subdir_java_shape() {
         let root = Path::new("/data/ApexLauncher");
         let p = cache_subdir_path(root, "java");
-        assert_eq!(p.to_str(), Some("/data/ApexLauncher/cache/java"));
+        assert_eq!(segments(&p), vec!["data", "ApexLauncher", "cache", "java"]);
     }
 
     #[test]
     fn cache_subdir_meta_shape() {
         let root = Path::new("/data/ApexLauncher");
         let p = cache_subdir_path(root, "meta");
-        assert_eq!(p.to_str(), Some("/data/ApexLauncher/cache/meta"));
+        assert_eq!(segments(&p), vec!["data", "ApexLauncher", "cache", "meta"]);
     }
 
     #[test]
     fn cache_subdir_installers_shape() {
         let root = Path::new("/data/ApexLauncher");
         let p = cache_subdir_path(root, "installers");
-        assert_eq!(p.to_str(), Some("/data/ApexLauncher/cache/installers"));
+        assert_eq!(segments(&p), vec!["data", "ApexLauncher", "cache", "installers"]);
     }
 
     // --- composed path shape (base → root → cache subdir) ---
@@ -241,8 +256,8 @@ mod tests {
             "last component of cache dir must be 'cache'"
         );
         assert_eq!(
-            cache.to_str(),
-            Some("/home/user/.local/share/ApexLauncher/cache")
+            segments(&cache),
+            vec!["home", "user", ".local", "share", "ApexLauncher", "cache"]
         );
     }
 
@@ -252,8 +267,8 @@ mod tests {
         let root = data_root_from_base(base);
         let assets = cache_subdir_path(&root, "assets");
         assert_eq!(
-            assets.to_str(),
-            Some("/home/user/.local/share/ApexLauncher/cache/assets")
+            segments(&assets),
+            vec!["home", "user", ".local", "share", "ApexLauncher", "cache", "assets"]
         );
     }
 
@@ -263,8 +278,8 @@ mod tests {
         let root = data_root_from_base(base);
         let java = cache_subdir_path(&root, "java");
         assert_eq!(
-            java.to_str(),
-            Some("/home/user/.local/share/ApexLauncher/cache/java")
+            segments(&java),
+            vec!["home", "user", ".local", "share", "ApexLauncher", "cache", "java"]
         );
     }
 }

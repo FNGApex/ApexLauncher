@@ -2,7 +2,10 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::Manager as _;
 
-mod core;
+// `pub` so integration tests in `tests/` can reach the pure helpers
+// (e.g. `store::cache_subdir_path`). This is an internal app lib, not a
+// published crate, so widening visibility for testing is harmless.
+pub mod core;
 use core::auth::{self, AccountMeta, AccountStore, AuthError};
 use core::download::{self, DownloadPlan, ItemOutcome, ItemStatus, PlanResult, ProgressSink, ProgressUpdate};
 use core::forge_installer::{self, InstallerLoaderKind, InstallSink};

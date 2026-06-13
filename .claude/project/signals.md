@@ -28,9 +28,9 @@ No CI configuration exists yet (planned Phase 7).
 
 | Language | LOC | Files | % |
 |----------|-----|-------|---|
-| Rust | 14774 | 21 | 62% |
+| Rust | 14895 | 26 | 63% |
 | JSON | 3683 | 17 | 15% |
-| Markdown | 2702 | 21 | 11% |
+| Markdown | 2705 | 21 | 11% |
 | TypeScript | 2192 | 15 | 9% |
 | CSS | 92 | 1 | <1% |
 | TOML | 43 | 1 | <1% |
@@ -61,9 +61,9 @@ No CI pipeline yet. Cross-platform GitHub Actions builds planned for Phase 7. No
 - **IPC type drift risk:** `src/lib/ipc.ts` hand-mirrors Rust structs (camelCase via `serde rename_all`). No generated types yet — specta/ts-rs planned in roadmap. Any Rust struct change requires a manual `ipc.ts` update.
 - **Auth commands changed:** `list_accounts`/`get_active_account_id`/`remove_account`/`set_active_account` removed; `get_account`/`logout` added. `accounts.json` → `account.json`. `Accounts.tsx` route removed; auth UI is now inline in `Sidebar.tsx`.
 - **App data dir:** `<OS-appdata-base>/ApexLauncher/` resolved via `app.path().data_dir()` + join `"ApexLauncher"` in `store.rs`. macOS: `~/Library/Application Support/ApexLauncher/`. Windows: `%APPDATA%\ApexLauncher\`. Linux: `~/.local/share/ApexLauncher/`. Path is independent of bundle identifier. Cache subtree: `cache/{assets,libraries,versions,java,meta,installers}`.
-- **Test layout:** ~307 Rust tests total — 37 in `download.rs` (hand-rolled `TcpListener` mock, 1 known timing flake) + 43 in `resolver.rs` (fixture-based) + 39 in `java.rs` (fixture-based, injected provision closure — no live HTTP) + 29 in `launch.rs` (argv assembly, identity routing, async spawn/kill) + 40 in `auth.rs` (mock HTTP via `MockAuthClient` VecDeque; keyring via `FakeKeyring`/`FailingKeyring` — no real TCP, no OS keyring) + 20 in `loader_profile.rs` + 13 in `store.rs` + 6 in `materialize.rs`. No frontend tests. Component tests + Playwright planned Phase 7.
+- **Test layout:** ~312 Rust tests total — 37 in `download.rs` (hand-rolled `TcpListener` mock, 1 known timing flake) + 43 in `resolver.rs` (fixture-based) + 39 in `java.rs` (fixture-based, injected provision closure — no live HTTP) + 29 in `launch.rs` (argv assembly, identity routing, async spawn/kill) + 40 in `auth.rs` (mock HTTP via `MockAuthClient` VecDeque; keyring via `FakeKeyring`/`FailingKeyring` — no real TCP, no OS keyring) + 20 in `loader_profile.rs` + 13 in `store.rs` + 6 in `materialize.rs` + 5 integration tests in `src-tauri/tests/` (`platform_common.rs`: 2 cross-platform path-shape tests against `store::data_root_from_base`/`cache_subdir_path`; `platform_{linux,macos,unix,windows}.rs`: OS-gated smoke and separator tests). No frontend tests. Component tests + Playwright planned Phase 7.
 - **New module:** `src-tauri/src/core/materialize.rs` — hardlink+copy-fallback helper (Slice C1); not yet wired into launch (Slice C2 deferred, see `.claude/project/followups/storage-auth-reorg-c2.md`).
 - **Conventions pointer:** folder/domain conventions live in `.claude/project/signals/*.md`; regenerate with `/refresh-signals`.
 - **Deterministic substrate:** `.claude/project/deterministic-signals.md`
-- **Domain partitioning basis:** partitioned by functional workflow — instance lifecycle, metadata fetching, download execution, vanilla resolution, Java management, launch orchestration, Microsoft auth, and UI shell are orthogonal concerns that change independently. `src-tauri/src/lib.rs` is the Tauri command dispatch layer shared across all domains.
+- **Domain partitioning basis:** partitioned by functional workflow — instance lifecycle, metadata fetching, download execution, vanilla resolution, Java management, launch orchestration, Microsoft auth, and UI shell are orthogonal concerns that change independently. `src-tauri/src/lib.rs` is the Tauri command dispatch layer shared across all domains. `pub mod core` in `lib.rs` (widened from private) allows `src-tauri/tests/` integration tests to reach `core::store` pure helpers without an `AppHandle`.
 - **Stubs:** `Browse.tsx` (Phase 5) is live (Phase 5 slice A complete). No remaining UI stubs — `Accounts.tsx` removed; Browse is implemented.
