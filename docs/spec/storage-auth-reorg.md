@@ -104,6 +104,8 @@ reorg is incremental and revertible per slice.
 
 ### partial (A+B+C1 shipped, C2 deferred) — 2026-06-12
 
+**Merged into main as 26fe445 — 2026-06-12.**
+
 Built across 6 checkpoint iterations + 1 polish pass of /subagent-implementation on branch `reorg/storage-auth-apexlauncher`. Commits (chronological):
 
 - `34b402c` — A1 brand data root ApexLauncher + cache/ layout helpers
