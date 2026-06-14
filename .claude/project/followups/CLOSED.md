@@ -1,3 +1,4 @@
 - 2026-06-09 accounts-active-id-mount — "Accounts active account id seeded only from interaction; listAccounts lacks active_account_id so indicator wrong on mount" — *(closed 2026-06-09)*
 - 2026-06-09 accounts-extractmessage-cast — "Accounts.tsx extractMessage uses 'as Record<string,unknown>' cast at Tauri error boundary" — *(closed 2026-06-09)*
 - 2026-06-09 auth-test-cp4-misnamed — "auth.rs test cp4_f10_remove_account_keyring_failure_leaves_state_unchanged named cp4_ but tests CP3 store behavior" — *(closed 2026-06-09)*
+- 2026-06-14 storage-auth-reorg-c2 — "Wire materialization into launch (slice C2)" — *(closed 2026-06-14)*

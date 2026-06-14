@@ -92,6 +92,14 @@ reorg is incremental and revertible per slice.
 
 ## Change log
 
+### 2026-06-14 — Slice C2 shipped (launch wiring)
+
+**What changed:** Implemented checkpoint C2 — materialization wired into the live launch path — via /subagent-implementation (3 iterations). All slices A–C now complete; the spec is fully shipped.
+
+**Why:** Resumes the work paused after C1. C2 is the last open checkpoint.
+
+**Not superseded:** the C2 body row remains an accurate description of what was built; no contract changed. Folded follow-ups F-4/F-6/F-7 from the C1 review were addressed in-iteration.
+
 ### 2026-06-12 — Slices A+B+C1 shipped; C2 deferred
 
 **What changed:** Implemented slices A (rebrand + cache layout), B (single-account auth), and C1 (materialize helper) via /subagent-implementation. C2 (launch wiring) deferred at a pause point — tracked as plan followup `storage-auth-reorg-c2`.
@@ -101,6 +109,27 @@ reorg is incremental and revertible per slice.
 **Not superseded:** C2's checkpoint contract in the body remains current — it is deferred, not cut.
 
 ## Implementation log
+
+### C2 shipped (launch wiring) — 2026-06-14
+
+Built across 3 iterations of /subagent-implementation on `main` (no worktree). Commits (chronological):
+
+- `c8349c1` — C2 wire cache→instance materialization (pure `rewrite_classpath_for_instance` helper; `LaunchPaths.library_directory`; materialize call in `lib.rs launch_instance`; folds F-6 EXDEV-narrowing, F-4/F-7 docs)
+- `8008d5a` — fix: treat Windows cross-device link (`ERROR_NOT_SAME_DEVICE` = 17) as copy-fallback via `io::ErrorKind::CrossesDevices`; correct stale comments
+- `a16656f` — perf: dedup materialize rel_paths via HashSet (closes F-1)
+
+**Design decisions made during the build:**
+- Rewrite seam is a pure function (`rewrite_classpath_for_instance`) taking `cache_dir`, `instance_dir`, `&mut LaunchMeta` — strips the cache prefix to derive relative paths, rewrites classpath + natives to the instance tree, returns the rel-path list for `materialize::materialize`. Pure → unit-testable with no `AppHandle`/disk.
+- `${library_directory}` now resolves from an explicit `LaunchPaths.library_directory` (= `instances/<slug>/libraries`) instead of being derived from `assets_root.parent()`.
+- Assets stay shared in `cache/assets` (design Recommendation A) — `--assetsDir` unchanged; only libraries + version/loader jars are materialized.
+
+**Unforeseens — surprises that emerged during implementation:**
+- F-6's narrowing of the copy-fallback to errno 18 (EXDEV) introduced a Windows regression: `ERROR_NOT_SAME_DEVICE` is 17, not 18, so cross-volume links on Windows would have propagated as `Err` and aborted launch. Caught by the iter-1 reviewer; fixed in iter 2 by matching `io::ErrorKind::CrossesDevices` (std maps both errnos to it). The C1 test-helper comment had also wrongly claimed Windows EXDEV is 18 — corrected.
+- `cp4_concurrency_bound_not_exceeded` still fails deterministically on this host — confirmed pre-existing, not a regression (tracked: `download-cp4-concurrency-failure`).
+
+**Deferred items still open:**
+- None from C2 — F-1/F-4/F-6/F-7 all addressed in-iteration; FOLLOWUPS ledger empty at finalize.
+- `download-cp4-concurrency-failure` (kind: finding) — pre-existing mock-race test failure, unrelated to this slice.
 
 ### partial (A+B+C1 shipped, C2 deferred) — 2026-06-12
 
