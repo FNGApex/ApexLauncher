@@ -578,3 +578,125 @@ export function getModVersions(
     loader,
   });
 }
+
+// --- Phase 5 slice B: mod install. Mirrors core/mod_install.rs. ---
+
+/**
+ * A resolved mod whose distribution is disabled — must be downloaded manually.
+ * Mirrors `ManualMod` in `core/mod_install.rs`.
+ */
+export interface ManualMod {
+  provider: ProviderKind;
+  projectId: string;
+  versionId: string;
+  fileName: string;
+  pageUrl: string;
+}
+
+/**
+ * A dependency for which no compatible version could be found.
+ * Mirrors `UnresolvedDep` in `core/mod_install.rs`.
+ */
+export interface UnresolvedDep {
+  projectId: string;
+  reason: string;
+}
+
+/**
+ * An optional dependency surfaced as a suggestion (not auto-installed).
+ * Mirrors `Suggestion` in `core/mod_install.rs`.
+ */
+export interface Suggestion {
+  projectId: string;
+  versionId: string | null;
+}
+
+/**
+ * A declared-incompatible mod.
+ * Mirrors `IncompatibleWarning` in `core/mod_install.rs`.
+ */
+export interface IncompatibleWarning {
+  projectId: string;
+}
+
+/**
+ * A mod that had a URL but whose download failed at runtime.
+ * Mirrors `FailedMod` in `core/mod_install.rs`.
+ */
+export interface FailedMod {
+  fileName: string;
+  error: string;
+}
+
+/**
+ * Structured result returned by the `add_mod` command.
+ * Mirrors `AddModResult` in `core/mod_install.rs`.
+ */
+export interface AddModResult {
+  added: ModEntry[];
+  manual: ManualMod[];
+  unresolved: UnresolvedDep[];
+  suggestions: Suggestion[];
+  warnings: IncompatibleWarning[];
+  failed: FailedMod[];
+}
+
+/**
+ * Structured result returned by the `update_mod` command.
+ * `status` is one of: `"updated"` | `"upToDate"` | `"manual"` | `"unresolved"` | `"failed"`.
+ * Mirrors `UpdateModResult` in `core/mod_install.rs`.
+ */
+export interface UpdateModResult {
+  status: string;
+  entry: ModEntry | null;
+  pageUrl: string | null;
+  error: string | null;
+}
+
+/**
+ * Install a mod (and its required transitive deps) into an instance.
+ *
+ * `slug` is the instance slug (target instance, not the mod's URL slug).
+ * `provider` accepts `"modrinth"` or `"curseforge"` (lowercase routing strings).
+ */
+export function addMod(
+  provider: "modrinth" | "curseforge",
+  projectId: string,
+  versionId: string,
+  slug: string,
+  mcVersion: string,
+  loader: string,
+): Promise<AddModResult> {
+  return invoke<AddModResult>("add_mod", {
+    provider,
+    projectId,
+    versionId,
+    slug,
+    mcVersion,
+    loader,
+  });
+}
+
+/**
+ * Enable or disable an installed mod by toggling the `.disabled` suffix on its file.
+ * `fileName` is the base `.jar` name (no `.disabled` suffix).
+ */
+export function setModEnabled(slug: string, fileName: string, enabled: boolean): Promise<void> {
+  return invoke<void>("set_mod_enabled", { slug, fileName, enabled });
+}
+
+/**
+ * Remove an installed mod: deletes its file and drops its manifest entry.
+ * `fileName` is the base `.jar` name (no `.disabled` suffix).
+ */
+export function removeMod(slug: string, fileName: string): Promise<void> {
+  return invoke<void>("remove_mod", { slug, fileName });
+}
+
+/**
+ * Update an installed mod to its newest compatible version.
+ * `projectId` is the provider project id stored in the mod's `ModEntry`.
+ */
+export function updateMod(slug: string, projectId: string): Promise<UpdateModResult> {
+  return invoke<UpdateModResult>("update_mod", { slug, projectId });
+}

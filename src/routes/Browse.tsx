@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { AlertCircle, Download, Key, Loader2, Package, Search } from "lucide-react";
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
+import { AlertCircle, Download, Key, Loader2, Package, Plus, Search, X } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  addMod,
   getLoaders,
+  getModVersions,
+  listInstances,
   listMinecraftVersions,
   searchMods,
+  type AddModResult,
+  type ManualMod,
   type ProjectSummary,
   type ProviderCommandError,
 } from "@/lib/ipc";
@@ -336,46 +342,285 @@ interface ModCardProps {
 }
 
 function ModCard({ mod, compact }: ModCardProps) {
+  const [showAddModal, setShowAddModal] = useState(false);
+
+  return (
+    <>
+      <div
+        className={
+          "flex items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 transition-colors hover:border-primary " +
+          (compact ? "text-xs" : "text-sm")
+        }
+      >
+        {/* Icon */}
+        {mod.iconUrl ? (
+          <img
+            src={mod.iconUrl}
+            alt=""
+            className="size-10 shrink-0 rounded-lg object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted">
+            <Package className="size-5" />
+          </div>
+        )}
+
+        {/* Text */}
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-medium text-foreground">{mod.name}</p>
+          {!compact && (
+            <p className="mt-0.5 line-clamp-2 text-xs text-muted">{mod.summary}</p>
+          )}
+          {compact && (
+            <p className="truncate text-muted">{mod.summary}</p>
+          )}
+        </div>
+
+        {/* Downloads */}
+        <div className="flex shrink-0 items-center gap-1 text-muted">
+          <Download className="size-3.5" />
+          <span className={compact ? "text-xs" : "text-sm"}>
+            {formatDownloads(mod.downloads)}
+          </span>
+        </div>
+
+        {/* Add to instance button */}
+        <button
+          onClick={() => setShowAddModal(true)}
+          title="Add to instance"
+          className="ml-1 shrink-0 rounded-md p-1.5 text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+        >
+          <Plus className="size-4" />
+        </button>
+      </div>
+
+      {showAddModal && (
+        <AddToInstanceModal mod={mod} onClose={() => setShowAddModal(false)} />
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Add-to-instance modal
+// ---------------------------------------------------------------------------
+
+interface AddToInstanceModalProps {
+  mod: ProjectSummary;
+  onClose: () => void;
+}
+
+function AddToInstanceModal({ mod, onClose }: AddToInstanceModalProps) {
+  const [selectedSlug, setSelectedSlug] = useState("");
+  const [result, setResult] = useState<AddModResult | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
+
+  const { data: instances } = useQuery({
+    queryKey: ["instances"],
+    queryFn: listInstances,
+  });
+
+  const selectedInstance = instances?.find((i) => i.slug === selectedSlug);
+
+  const versionsQuery = useQuery({
+    queryKey: ["modVersions", mod.provider, mod.id, selectedInstance?.minecraft, selectedInstance?.loader.kind],
+    queryFn: () =>
+      getModVersions(
+        mod.provider === "modrinth" ? "modrinth" : "curseforge",
+        mod.id,
+        selectedInstance!.minecraft,
+        selectedInstance!.loader.kind,
+      ),
+    enabled: selectedInstance != null,
+  });
+
+  const primaryVersion = versionsQuery.data?.[0];
+
+  const mutation = useMutation({
+    mutationFn: () => {
+      if (!selectedInstance || !primaryVersion) {
+        throw new Error("Select an instance and ensure a compatible version is available.");
+      }
+      const provider = mod.provider === "modrinth" ? "modrinth" as const : "curseforge" as const;
+      return addMod(
+        provider,
+        mod.id,
+        primaryVersion.id,
+        selectedInstance.slug,
+        selectedInstance.minecraft,
+        selectedInstance.loader.kind,
+      );
+    },
+    onSuccess: (data) => {
+      setResult(data);
+      setAddError(null);
+    },
+    onError: (err) => {
+      setAddError(String(err));
+    },
+  });
+
   return (
     <div
-      className={
-        "flex items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 transition-colors hover:border-primary " +
-        (compact ? "text-xs" : "text-sm")
-      }
+      className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4"
+      onClick={onClose}
     >
-      {/* Icon */}
-      {mod.iconUrl ? (
-        <img
-          src={mod.iconUrl}
-          alt=""
-          className="size-10 shrink-0 rounded-lg object-cover"
-          loading="lazy"
-        />
-      ) : (
-        <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted">
-          <Package className="size-5" />
+      <div
+        className="w-full max-w-md rounded-xl border border-border bg-surface p-6 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="mb-5 flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Add to instance</h2>
+          <button
+            onClick={onClose}
+            className="rounded-md p-1 text-muted hover:bg-background hover:text-foreground"
+          >
+            <X className="size-4" />
+          </button>
+        </header>
+
+        <p className="mb-4 text-sm font-medium truncate">{mod.name}</p>
+
+        {result ? (
+          <AddResultSummary result={result} onClose={onClose} />
+        ) : (
+          <div className="space-y-4">
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-muted">Target instance</span>
+              <select
+                value={selectedSlug}
+                onChange={(e) => setSelectedSlug(e.target.value)}
+                className="input w-full"
+              >
+                <option value="">Select an instance…</option>
+                {instances?.map((i) => (
+                  <option key={i.slug} value={i.slug}>
+                    {i.name} ({i.minecraft})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {selectedInstance && (
+              <div className="rounded-lg border border-border bg-surface/50 px-3 py-2 text-xs text-muted">
+                {versionsQuery.isLoading ? (
+                  <span className="flex items-center gap-1.5">
+                    <Loader2 className="size-3 animate-spin" />
+                    Fetching compatible versions…
+                  </span>
+                ) : primaryVersion ? (
+                  <span>Version: <span className="text-foreground">{primaryVersion.versionNumber}</span></span>
+                ) : (
+                  <span className="text-danger">No compatible version found for this instance.</span>
+                )}
+              </div>
+            )}
+
+            {addError && (
+              <p className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+                {addError}
+              </p>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-lg px-4 py-2 text-sm font-medium text-muted hover:bg-background hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => mutation.mutate()}
+                disabled={!selectedSlug || !primaryVersion || mutation.isPending}
+                className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                {mutation.isPending && <Loader2 className="size-4 animate-spin" />}
+                Install
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Install result summary (shown after addMod resolves)
+// ---------------------------------------------------------------------------
+
+interface AddResultSummaryProps {
+  result: AddModResult;
+  onClose: () => void;
+}
+
+function AddResultSummary({ result, onClose }: AddResultSummaryProps) {
+  return (
+    <div className="space-y-3 text-sm">
+      {result.added.length > 0 && (
+        <p className="text-green-400">
+          Added {result.added.length} mod{result.added.length !== 1 ? "s" : ""} successfully.
+        </p>
+      )}
+
+      {result.manual.length > 0 && (
+        <div>
+          <p className="mb-1.5 font-medium text-muted">Requires manual download:</p>
+          <ul className="space-y-1">
+            {result.manual.map((m) => (
+              <ManualEntry key={`${m.projectId}:${m.versionId}`} entry={m} />
+            ))}
+          </ul>
         </div>
       )}
 
-      {/* Text */}
-      <div className="min-w-0 flex-1">
-        <p className="truncate font-medium text-foreground">{mod.name}</p>
-        {!compact && (
-          <p className="mt-0.5 line-clamp-2 text-xs text-muted">{mod.summary}</p>
-        )}
-        {compact && (
-          <p className="truncate text-muted">{mod.summary}</p>
-        )}
-      </div>
+      {result.unresolved.length > 0 && (
+        <div>
+          <p className="mb-1 font-medium text-muted">Unresolved dependencies:</p>
+          <ul className="space-y-0.5 text-xs text-muted">
+            {result.unresolved.map((u) => (
+              <li key={u.projectId}>{u.projectId} — {u.reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
-      {/* Downloads */}
-      <div className="flex shrink-0 items-center gap-1 text-muted">
-        <Download className="size-3.5" />
-        <span className={compact ? "text-xs" : "text-sm"}>
-          {formatDownloads(mod.downloads)}
-        </span>
+      {result.failed.length > 0 && (
+        <div>
+          <p className="mb-1 font-medium text-danger">Failed downloads:</p>
+          <ul className="space-y-0.5 text-xs text-danger">
+            {result.failed.map((f) => (
+              <li key={f.fileName}>{f.fileName}: {f.error}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="flex justify-end pt-1">
+        <button
+          onClick={onClose}
+          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
+        >
+          Done
+        </button>
       </div>
     </div>
+  );
+}
+
+function ManualEntry({ entry }: { entry: ManualMod }) {
+  return (
+    <li className="flex items-center justify-between gap-2 rounded-lg border border-border bg-surface/50 px-3 py-1.5 text-xs">
+      <span className="truncate text-muted">{entry.fileName}</span>
+      <button
+        onClick={() => openUrl(entry.pageUrl).catch(console.error)}
+        className="shrink-0 rounded px-2 py-0.5 text-xs font-medium text-primary hover:underline"
+      >
+        Open page
+      </button>
+    </li>
   );
 }
 

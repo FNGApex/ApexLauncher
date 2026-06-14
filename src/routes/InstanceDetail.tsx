@@ -1,16 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowLeft, FileBox, Package, Play, Square } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { ArrowLeft, FileBox, Loader2, Package, Play, RefreshCw, Square, Trash2, X } from "lucide-react";
 import {
   getInstance,
   launchInstance,
   killInstance,
+  removeMod,
+  setModEnabled,
+  updateMod,
   type FolderMod,
   type LaunchLogPayload,
   type LaunchExitPayload,
   type InstallLogPayload,
+  type ModEntry,
+  type UpdateModResult,
   LAUNCH_LOG_EVENT,
   LAUNCH_EXIT_EVENT,
   INSTALL_LOG_EVENT,
@@ -21,6 +27,7 @@ const MAX_LOG_LINES = 500;
 
 export function InstanceDetail() {
   const { slug } = useParams();
+  const qc = useQueryClient();
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["instance", slug],
     queryFn: () => getInstance(slug!),
@@ -220,14 +227,22 @@ export function InstanceDetail() {
             </h2>
             {data.folderMods.length === 0 ? (
               <div className="rounded-lg border border-dashed border-border bg-surface/40 px-4 py-8 text-center text-sm text-muted">
-                No mods in this instance yet. Adding mods from CurseForge &
-                Modrinth arrives in Phase 5.
+                No mods in this instance yet. Browse and add mods using the Browse tab.
               </div>
             ) : (
               <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border">
-                {data.folderMods.map((m) => (
-                  <ModRow key={m.fileName} mod={m} />
-                ))}
+                {data.folderMods.map((m) => {
+                  const entry = data.instance.mods.find((e) => e.fileName === m.fileName);
+                  return (
+                    <ModRow
+                      key={m.fileName}
+                      mod={m}
+                      entry={entry}
+                      instanceSlug={slug!}
+                      onMutate={() => qc.invalidateQueries({ queryKey: ["instance", slug] })}
+                    />
+                  );
+                })}
               </ul>
             )}
           </section>
@@ -237,20 +252,153 @@ export function InstanceDetail() {
   );
 }
 
-function ModRow({ mod }: { mod: FolderMod }) {
+interface ModRowProps {
+  mod: FolderMod;
+  entry: ModEntry | undefined;
+  instanceSlug: string;
+  onMutate: () => void;
+}
+
+function ModRow({ mod, entry, instanceSlug, onMutate }: ModRowProps) {
+  const [updateResult, setUpdateResult] = useState<UpdateModResult | null>(null);
+
+  const toggleMutation = useMutation({
+    mutationFn: () => setModEnabled(instanceSlug, mod.fileName, mod.disabled),
+    onSuccess: onMutate,
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: () => removeMod(instanceSlug, mod.fileName),
+    onSuccess: onMutate,
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: () => updateMod(instanceSlug, entry!.projectId),
+    onSuccess: (res) => {
+      setUpdateResult(res);
+      if (res.status === "updated") onMutate();
+    },
+  });
+
+  const isBusy =
+    toggleMutation.isPending || removeMutation.isPending || updateMutation.isPending;
+
   return (
-    <li className="flex items-center gap-3 bg-surface px-4 py-2.5 text-sm">
-      <FileBox className="size-4 shrink-0 text-muted" />
-      <span className={`min-w-0 flex-1 truncate ${mod.disabled ? "text-muted line-through" : ""}`}>
-        {mod.fileName}
-      </span>
-      {!mod.managed && (
-        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-xs text-muted">
-          unmanaged
+    <li className="flex flex-col gap-1.5 bg-surface px-4 py-2.5 text-sm">
+      <div className="flex items-center gap-3">
+        <FileBox className="size-4 shrink-0 text-muted" />
+        <span className={`min-w-0 flex-1 truncate ${mod.disabled ? "text-muted line-through" : ""}`}>
+          {mod.fileName}
         </span>
+        {!mod.managed && (
+          <span className="rounded bg-surface-2 px-1.5 py-0.5 text-xs text-muted">
+            unmanaged
+          </span>
+        )}
+        <span className="shrink-0 text-xs text-muted">{formatBytes(mod.sizeBytes)}</span>
+
+        {entry && (
+          <div className="flex shrink-0 items-center gap-1">
+            {/* Enable / disable toggle */}
+            <button
+              onClick={() => toggleMutation.mutate()}
+              disabled={isBusy}
+              title={mod.disabled ? "Enable mod" : "Disable mod"}
+              className={
+                "rounded px-2 py-0.5 text-xs font-medium transition-colors disabled:opacity-50 " +
+                (mod.disabled
+                  ? "bg-surface-2 text-muted hover:text-foreground"
+                  : "bg-surface-2 text-foreground hover:text-muted")
+              }
+            >
+              {toggleMutation.isPending ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : mod.disabled ? (
+                "Enable"
+              ) : (
+                "Disable"
+              )}
+            </button>
+
+            {/* Update */}
+            <button
+              onClick={() => updateMutation.mutate()}
+              disabled={isBusy}
+              title="Check for update"
+              className="rounded p-1 text-muted transition-colors hover:bg-surface-2 hover:text-foreground disabled:opacity-50"
+            >
+              {updateMutation.isPending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3.5" />
+              )}
+            </button>
+
+            {/* Remove */}
+            <button
+              onClick={() => removeMutation.mutate()}
+              disabled={isBusy}
+              title="Remove mod"
+              className="rounded p-1 text-muted transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+            >
+              {removeMutation.isPending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="size-3.5" />
+              )}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Update result feedback */}
+      {updateResult && (
+        <UpdateResultBadge result={updateResult} onDismiss={() => setUpdateResult(null)} />
       )}
-      <span className="shrink-0 text-xs text-muted">{formatBytes(mod.sizeBytes)}</span>
+
+      {/* Mutation errors */}
+      {(toggleMutation.isError || removeMutation.isError || updateMutation.isError) && (
+        <p className="text-xs text-danger">
+          {String(
+            toggleMutation.error ?? removeMutation.error ?? updateMutation.error,
+          )}
+        </p>
+      )}
     </li>
+  );
+}
+
+interface UpdateResultBadgeProps {
+  result: UpdateModResult;
+  onDismiss: () => void;
+}
+
+function UpdateResultBadge({ result, onDismiss }: UpdateResultBadgeProps) {
+  const label = {
+    updated: "Updated to latest version.",
+    upToDate: "Already up to date.",
+    unresolved: "No compatible version found.",
+    failed: result.error ?? "Update failed.",
+    manual: "Manual download required.",
+  }[result.status] ?? result.status;
+
+  return (
+    <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-surface-2 px-2.5 py-1 text-xs">
+      <span className={result.status === "failed" ? "text-danger" : "text-muted"}>
+        {label}
+      </span>
+      {result.status === "manual" && result.pageUrl && (
+        <button
+          onClick={() => openUrl(result.pageUrl!).catch(console.error)}
+          className="font-medium text-primary hover:underline"
+        >
+          Open page
+        </button>
+      )}
+      <button onClick={onDismiss} className="text-muted hover:text-foreground">
+        <X className="size-3" />
+      </button>
+    </div>
   );
 }
 
