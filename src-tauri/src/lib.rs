@@ -906,6 +906,35 @@ async fn add_mod(
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// CP3: Mod state operations
+// ---------------------------------------------------------------------------
+
+/// Enable or disable an installed mod by renaming its file and flipping the
+/// `enabled` flag in the manifest.
+///
+/// `file_name` is the base `.jar` name (no `.disabled` suffix). Both `slug`
+/// and `file_name` are validated for path traversal before any FS access.
+#[tauri::command]
+fn set_mod_enabled(
+    app: tauri::AppHandle,
+    slug: String,
+    file_name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    instances::set_mod_enabled(&app, &slug, &file_name, enabled)
+}
+
+/// Delete a mod's on-disk file (enabled or disabled form) and drop its
+/// manifest entry. Missing file is not an error — system converges to "gone".
+///
+/// `file_name` is the base `.jar` name (no `.disabled` suffix). Both `slug`
+/// and `file_name` are validated for path traversal before any FS access.
+#[tauri::command]
+fn remove_mod(app: tauri::AppHandle, slug: String, file_name: String) -> Result<(), String> {
+    instances::remove_mod(&app, &slug, &file_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1016,7 +1045,9 @@ pub fn run() {
             logout,
             search_mods,
             get_mod_versions,
-            add_mod
+            add_mod,
+            set_mod_enabled,
+            remove_mod
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
