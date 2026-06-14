@@ -46,7 +46,7 @@ pub struct Source {
     pub pack_version: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ModEntry {
     pub provider: String,
@@ -215,6 +215,33 @@ pub fn record_playtime(
     write_manifest(&manifest_path, &inst)
 }
 
+// ---------------------------------------------------------------------------
+// Pub manifest helpers (for commands in lib.rs and sibling modules)
+// ---------------------------------------------------------------------------
+
+/// Load the `Instance` manifest for `slug` from disk.
+///
+/// Validates `slug` (traversal-safe) and returns `Err` if the manifest is
+/// absent or malformed. Does NOT reconcile the mods folder — use [`get`] for that.
+pub fn load_manifest(app: &AppHandle, slug: &str) -> Result<Instance, String> {
+    let slug = validate_slug(slug)?;
+    let path = store::instances_dir(app)?.join(&slug).join("instance.json");
+    if !path.is_file() {
+        return Err(format!("Instance '{slug}' not found"));
+    }
+    read_manifest(&path)
+}
+
+/// Persist the `Instance` manifest for `slug` back to disk.
+///
+/// Validates `slug` (traversal-safe) and overwrites `instance.json` in place.
+/// The instance directory must already exist (created by [`create`]).
+pub fn save_manifest(app: &AppHandle, slug: &str, inst: &Instance) -> Result<(), String> {
+    let slug = validate_slug(slug)?;
+    let path = store::instances_dir(app)?.join(&slug).join("instance.json");
+    write_manifest(&path, inst)
+}
+
 // --- helpers ---------------------------------------------------------------
 
 fn read_manifest(path: &Path) -> Result<Instance, String> {
@@ -305,7 +332,7 @@ fn unique_slug(dir: &Path, name: &str) -> String {
 }
 
 /// Guard against path traversal: slugs we hand to the FS must be our own shape.
-fn validate_slug(slug: &str) -> Result<String, String> {
+pub fn validate_slug(slug: &str) -> Result<String, String> {
     let ok = !slug.is_empty()
         && slug
             .chars()

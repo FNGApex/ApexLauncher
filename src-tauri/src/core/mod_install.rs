@@ -12,10 +12,13 @@
 //! No filesystem I/O, no manifest mutation, no Tauri commands live here.
 //! All network access is via the injected `ProviderHttpClient`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::download::{DownloadItem, ExpectedHash, PlanResult};
+use crate::core::instances::ModEntry;
 use crate::core::providers::{ModProvider, ProjectVersion, ProviderHttpClient, ProviderKind};
 
 // ── Output types ──────────────────────────────────────────────────────────────
@@ -314,6 +317,156 @@ async fn fetch_newest_compatible(
 
     // Providers return newest first; take the first one with a file.
     versions.into_iter().find(|v| !v.files.is_empty())
+}
+
+// ── CP2: Install executor helpers ────────────────────────────────────────────
+
+/// A single file download that failed during `add_mod`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedMod {
+    /// The `file_name` of the `PlannedMod` that failed.
+    pub file_name: String,
+    /// Human-readable error description.
+    pub error: String,
+}
+
+/// Structured result returned by the `add_mod` Tauri command.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AddModResult {
+    /// `ModEntry` records for every successfully downloaded mod.
+    pub added: Vec<ModEntry>,
+    /// Mods that could not be auto-downloaded (distribution disabled).
+    pub manual: Vec<ManualMod>,
+    /// Dependencies with no compatible version.
+    pub unresolved: Vec<UnresolvedDep>,
+    /// Optional dependencies surfaced to the user.
+    pub suggestions: Vec<Suggestion>,
+    /// Incompatible mods declared by the dependency graph.
+    pub warnings: Vec<IncompatibleWarning>,
+    /// Mods that had a URL but whose download failed at runtime.
+    pub failed: Vec<FailedMod>,
+}
+
+/// Map `ProviderKind` to the lowercase string stored in `ModEntry.provider`.
+///
+/// `ProviderKind` serializes differently (camelCase enum variant) — we need a
+/// stable lowercase ASCII string that the frontend and manifest read uniformly.
+fn provider_kind_str(kind: ProviderKind) -> String {
+    match kind {
+        ProviderKind::Modrinth => "modrinth".to_string(),
+        ProviderKind::CurseForge => "curseforge".to_string(),
+    }
+}
+
+/// Build `DownloadItem`s from the downloadable entries in an `InstallPlan`.
+///
+/// One `DownloadItem` per `PlannedMod` in `plan.downloads`:
+/// - `dest` = `mods_dir.join(&planned.file_name)`
+/// - `url`  = `planned.url`
+/// - `size` = first `VersionFile.size` (stored on `PlannedMod` — if none, `None`)
+/// - `expected_hash` = sha512 preferred, sha1 fallback, else `None`
+pub fn build_download_items(plan: &InstallPlan, mods_dir: &Path) -> Vec<DownloadItem> {
+    plan.downloads
+        .iter()
+        .map(|p| {
+            let expected_hash = if let Some(h) = p.hashes.get("sha512") {
+                Some(ExpectedHash::Sha512(h.clone()))
+            } else if let Some(h) = p.hashes.get("sha1") {
+                Some(ExpectedHash::Sha1(h.clone()))
+            } else {
+                None
+            };
+            DownloadItem {
+                url: p.url.clone(),
+                dest: mods_dir.join(&p.file_name),
+                expected_hash,
+                size: None, // PlannedMod doesn't carry file size (VersionFile.size not propagated in CP1)
+            }
+        })
+        .collect()
+}
+
+/// Convert a successfully-resolved `PlannedMod` into a `ModEntry` for the manifest.
+///
+/// `enabled` is always `true` (new installs are enabled by default).
+pub fn planned_to_mod_entry(p: &PlannedMod) -> ModEntry {
+    let mut hashes: BTreeMap<String, String> = BTreeMap::new();
+    for (k, v) in &p.hashes {
+        hashes.insert(k.clone(), v.clone());
+    }
+    ModEntry {
+        provider: provider_kind_str(p.provider),
+        project_id: p.project_id.clone(),
+        version_id: p.version_id.clone(),
+        file_name: p.file_name.clone(),
+        hashes,
+        enabled: true,
+        side: p.side.clone(),
+    }
+}
+
+/// Merge `new` entries into `existing`, skipping any whose `project_id` or
+/// `file_name` is already present. Idempotent.
+pub fn merge_mod_entries(existing: &mut Vec<ModEntry>, new: Vec<ModEntry>) {
+    for entry in new {
+        let already = existing
+            .iter()
+            .any(|e| e.project_id == entry.project_id || e.file_name == entry.file_name);
+        if !already {
+            existing.push(entry);
+        }
+    }
+}
+
+/// Attribute download outcomes back to their `PlannedMod` by URL (order-independent).
+///
+/// `execute_plan` returns outcomes in completion order (via `FuturesUnordered`) and
+/// prepends already-skipped items — index-based matching is wrong. Match by
+/// `outcome.url == planned.url` instead.
+///
+/// Routing:
+/// - `Ok` | `Skipped` → file is present on disk → build `ModEntry` via
+///   `planned_to_mod_entry` and push to the first return vector.
+/// - `Failed { error }` → push `FailedMod` to the second return vector.
+/// - No matching outcome (shouldn't happen in practice) → treat as failed with a
+///   descriptive error string.
+pub fn attribute_outcomes(
+    downloads: &[PlannedMod],
+    result: &PlanResult,
+) -> (Vec<ModEntry>, Vec<FailedMod>) {
+    use crate::core::download::ItemStatus;
+
+    let mut added: Vec<ModEntry> = Vec::new();
+    let mut failed: Vec<FailedMod> = Vec::new();
+
+    for planned in downloads {
+        match result.outcomes.iter().find(|o| o.url == planned.url) {
+            Some(outcome) => match &outcome.status {
+                ItemStatus::Ok | ItemStatus::Skipped => {
+                    added.push(planned_to_mod_entry(planned));
+                }
+                ItemStatus::Failed { error } => {
+                    failed.push(FailedMod {
+                        file_name: planned.file_name.clone(),
+                        error: error.clone(),
+                    });
+                }
+            },
+            None => {
+                failed.push(FailedMod {
+                    file_name: planned.file_name.clone(),
+                    error: format!(
+                        "no outcome recorded for url '{}' (internal error)",
+                        planned.url
+                    ),
+                });
+            }
+        }
+    }
+
+    (added, failed)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -830,5 +983,230 @@ mod tests {
 
         // root + dep-b + shared-dep = 3, not 4
         assert_eq!(plan.downloads.len(), 3);
+    }
+
+    // ── CP2: pure helper tests ────────────────────────────────────────────────
+
+    use super::{attribute_outcomes, build_download_items, merge_mod_entries, planned_to_mod_entry, AddModResult};
+    use crate::core::download::ExpectedHash;
+    use crate::core::instances::ModEntry;
+    use std::path::Path;
+
+    fn make_planned(file_name: &str, url: &str, sha512: Option<&str>, sha1: Option<&str>) -> super::PlannedMod {
+        let mut hashes = HashMap::new();
+        if let Some(h) = sha512 {
+            hashes.insert("sha512".to_string(), h.to_string());
+        }
+        if let Some(h) = sha1 {
+            hashes.insert("sha1".to_string(), h.to_string());
+        }
+        super::PlannedMod {
+            provider: ProviderKind::Modrinth,
+            project_id: "proj-a".to_string(),
+            version_id: "v1".to_string(),
+            file_name: file_name.to_string(),
+            url: url.to_string(),
+            hashes,
+            primary: true,
+            side: "unknown".to_string(),
+            page_url: "https://modrinth.com/mod/proj-a".to_string(),
+        }
+    }
+
+    /// `build_download_items` produces correct dest path = `mods_dir/<file_name>`.
+    #[test]
+    fn build_download_items_dest_path() {
+        let plan = InstallPlan {
+            downloads: vec![make_planned("sodium.jar", "https://dl.example.com/sodium.jar", Some("abc"), None)],
+            ..Default::default()
+        };
+        let mods_dir = Path::new("/instances/my-instance/mc/mods");
+        let items = build_download_items(&plan, mods_dir);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].dest, mods_dir.join("sodium.jar"));
+        assert_eq!(items[0].url, "https://dl.example.com/sodium.jar");
+    }
+
+    /// sha512 is preferred over sha1.
+    #[test]
+    fn build_download_items_prefers_sha512() {
+        let plan = InstallPlan {
+            downloads: vec![make_planned("mod.jar", "https://dl.example.com/mod.jar", Some("sha512hex"), Some("sha1hex"))],
+            ..Default::default()
+        };
+        let items = build_download_items(&plan, Path::new("/mods"));
+        assert_eq!(items[0].expected_hash, Some(ExpectedHash::Sha512("sha512hex".to_string())));
+    }
+
+    /// sha1 used when sha512 absent.
+    #[test]
+    fn build_download_items_falls_back_to_sha1() {
+        let plan = InstallPlan {
+            downloads: vec![make_planned("mod.jar", "https://dl.example.com/mod.jar", None, Some("sha1hex"))],
+            ..Default::default()
+        };
+        let items = build_download_items(&plan, Path::new("/mods"));
+        assert_eq!(items[0].expected_hash, Some(ExpectedHash::Sha1("sha1hex".to_string())));
+    }
+
+    /// No hash present → `expected_hash = None`.
+    #[test]
+    fn build_download_items_no_hash_gives_none() {
+        let plan = InstallPlan {
+            downloads: vec![make_planned("mod.jar", "https://dl.example.com/mod.jar", None, None)],
+            ..Default::default()
+        };
+        let items = build_download_items(&plan, Path::new("/mods"));
+        assert_eq!(items[0].expected_hash, None);
+    }
+
+    /// Empty plan → empty items.
+    #[test]
+    fn build_download_items_empty_plan() {
+        let plan = InstallPlan::default();
+        let items = build_download_items(&plan, Path::new("/mods"));
+        assert!(items.is_empty());
+    }
+
+    /// `planned_to_mod_entry` maps fields correctly and sets `enabled = true`.
+    #[test]
+    fn planned_to_mod_entry_maps_fields() {
+        let planned = make_planned("sodium.jar", "https://dl.example.com/sodium.jar", Some("deadbeef"), None);
+        let entry = planned_to_mod_entry(&planned);
+        assert_eq!(entry.provider, "modrinth");
+        assert_eq!(entry.project_id, "proj-a");
+        assert_eq!(entry.version_id, "v1");
+        assert_eq!(entry.file_name, "sodium.jar");
+        assert!(entry.enabled);
+        assert_eq!(entry.side, "unknown");
+        assert_eq!(entry.hashes.get("sha512"), Some(&"deadbeef".to_string()));
+    }
+
+    /// `merge_mod_entries` appends new entries that don't clash.
+    #[test]
+    fn merge_mod_entries_appends_new() {
+        let mut existing: Vec<ModEntry> = Vec::new();
+        let entry = planned_to_mod_entry(&make_planned("sodium.jar", "https://example.com/a.jar", None, None));
+        merge_mod_entries(&mut existing, vec![entry.clone()]);
+        assert_eq!(existing.len(), 1);
+        assert_eq!(existing[0].project_id, "proj-a");
+    }
+
+    /// `merge_mod_entries` skips entry with duplicate `project_id`.
+    #[test]
+    fn merge_mod_entries_dedup_by_project_id() {
+        let entry = planned_to_mod_entry(&make_planned("sodium.jar", "https://example.com/a.jar", None, None));
+        let mut existing = vec![entry.clone()];
+        // Try to add same project_id again with a different file_name — should be skipped.
+        let mut dup = entry.clone();
+        dup.file_name = "sodium-v2.jar".to_string();
+        merge_mod_entries(&mut existing, vec![dup]);
+        assert_eq!(existing.len(), 1, "duplicate project_id must be skipped");
+    }
+
+    /// `merge_mod_entries` skips entry with duplicate `file_name` even if project_id differs.
+    #[test]
+    fn merge_mod_entries_dedup_by_file_name() {
+        let entry = planned_to_mod_entry(&make_planned("sodium.jar", "https://example.com/a.jar", None, None));
+        let mut existing = vec![entry];
+        let mut dup = planned_to_mod_entry(&make_planned("sodium.jar", "https://example.com/b.jar", None, None));
+        dup.project_id = "other-project".to_string(); // different project_id, same file_name
+        merge_mod_entries(&mut existing, vec![dup]);
+        assert_eq!(existing.len(), 1, "duplicate file_name must be skipped");
+    }
+
+    /// `merge_mod_entries` is idempotent: calling twice with same input stays at len 1.
+    #[test]
+    fn merge_mod_entries_idempotent() {
+        let entry = planned_to_mod_entry(&make_planned("sodium.jar", "https://example.com/a.jar", None, None));
+        let mut existing: Vec<ModEntry> = Vec::new();
+        merge_mod_entries(&mut existing, vec![entry.clone()]);
+        merge_mod_entries(&mut existing, vec![entry.clone()]);
+        assert_eq!(existing.len(), 1);
+    }
+
+    /// `attribute_outcomes` matches by URL (order-independent).
+    ///
+    /// `PlanResult::outcomes` is in a *different* order than `downloads`:
+    /// - sodium (Ok) comes second in outcomes but first in downloads → ModEntry
+    /// - fabric-api (Skipped) comes third in outcomes → ModEntry
+    /// - broken-mod (Failed) comes first in outcomes → FailedMod
+    #[test]
+    fn attribute_outcomes_order_independent() {
+        use crate::core::download::{ItemOutcome, ItemStatus, PlanResult};
+
+        let sodium = make_planned("sodium.jar", "https://dl.example.com/sodium.jar", Some("abc"), None);
+        let mut fabric_api = make_planned("fabric-api.jar", "https://dl.example.com/fa.jar", None, Some("sha1val"));
+        fabric_api.project_id = "fabric-api".to_string();
+        fabric_api.version_id = "fa-v1".to_string();
+        let mut broken = make_planned("broken.jar", "https://dl.example.com/broken.jar", None, None);
+        broken.project_id = "broken-mod".to_string();
+        broken.version_id = "b-v1".to_string();
+
+        // downloads: [sodium, fabric-api, broken]
+        let downloads = vec![sodium.clone(), fabric_api.clone(), broken.clone()];
+
+        // outcomes in DIFFERENT order: broken first, then sodium, then fabric-api
+        let plan_result = PlanResult {
+            outcomes: vec![
+                ItemOutcome {
+                    url: broken.url.clone(),
+                    status: ItemStatus::Failed { error: "HTTP 404".to_string() },
+                },
+                ItemOutcome {
+                    url: sodium.url.clone(),
+                    status: ItemStatus::Ok,
+                },
+                ItemOutcome {
+                    url: fabric_api.url.clone(),
+                    status: ItemStatus::Skipped,
+                },
+            ],
+        };
+
+        let (added, failed) = attribute_outcomes(&downloads, &plan_result);
+
+        // sodium (Ok) + fabric-api (Skipped) → both in added
+        assert_eq!(added.len(), 2, "Ok and Skipped both produce ModEntry");
+        assert!(added.iter().any(|e| e.project_id == "proj-a" && e.file_name == "sodium.jar"), "sodium in added");
+        assert!(added.iter().any(|e| e.project_id == "fabric-api"), "fabric-api in added");
+
+        // broken (Failed) → in failed
+        assert_eq!(failed.len(), 1, "only broken-mod failed");
+        assert_eq!(failed[0].file_name, "broken.jar");
+        assert_eq!(failed[0].error, "HTTP 404");
+    }
+
+    /// `attribute_outcomes` treats a missing outcome as failed with a descriptive error.
+    #[test]
+    fn attribute_outcomes_missing_outcome_becomes_failed() {
+        use crate::core::download::{ItemOutcome, ItemStatus, PlanResult};
+
+        let sodium = make_planned("sodium.jar", "https://dl.example.com/sodium.jar", Some("abc"), None);
+        // PlanResult has no outcome matching sodium's URL.
+        let plan_result = PlanResult {
+            outcomes: vec![ItemOutcome {
+                url: "https://dl.example.com/other.jar".to_string(),
+                status: ItemStatus::Ok,
+            }],
+        };
+
+        let (added, failed) = attribute_outcomes(&[sodium.clone()], &plan_result);
+        assert!(added.is_empty());
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].file_name, "sodium.jar");
+        assert!(failed[0].error.contains("no outcome recorded"));
+    }
+
+    /// `AddModResult` has the expected fields (compile-time shape check).
+    #[test]
+    fn add_mod_result_default_is_empty() {
+        let r = AddModResult::default();
+        assert!(r.added.is_empty());
+        assert!(r.manual.is_empty());
+        assert!(r.unresolved.is_empty());
+        assert!(r.suggestions.is_empty());
+        assert!(r.warnings.is_empty());
+        assert!(r.failed.is_empty());
     }
 }

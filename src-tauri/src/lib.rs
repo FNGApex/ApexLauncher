@@ -16,6 +16,7 @@ use core::loader_profile;
 use core::loaders::{self, LoaderOption};
 use core::resolver::{self, ResolveResult};
 use core::curseforge::CurseForgeProvider;
+use core::mod_install::AddModResult;
 use core::modrinth::ModrinthProvider;
 use core::providers::{
     self, cf_api_key_from, ModProvider, ProviderError, ReqwestProviderClient, SearchParams,
@@ -790,6 +791,121 @@ async fn get_mod_versions(
     }
 }
 
+/// Install a mod (and its required transitive dependencies) into an instance.
+///
+/// # Flow
+/// 1. Construct the provider + HTTP client (mirrors `search_mods` / `get_mod_versions`).
+/// 2. Fetch the requested version via `get_versions` filtered to the exact `version_id`.
+/// 3. Load the instance manifest; derive `already_installed` from `instance.mods`.
+/// 4. Run `resolve_install` (BFS dependency walk).
+/// 5. Build a `DownloadPlan` from `plan.downloads`; execute with `NoOpSink`.
+/// 6. For each successful download, build a `ModEntry` and merge into the manifest.
+/// 7. Save the manifest; return `AddModResult`.
+///
+/// Per-item download failures are captured in `AddModResult.failed`; they do NOT
+/// abort the whole operation (remaining items still execute).
+#[tauri::command]
+async fn add_mod(
+    app: tauri::AppHandle,
+    provider: String,
+    project_id: String,
+    version_id: String,
+    slug: String,
+    mc_version: String,
+    loader: String,
+) -> Result<AddModResult, String> {
+    use core::download::{self as dl, DownloadPlan, NoOpSink};
+    use core::mod_install::{attribute_outcomes, build_download_items, merge_mod_entries, resolve_install};
+    use std::collections::HashSet;
+
+    // 1. Build provider + HTTP client.
+    let http = ReqwestProviderClient(reqwest::Client::new());
+    let settings = settings::load(&app).unwrap_or_default();
+    // Resolve CF key once; reused for both version fetch and dep resolution.
+    let cf_key = cf_api_key_from(
+        std::env::var(providers::CF_API_KEY_ENV).ok(),
+        settings.curseforge_api_key,
+    );
+
+    // Resolve the root version by fetching all compatible versions and picking
+    // the one matching `version_id`.
+    let versions = match provider.as_str() {
+        "modrinth" => {
+            let p = ModrinthProvider;
+            p.get_versions(&http, &project_id, Some(&mc_version), Some(&loader))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        "curseforge" => {
+            let p = CurseForgeProvider::new(cf_key.clone());
+            p.get_versions(&http, &project_id, Some(&mc_version), Some(&loader))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        other => return Err(format!("unknown provider: {other}")),
+    };
+
+    let root_version = versions
+        .into_iter()
+        .find(|v| v.id == version_id)
+        .ok_or_else(|| format!("version '{version_id}' not found for project '{project_id}'"))?;
+
+    // 2. Load the instance manifest; derive already-installed project_ids.
+    let mut instance = instances::load_manifest(&app, &slug)?;
+    let already_installed: HashSet<String> = instance.mods.iter().map(|m| m.project_id.clone()).collect();
+
+    // 3. Run the planner.
+    // Pass `&project_id` as the root slug so the root mod's page_url uses the
+    // mod's own project identifier, not the instance slug.
+    let plan = match provider.as_str() {
+        "modrinth" => {
+            let p = ModrinthProvider;
+            resolve_install(&p, &http, root_version, &project_id, &project_id, &mc_version, &loader, &already_installed).await
+        }
+        "curseforge" => {
+            let p = CurseForgeProvider::new(cf_key);
+            resolve_install(&p, &http, root_version, &project_id, &project_id, &mc_version, &loader, &already_installed).await
+        }
+        other => return Err(format!("unknown provider: {other}")),
+    };
+
+    // 4. Execute downloads into `<instances>/<slug>/mc/mods/`.
+    // Validate the slug here at the join site — `load_manifest` already verified it,
+    // but making the invariant explicit prevents silent breakage on future reorder.
+    instances::validate_slug(&slug).map_err(|e| format!("invalid instance slug: {e}"))?;
+    let inst_dir = core::store::instances_dir(&app)?.join(&slug);
+    let mods_dir = inst_dir.join("mc").join("mods");
+    std::fs::create_dir_all(&mods_dir).map_err(|e| format!("could not create mods dir: {e}"))?;
+
+    // Inline DownloadPlan construction (no wrapper needed).
+    let download_plan = DownloadPlan::new(build_download_items(&plan, &mods_dir));
+    let mut result = AddModResult {
+        manual: plan.manual.clone(),
+        unresolved: plan.unresolved.clone(),
+        suggestions: plan.suggestions.clone(),
+        warnings: plan.warnings.clone(),
+        ..Default::default()
+    };
+
+    if !download_plan.items.is_empty() {
+        let client = dl::build_client().map_err(|e| e.to_string())?;
+        let n = 8_usize;
+        let plan_result = dl::execute_plan(&client, &download_plan, &NoOpSink, n).await;
+
+        // Attribute outcomes by URL (order-independent) — execute_plan uses
+        // FuturesUnordered and prepends already-skipped items, so index matching is wrong.
+        let (added, failed) = attribute_outcomes(&plan.downloads, &plan_result);
+        result.added = added;
+        result.failed = failed;
+    }
+
+    // 5. Merge added entries into manifest and persist.
+    merge_mod_entries(&mut instance.mods, result.added.clone());
+    instances::save_manifest(&app, &slug, &instance)?;
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,7 +1015,8 @@ pub fn run() {
             get_account,
             logout,
             search_mods,
-            get_mod_versions
+            get_mod_versions,
+            add_mod
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
