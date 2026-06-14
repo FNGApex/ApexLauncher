@@ -14,7 +14,7 @@
 //! `lib.rs` supply a `TauriLaunchSink` that emits `launch://log` events; tests
 //! use a `CapturingLaunchSink`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -804,11 +804,15 @@ pub fn rewrite_classpath_for_instance(
     launch_meta: &mut crate::core::resolver::LaunchMeta,
 ) -> Vec<PathBuf> {
     let mut rel_paths: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
 
     for entry in launch_meta.classpath.iter_mut() {
         let p = Path::new(entry.as_str());
         if let Ok(rel) = p.strip_prefix(cache_dir) {
-            rel_paths.push(rel.to_path_buf());
+            let rel_owned = rel.to_path_buf();
+            if seen.insert(rel_owned.clone()) {
+                rel_paths.push(rel_owned);
+            }
             *entry = instance_dir.join(rel).to_string_lossy().into_owned();
         }
         // Entries outside cache_dir are left unchanged (defensive pass-through).
@@ -817,8 +821,9 @@ pub fn rewrite_classpath_for_instance(
     for entry in launch_meta.natives.iter_mut() {
         let p = Path::new(entry.as_str());
         if let Ok(rel) = p.strip_prefix(cache_dir) {
-            if !rel_paths.contains(&rel.to_path_buf()) {
-                rel_paths.push(rel.to_path_buf());
+            let rel_owned = rel.to_path_buf();
+            if seen.insert(rel_owned.clone()) {
+                rel_paths.push(rel_owned);
             }
             *entry = instance_dir.join(rel).to_string_lossy().into_owned();
         }
@@ -2236,6 +2241,30 @@ mod tests {
 
         // Only the cache-rooted entry appears in rel_paths.
         assert_eq!(rel_paths.len(), 1, "only cache-rooted paths appear in rel_paths");
+    }
+
+    /// A path present in BOTH classpath and natives appears exactly once in rel_paths.
+    #[test]
+    fn a_path_in_both_classpath_and_natives_dedups_to_one_rel_entry() {
+        let cache_dir = PathBuf::from("/data/cache");
+        let instance_dir = PathBuf::from("/data/instances/my-world");
+
+        // The same jar appears in both classpath and natives (e.g. a fat jar used as
+        // both a library and a native-extraction source).
+        let shared = "/data/cache/libraries/lwjgl/3.3.1/lwjgl-3.3.1.jar";
+        let mut meta = make_rewrite_meta(
+            vec![shared],
+            vec![shared],
+        );
+
+        let rel_paths = rewrite_classpath_for_instance(&cache_dir, &instance_dir, &mut meta);
+
+        let expected_rel = PathBuf::from("libraries/lwjgl/3.3.1/lwjgl-3.3.1.jar");
+        let occurrences = rel_paths.iter().filter(|p| **p == expected_rel).count();
+        assert_eq!(
+            occurrences, 1,
+            "shared classpath+natives path must appear exactly once in rel_paths; got {occurrences}"
+        );
     }
 
     /// Rel paths returned are correct relative paths (no leading separator).
