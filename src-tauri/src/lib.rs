@@ -16,7 +16,7 @@ use core::loader_profile;
 use core::loaders::{self, LoaderOption};
 use core::resolver::{self, ResolveResult};
 use core::curseforge::CurseForgeProvider;
-use core::mod_install::AddModResult;
+use core::mod_install::{AddModResult, UpdateModResult};
 use core::modrinth::ModrinthProvider;
 use core::providers::{
     self, cf_api_key_from, ModProvider, ProviderError, ReqwestProviderClient, SearchParams,
@@ -815,7 +815,7 @@ async fn add_mod(
     loader: String,
 ) -> Result<AddModResult, String> {
     use core::download::{self as dl, DownloadPlan, NoOpSink};
-    use core::mod_install::{attribute_outcomes, build_download_items, merge_mod_entries, resolve_install};
+    use core::mod_install::{attribute_outcomes, build_download_items, merge_mod_entries, partition_by_file_name, resolve_install};
     use std::collections::HashSet;
 
     // 1. Build provider + HTTP client.
@@ -877,13 +877,25 @@ async fn add_mod(
     let mods_dir = inst_dir.join("mc").join("mods");
     std::fs::create_dir_all(&mods_dir).map_err(|e| format!("could not create mods dir: {e}"))?;
 
-    // Inline DownloadPlan construction (no wrapper needed).
-    let download_plan = DownloadPlan::new(build_download_items(&plan, &mods_dir));
+    // Validate provider-supplied file names before building DownloadItems.
+    // A compromised/malicious provider response with `file_name` containing `../`,
+    // `/`, `\`, a drive prefix, or a non-`.jar` extension must never reach the FS.
+    // Invalid entries go directly to `result.failed`; valid entries proceed normally.
+    let (valid_downloads, invalid_downloads) = partition_by_file_name(plan.downloads.clone());
+
+    let download_plan = DownloadPlan::new(build_download_items(
+        &core::mod_install::InstallPlan {
+            downloads: valid_downloads.clone(),
+            ..Default::default()
+        },
+        &mods_dir,
+    ));
     let mut result = AddModResult {
         manual: plan.manual.clone(),
         unresolved: plan.unresolved.clone(),
         suggestions: plan.suggestions.clone(),
         warnings: plan.warnings.clone(),
+        failed: invalid_downloads,
         ..Default::default()
     };
 
@@ -894,9 +906,9 @@ async fn add_mod(
 
         // Attribute outcomes by URL (order-independent) — execute_plan uses
         // FuturesUnordered and prepends already-skipped items, so index matching is wrong.
-        let (added, failed) = attribute_outcomes(&plan.downloads, &plan_result);
+        let (added, mut failed) = attribute_outcomes(&valid_downloads, &plan_result);
         result.added = added;
-        result.failed = failed;
+        result.failed.append(&mut failed);
     }
 
     // 5. Merge added entries into manifest and persist.
@@ -933,6 +945,196 @@ fn set_mod_enabled(
 #[tauri::command]
 fn remove_mod(app: tauri::AppHandle, slug: String, file_name: String) -> Result<(), String> {
     instances::remove_mod(&app, &slug, &file_name)
+}
+
+// ---------------------------------------------------------------------------
+// CP4: Update a single installed mod
+// ---------------------------------------------------------------------------
+
+/// Update a single tracked mod to its newest compatible version.
+///
+/// # Flow
+/// 1. Load manifest; find the `ModEntry` whose `project_id` matches — error if absent.
+/// 2. Build provider + HTTP client (mirrors `add_mod` / `search_mods`).
+/// 3. Resolve the newest compatible version via `fetch_newest_compatible` (CP1 planner).
+/// 4. `decide_update` decides what to do:
+///    - `UpToDate` / `Unresolved` / `Manual` → no disk change; return status.
+///    - `Swap` → download the new file into `mc/mods/`:
+///      a. On success: delete old file (both `.jar` and `.jar.disabled`), apply
+///         `apply_swap` to update the entry in place (`version_id`/`file_name`/`hashes`),
+///         **preserve `enabled`** (disabled mod → new file placed with `.disabled` suffix).
+///      b. On failure: leave old file + entry untouched; return `"failed"`.
+/// 5. Save manifest on swap success; return `UpdateModResult`.
+#[tauri::command]
+async fn update_mod(
+    app: tauri::AppHandle,
+    slug: String,
+    project_id: String,
+) -> Result<UpdateModResult, String> {
+    use core::download::{self as dl, DownloadItem, DownloadPlan, ExpectedHash, NoOpSink};
+    use core::mod_install::{apply_swap, decide_update, fetch_newest_compatible, page_url_for, UpdateAction};
+
+    // 1. Load manifest; find the entry.
+    let mut instance = instances::load_manifest(&app, &slug)?;
+    let entry_idx = instance
+        .mods
+        .iter()
+        .position(|m| m.project_id == project_id)
+        .ok_or_else(|| format!("mod with project_id '{project_id}' not found in instance '{slug}'"))?;
+
+    let mc_version = instance.minecraft.clone();
+    let loader = instance.loader.kind.clone();
+
+    // 2. Build provider + HTTP client (mirror of add_mod).
+    let http = ReqwestProviderClient(reqwest::Client::new());
+    let settings = settings::load(&app).unwrap_or_default();
+    let cf_key = cf_api_key_from(
+        std::env::var(providers::CF_API_KEY_ENV).ok(),
+        settings.curseforge_api_key,
+    );
+
+    let provider_str = instance.mods[entry_idx].provider.clone();
+
+    // 3. Resolve newest compatible version.
+    let newest = match provider_str.as_str() {
+        "modrinth" => {
+            let p = ModrinthProvider;
+            fetch_newest_compatible(&p, &http, &project_id, &mc_version, &loader, None).await
+        }
+        "curseforge" => {
+            let p = CurseForgeProvider::new(cf_key);
+            fetch_newest_compatible(&p, &http, &project_id, &mc_version, &loader, None).await
+        }
+        other => return Err(format!("unknown provider '{other}' in manifest")),
+    };
+
+    // 4. Decide action.
+    let action = decide_update(&instance.mods[entry_idx], newest.as_ref());
+
+    match action {
+        UpdateAction::UpToDate => Ok(UpdateModResult {
+            status: "upToDate".to_string(),
+            entry: None,
+            page_url: None,
+            error: None,
+        }),
+        UpdateAction::Unresolved => Ok(UpdateModResult {
+            status: "unresolved".to_string(),
+            entry: None,
+            page_url: None,
+            error: None,
+        }),
+        UpdateAction::Manual { page_url: _, file_name: _ } => {
+            // page_url from decide_update is empty placeholder; build the real one here.
+            let newest_version = newest.as_ref().unwrap(); // safe: Manual arm means newest is Some
+            let new_file = newest_version
+                .files
+                .iter()
+                .find(|f| f.primary)
+                .or_else(|| newest_version.files.first())
+                .unwrap(); // safe: Manual arm means files is non-empty
+            let real_page_url = page_url_for(newest_version.provider, &project_id);
+            Ok(UpdateModResult {
+                status: "manual".to_string(),
+                entry: None,
+                page_url: Some(real_page_url),
+                error: Some(format!(
+                    "distribution disabled; download '{}' manually",
+                    new_file.file_name
+                )),
+            })
+        }
+        UpdateAction::Swap { new_file, new_version_id } => {
+            // Build the destination path.
+            instances::validate_slug(&slug)
+                .map_err(|e| format!("invalid instance slug: {e}"))?;
+            let inst_dir = core::store::instances_dir(&app)?.join(&slug);
+            let mods_dir = inst_dir.join("mc").join("mods");
+            std::fs::create_dir_all(&mods_dir)
+                .map_err(|e| format!("could not create mods dir: {e}"))?;
+
+            let url = new_file.url.clone().unwrap(); // safe: Swap arm guarantees url is Some
+
+            // Validate provider-supplied file name before any FS write.
+            // A malicious or compromised provider response could supply `"../evil.jar"`,
+            // an absolute path, or a non-jar name — reject before joining to mods_dir.
+            if let Err(e) = instances::validate_mod_file_name(&new_file.file_name) {
+                return Ok(UpdateModResult {
+                    status: "failed".to_string(),
+                    entry: None,
+                    page_url: None,
+                    error: Some(format!("invalid provider file name: {e}")),
+                });
+            }
+
+            // Choose expected hash: sha512 > sha1 > None.
+            let expected_hash = if let Some(h) = new_file.hashes.get("sha512") {
+                Some(ExpectedHash::Sha512(h.clone()))
+            } else if let Some(h) = new_file.hashes.get("sha1") {
+                Some(ExpectedHash::Sha1(h.clone()))
+            } else {
+                None
+            };
+
+            // If the mod is disabled, place the new file with the `.disabled` suffix
+            // so disk state matches the `enabled` flag after the swap.
+            let enabled = instance.mods[entry_idx].enabled;
+            let dest_file_name = if enabled {
+                new_file.file_name.clone()
+            } else {
+                format!("{}.disabled", new_file.file_name)
+            };
+
+            let download_plan = DownloadPlan::new(vec![DownloadItem {
+                url: url.clone(),
+                dest: mods_dir.join(&dest_file_name),
+                expected_hash,
+                size: new_file.size,
+            }]);
+
+            let client = dl::build_client().map_err(|e| e.to_string())?;
+            let plan_result = dl::execute_plan(&client, &download_plan, &NoOpSink, 1).await;
+
+            // Check download outcome.
+            use core::download::ItemStatus;
+            let outcome = plan_result.outcomes.first();
+            let download_ok = matches!(
+                outcome.map(|o| &o.status),
+                Some(ItemStatus::Ok) | Some(ItemStatus::Skipped)
+            );
+
+            if !download_ok {
+                let err = outcome
+                    .and_then(|o| match &o.status {
+                        ItemStatus::Failed { error } => Some(error.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "download failed: no outcome recorded".to_string());
+                return Ok(UpdateModResult {
+                    status: "failed".to_string(),
+                    entry: None,
+                    page_url: None,
+                    error: Some(err),
+                });
+            }
+
+            // Download succeeded: delete old file (both variants).
+            let old_file_name = instance.mods[entry_idx].file_name.clone();
+            instances::remove_mod_from_disk_files(&mods_dir, &old_file_name);
+
+            // Update the entry in place.
+            apply_swap(&mut instance.mods[entry_idx], &new_file, &new_version_id);
+            // Save manifest.
+            instances::save_manifest(&app, &slug, &instance)?;
+
+            Ok(UpdateModResult {
+                status: "updated".to_string(),
+                entry: Some(instance.mods[entry_idx].clone()),
+                page_url: None,
+                error: None,
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1047,7 +1249,8 @@ pub fn run() {
             get_mod_versions,
             add_mod,
             set_mod_enabled,
-            remove_mod
+            remove_mod,
+            update_mod
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

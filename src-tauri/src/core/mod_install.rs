@@ -284,6 +284,105 @@ pub async fn resolve_install(
     plan
 }
 
+// ── CP4: Update types and pure helpers ────────────────────────────────────────
+
+/// Decision returned by `decide_update`.
+#[derive(Debug, PartialEq)]
+pub enum UpdateAction {
+    /// The installed version is already the newest compatible version.
+    UpToDate,
+    /// A newer version is available and can be downloaded automatically.
+    Swap {
+        /// The new file to download (carries url, file_name, hashes).
+        new_file: crate::core::providers::VersionFile,
+        /// The new version's id (stored in `ModEntry.version_id`).
+        new_version_id: String,
+    },
+    /// The newest version has `url == None` (distribution disabled); user must
+    /// download manually from the provider page.
+    Manual {
+        /// Project page URL the user should open.
+        page_url: String,
+        /// File name the user is expected to drop in.
+        file_name: String,
+    },
+    /// No compatible version found for this instance's MC version + loader.
+    Unresolved,
+}
+
+/// Pure decision function: given the current manifest entry and the newest
+/// compatible `ProjectVersion` (if any), decide what `update_mod` should do.
+///
+/// `newest` is `None` when `fetch_newest_compatible` returns `None`.
+pub fn decide_update(
+    current: &crate::core::instances::ModEntry,
+    newest: Option<&crate::core::providers::ProjectVersion>,
+) -> UpdateAction {
+    let Some(version) = newest else {
+        return UpdateAction::Unresolved;
+    };
+
+    if version.id == current.version_id {
+        return UpdateAction::UpToDate;
+    }
+
+    // Find the primary file (or first file) for the new version.
+    let file = version
+        .files
+        .iter()
+        .find(|f| f.primary)
+        .or_else(|| version.files.first());
+
+    match file {
+        None => UpdateAction::Unresolved,
+        Some(f) if f.url.is_none() => UpdateAction::Manual {
+            page_url: String::new(), // caller fills this in via page_url_for
+            file_name: f.file_name.clone(),
+        },
+        Some(f) => UpdateAction::Swap {
+            new_file: f.clone(),
+            new_version_id: version.id.clone(),
+        },
+    }
+}
+
+/// Apply a `Swap` result to `entry` in place.
+///
+/// Updates `version_id`, `file_name`, and `hashes` from `new_file` and
+/// `new_version_id`. Preserves `enabled`, `provider`, `project_id`, `side`.
+///
+/// `enabled` preservation is critical: if the mod was disabled before the
+/// update, the caller must ensure the new file is placed with the `.disabled`
+/// suffix so disk state matches the flag.
+pub fn apply_swap(
+    entry: &mut crate::core::instances::ModEntry,
+    new_file: &crate::core::providers::VersionFile,
+    new_version_id: &str,
+) {
+    entry.version_id = new_version_id.to_string();
+    entry.file_name = new_file.file_name.clone();
+    let mut hashes = std::collections::BTreeMap::new();
+    for (k, v) in &new_file.hashes {
+        hashes.insert(k.clone(), v.clone());
+    }
+    entry.hashes = hashes;
+    // entry.enabled is intentionally NOT changed.
+}
+
+/// Structured result returned by the `update_mod` Tauri command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateModResult {
+    /// One of `"updated"` | `"upToDate"` | `"manual"` | `"unresolved"` | `"failed"`.
+    pub status: String,
+    /// Updated `ModEntry` on `"updated"`; `None` otherwise.
+    pub entry: Option<crate::core::instances::ModEntry>,
+    /// Project page URL on `"manual"` (open in browser).
+    pub page_url: Option<String>,
+    /// Human-readable error description on `"failed"`.
+    pub error: Option<String>,
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Fetch the newest compatible version of `project_id`.
@@ -291,7 +390,7 @@ pub async fn resolve_install(
 /// If `preferred_version_id` is `Some`, try to return that specific version first;
 /// fall back to first returned version if not found (providers may not support
 /// single-version lookup in `get_versions`).
-async fn fetch_newest_compatible(
+pub(crate) async fn fetch_newest_compatible(
     provider: &dyn ModProvider,
     client: &dyn ProviderHttpClient,
     project_id: &str,
@@ -418,6 +517,30 @@ pub fn merge_mod_entries(existing: &mut Vec<ModEntry>, new: Vec<ModEntry>) {
             existing.push(entry);
         }
     }
+}
+
+/// Partition `planned` downloads into (valid, invalid) by validating each entry's
+/// `file_name` via `instances::validate_mod_file_name`.
+///
+/// Valid entries are returned in the first vector (preserving order) and passed to
+/// `build_download_items`. Invalid entries become `FailedMod`s in the second vector
+/// so `add_mod` can route them to `AddModResult.failed` without touching the FS.
+pub fn partition_by_file_name(
+    planned: Vec<PlannedMod>,
+) -> (Vec<PlannedMod>, Vec<FailedMod>) {
+    use crate::core::instances::validate_mod_file_name;
+    let mut valid: Vec<PlannedMod> = Vec::new();
+    let mut invalid: Vec<FailedMod> = Vec::new();
+    for p in planned {
+        match validate_mod_file_name(&p.file_name) {
+            Ok(_) => valid.push(p),
+            Err(e) => invalid.push(FailedMod {
+                file_name: p.file_name,
+                error: format!("invalid provider file name: {e}"),
+            }),
+        }
+    }
+    (valid, invalid)
 }
 
 /// Attribute download outcomes back to their `PlannedMod` by URL (order-independent).
@@ -1198,6 +1321,72 @@ mod tests {
         assert!(failed[0].error.contains("no outcome recorded"));
     }
 
+    // ── CP4b: traversal validation for provider-supplied file names ───────────
+
+    use super::partition_by_file_name;
+
+    /// `partition_by_file_name`: `"../evil.jar"` is rejected into the invalid bucket.
+    #[test]
+    fn partition_traversal_path_rejected() {
+        let evil = make_planned("../evil.jar", "https://dl.example.com/evil.jar", None, None);
+        let (valid, invalid) = partition_by_file_name(vec![evil]);
+        assert!(valid.is_empty(), "traversal path must not be valid");
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].file_name, "../evil.jar");
+        assert!(invalid[0].error.contains("invalid provider file name"));
+    }
+
+    /// `partition_by_file_name`: absolute path is rejected.
+    #[test]
+    fn partition_absolute_path_rejected() {
+        let abs = make_planned("/etc/passwd.jar", "https://dl.example.com/x.jar", None, None);
+        let (valid, invalid) = partition_by_file_name(vec![abs]);
+        assert!(valid.is_empty(), "absolute path must not be valid");
+        assert_eq!(invalid.len(), 1);
+    }
+
+    /// `partition_by_file_name`: non-`.jar` extension is rejected.
+    #[test]
+    fn partition_non_jar_extension_rejected() {
+        let evil = make_planned("evil.sh", "https://dl.example.com/evil.sh", None, None);
+        let (valid, invalid) = partition_by_file_name(vec![evil]);
+        assert!(valid.is_empty(), "non-jar extension must not be valid");
+        assert_eq!(invalid.len(), 1);
+        assert!(invalid[0].error.contains("invalid provider file name"));
+    }
+
+    /// `partition_by_file_name`: valid name passes through unchanged.
+    #[test]
+    fn partition_valid_name_passes() {
+        let good = make_planned("sodium-v2.jar", "https://dl.example.com/sodium-v2.jar", Some("abc"), None);
+        let (valid, invalid) = partition_by_file_name(vec![good]);
+        assert_eq!(valid.len(), 1);
+        assert!(invalid.is_empty());
+        assert_eq!(valid[0].file_name, "sodium-v2.jar");
+    }
+
+    /// `partition_by_file_name`: mix of valid and invalid → each routed correctly.
+    #[test]
+    fn partition_mixed_routes_correctly() {
+        let good = make_planned("sodium.jar", "https://dl.example.com/sodium.jar", None, None);
+        let mut bad = make_planned("../evil.jar", "https://dl.example.com/evil.jar", None, None);
+        bad.project_id = "evil-proj".to_string();
+        let (valid, invalid) = partition_by_file_name(vec![good, bad]);
+        assert_eq!(valid.len(), 1);
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(valid[0].file_name, "sodium.jar");
+        assert_eq!(invalid[0].file_name, "../evil.jar");
+    }
+
+    /// `partition_by_file_name`: backslash separator is rejected.
+    #[test]
+    fn partition_backslash_separator_rejected() {
+        let evil = make_planned("sub\\evil.jar", "https://dl.example.com/evil.jar", None, None);
+        let (valid, invalid) = partition_by_file_name(vec![evil]);
+        assert!(valid.is_empty(), "backslash separator must not be valid");
+        assert_eq!(invalid.len(), 1);
+    }
+
     /// `AddModResult` has the expected fields (compile-time shape check).
     #[test]
     fn add_mod_result_default_is_empty() {
@@ -1208,5 +1397,127 @@ mod tests {
         assert!(r.suggestions.is_empty());
         assert!(r.warnings.is_empty());
         assert!(r.failed.is_empty());
+    }
+
+    // ── CP4: decide_update + apply_swap tests ─────────────────────────────────
+
+    use super::{apply_swap, decide_update, UpdateAction};
+    use std::collections::BTreeMap;
+
+    fn stub_mod_entry(version_id: &str, file_name: &str, enabled: bool) -> ModEntry {
+        let mut hashes = BTreeMap::new();
+        hashes.insert("sha512".to_string(), "oldhash".to_string());
+        ModEntry {
+            provider: "modrinth".to_string(),
+            project_id: "proj-x".to_string(),
+            version_id: version_id.to_string(),
+            file_name: file_name.to_string(),
+            hashes,
+            enabled,
+            side: "unknown".to_string(),
+        }
+    }
+
+    fn stub_version_file(url: Option<&str>, file_name: &str) -> VersionFile {
+        let mut hashes = HashMap::new();
+        hashes.insert("sha512".to_string(), "newhash".to_string());
+        VersionFile {
+            url: url.map(|s| s.to_string()),
+            file_name: file_name.to_string(),
+            size: None,
+            hashes,
+            primary: true,
+        }
+    }
+
+    fn stub_project_version(version_id: &str, files: Vec<VersionFile>) -> ProjectVersion {
+        ProjectVersion {
+            provider: ProviderKind::Modrinth,
+            id: version_id.to_string(),
+            name: format!("Version {version_id}"),
+            version_number: "2.0.0".to_string(),
+            game_versions: vec!["1.21".to_string()],
+            loaders: vec!["fabric".to_string()],
+            files,
+            dependencies: vec![],
+        }
+    }
+
+    /// `decide_update`: no compatible version → `Unresolved`.
+    #[test]
+    fn decide_update_none_gives_unresolved() {
+        let entry = stub_mod_entry("v1", "mod.jar", true);
+        assert_eq!(decide_update(&entry, None), UpdateAction::Unresolved);
+    }
+
+    /// `decide_update`: newest version id == current → `UpToDate`.
+    #[test]
+    fn decide_update_same_version_id_gives_up_to_date() {
+        let entry = stub_mod_entry("v1", "mod.jar", true);
+        let newest = stub_project_version("v1", vec![stub_version_file(Some("https://dl.example.com/mod.jar"), "mod.jar")]);
+        assert_eq!(decide_update(&entry, Some(&newest)), UpdateAction::UpToDate);
+    }
+
+    /// `decide_update`: newer version with a URL → `Swap` with the new file.
+    #[test]
+    fn decide_update_newer_version_gives_swap() {
+        let entry = stub_mod_entry("v1", "mod-v1.jar", true);
+        let newest = stub_project_version("v2", vec![stub_version_file(Some("https://dl.example.com/mod-v2.jar"), "mod-v2.jar")]);
+        match decide_update(&entry, Some(&newest)) {
+            UpdateAction::Swap { new_file, new_version_id } => {
+                assert_eq!(new_version_id, "v2");
+                assert_eq!(new_file.file_name, "mod-v2.jar");
+                assert_eq!(new_file.url, Some("https://dl.example.com/mod-v2.jar".to_string()));
+            }
+            other => panic!("expected Swap, got {other:?}"),
+        }
+    }
+
+    /// `decide_update`: newer version but `url == None` → `Manual`.
+    #[test]
+    fn decide_update_url_none_gives_manual() {
+        let entry = stub_mod_entry("v1", "mod.jar", true);
+        let newest = stub_project_version("v2", vec![stub_version_file(None, "mod-v2.jar")]);
+        match decide_update(&entry, Some(&newest)) {
+            UpdateAction::Manual { file_name, .. } => {
+                assert_eq!(file_name, "mod-v2.jar");
+            }
+            other => panic!("expected Manual, got {other:?}"),
+        }
+    }
+
+    /// `decide_update`: version with no files at all → `Unresolved`.
+    #[test]
+    fn decide_update_no_files_gives_unresolved() {
+        let entry = stub_mod_entry("v1", "mod.jar", true);
+        let newest = stub_project_version("v2", vec![]);
+        assert_eq!(decide_update(&entry, Some(&newest)), UpdateAction::Unresolved);
+    }
+
+    /// `apply_swap`: updates `version_id`, `file_name`, `hashes`; preserves `enabled`.
+    #[test]
+    fn apply_swap_updates_fields_preserves_enabled() {
+        let mut entry = stub_mod_entry("v1", "mod-v1.jar", false); // disabled
+        let new_file = stub_version_file(Some("https://dl.example.com/mod-v2.jar"), "mod-v2.jar");
+        apply_swap(&mut entry, &new_file, "v2");
+
+        assert_eq!(entry.version_id, "v2");
+        assert_eq!(entry.file_name, "mod-v2.jar");
+        assert_eq!(entry.hashes.get("sha512"), Some(&"newhash".to_string()));
+        // enabled must NOT have changed
+        assert!(!entry.enabled, "enabled state must be preserved (was false)");
+        // provider/project_id/side unchanged
+        assert_eq!(entry.provider, "modrinth");
+        assert_eq!(entry.project_id, "proj-x");
+        assert_eq!(entry.side, "unknown");
+    }
+
+    /// `apply_swap`: `enabled = true` is also preserved.
+    #[test]
+    fn apply_swap_preserves_enabled_true() {
+        let mut entry = stub_mod_entry("v1", "mod-v1.jar", true);
+        let new_file = stub_version_file(Some("https://dl.example.com/mod-v2.jar"), "mod-v2.jar");
+        apply_swap(&mut entry, &new_file, "v2");
+        assert!(entry.enabled, "enabled state must be preserved (was true)");
     }
 }

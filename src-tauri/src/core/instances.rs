@@ -476,6 +476,22 @@ pub fn remove_mod_from_disk(
     write_manifest(manifest_path, &inst)
 }
 
+/// Delete the on-disk file(s) for a mod (both `.jar` and `.jar.disabled` forms)
+/// WITHOUT touching the manifest. Used by `update_mod` in `lib.rs` which manages
+/// the manifest entry separately via `apply_swap`.
+///
+/// Silently ignores missing files (best-effort cleanup).
+pub fn remove_mod_from_disk_files(mods_dir: &Path, file_name: &str) {
+    let jar_path = mods_dir.join(file_name);
+    let disabled_path = mods_dir.join(format!("{file_name}.disabled"));
+    if jar_path.exists() {
+        let _ = fs::remove_file(&jar_path);
+    }
+    if disabled_path.exists() {
+        let _ = fs::remove_file(&disabled_path);
+    }
+}
+
 /// AppHandle-aware wrapper for [`remove_mod_from_disk`].
 pub fn remove_mod(app: &AppHandle, slug: &str, file_name: &str) -> Result<(), String> {
     let slug = validate_slug(slug)?;
