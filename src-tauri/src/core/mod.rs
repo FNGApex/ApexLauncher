@@ -29,6 +29,7 @@ pub mod loader_profile;
 pub mod loaders;
 pub mod materialize;
 pub mod meta;
+pub mod mod_install;
 pub mod modrinth;
 pub mod providers;
 pub mod resolver;
