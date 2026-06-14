@@ -586,7 +586,21 @@ async fn launch_instance(
 
     // --- 6. Resolve paths. ---
     let instances_dir = core::store::instances_dir(&app)?;
+    let inst_dir = instances_dir.join(&inst.slug);
     let paths = launch::LaunchPaths::new(&cache_dir, &instances_dir, &inst.slug);
+
+    // --- 6b. Materialize libraries + version jars into the instance tree. ---
+    // Rewrites classpath and natives in launch_meta from cache paths to
+    // instance-local paths, then hardlinks (or copies) the artifacts.
+    // Assets stay in cache/assets (design Rec A); only libs + version jars move.
+    // cache_libraries_dir / cache_versions_dir helpers in store.rs define the
+    // same subdirs the resolver writes to; the rewrite uses the cache_dir root
+    // directly (strip_prefix) which is equivalent and avoids calling into Tauri
+    // twice. Those helpers form the public cache API and remain for callers that
+    // need a created-if-missing dir reference.
+    let rel_paths = launch::rewrite_classpath_for_instance(&cache_dir, &inst_dir, &mut launch_meta);
+    core::materialize::materialize(&cache_dir, &inst_dir, &rel_paths)
+        .map_err(|e| format!("materialize failed: {e}"))?;
 
     // --- 7. Extract natives. ---
     launch::extract_natives(&launch_meta.natives, &paths.natives_directory)?;
@@ -611,7 +625,6 @@ async fn launch_instance(
         .map_err(|e| format!("argv assembly failed: {e}"))?;
 
     // --- 9. Spawn (registry keyed by slug). ---
-    let inst_dir = instances_dir.join(&inst.slug);
     let game_dir = paths.game_directory.clone();
     let java_path = java_inst.path.clone();
 

@@ -56,6 +56,8 @@ pub struct LaunchPaths {
     /// Absolute path to `<instances>/<slug>/mc/` — the Minecraft working dir.
     pub game_directory: PathBuf,
     /// Absolute path to `<cache>/assets/`.
+    /// `--assetsDir` always points here (assets stay in the shared cache; see
+    /// storage-auth-reorg design Recommendation A).
     pub assets_root: PathBuf,
     /// Absolute path to the per-instance natives extraction dir.
     /// CP2 will extract native jars here before launch.
@@ -65,6 +67,10 @@ pub struct LaunchPaths {
     /// `LaunchMeta.assets_legacy` is true. Legacy-asset materialization is
     /// handled by CP2; this field selects the path without building it.
     pub legacy_assets_root: PathBuf,
+    /// Absolute path to `<instances>/<slug>/libraries/` — the per-instance
+    /// materialized library tree. After C2, `${library_directory}` substitutes
+    /// to this path (used by Forge/NeoForge `-DlibraryDirectory=`).
+    pub library_directory: PathBuf,
 }
 
 impl LaunchPaths {
@@ -74,11 +80,13 @@ impl LaunchPaths {
     /// `instances_dir` — the directory that holds all instance subdirs.
     /// `slug` — the instance slug (subdirectory name under `instances_dir`).
     pub fn new(cache_dir: &Path, instances_dir: &Path, slug: &str) -> Self {
+        let inst_dir = instances_dir.join(slug);
         Self {
-            game_directory: instances_dir.join(slug).join("mc"),
+            game_directory: inst_dir.join("mc"),
             assets_root: cache_dir.join("assets"),
-            natives_directory: instances_dir.join(slug).join("natives"),
+            natives_directory: inst_dir.join("natives"),
             legacy_assets_root: cache_dir.join("assets").join("virtual").join("legacy"),
+            library_directory: inst_dir.join("libraries"),
         }
     }
 }
@@ -223,10 +231,10 @@ pub fn build_argv(launch: &LaunchMeta, paths: &LaunchPaths, identity: &LaunchIde
             { ":".to_string() }
         }),
         ("${natives_directory}", paths.natives_directory.to_string_lossy().into_owned()),
-        // library_directory is not in vanilla manifests but included for safety.
-        ("${library_directory}", paths.assets_root.parent()
-            .map(|p| p.join("libraries").to_string_lossy().into_owned())
-            .unwrap_or_default()),
+        // ${library_directory} is used by Forge/NeoForge (-DlibraryDirectory=).
+        // After C2 materialization, this points at the per-instance libraries dir
+        // so Forge reads hardlinked jars from the isolated instance tree.
+        ("${library_directory}", paths.library_directory.to_string_lossy().into_owned()),
         ("${launcher_name}", "modloader".to_string()),
         ("${launcher_version}", env!("CARGO_PKG_VERSION").to_string()),
         ("${game_directory}", paths.game_directory.to_string_lossy().into_owned()),
@@ -762,6 +770,63 @@ async fn monitor_child<S: LaunchSink>(
     sink.exited(&slug, exit_status);
 }
 
+// ---------------------------------------------------------------------------
+// C2 — classpath/natives rewrite helper (pure, no AppHandle)
+// ---------------------------------------------------------------------------
+
+/// Rewrite `launch_meta` classpath and natives entries so the JVM reads
+/// materialized artifacts from the per-instance tree instead of the shared cache.
+///
+/// # What it does
+/// For each entry in `classpath` and `natives` that starts with
+/// `cache_dir/libraries/` or `cache_dir/versions/`:
+/// - Strips the `cache_dir` prefix to produce a relative path.
+/// - Rewrites the entry to `instance_dir.join(rel)`.
+/// - Collects `rel` into the returned `Vec<PathBuf>` (the list to pass to
+///   [`crate::core::materialize::materialize`]).
+///
+/// Entries that do NOT live under `cache_dir` are passed through unchanged
+/// (defensive — should be none in practice with the current resolver).
+///
+/// # Arguments
+/// - `cache_dir`    — shared cache root (`<data>/cache/`).
+/// - `instance_dir` — per-instance directory (`<instances>/<slug>/`).
+/// - `launch_meta`  — mutable; classpath and natives fields are rewritten in place.
+///
+/// # Returns
+/// The list of relative paths that must be materialized via
+/// `materialize(cache_dir, instance_dir, &rel_paths)` before the JVM spawns.
+///
+/// This function is pure (no disk I/O, no AppHandle) so it is fully unit-testable.
+pub fn rewrite_classpath_for_instance(
+    cache_dir: &Path,
+    instance_dir: &Path,
+    launch_meta: &mut crate::core::resolver::LaunchMeta,
+) -> Vec<PathBuf> {
+    let mut rel_paths: Vec<PathBuf> = Vec::new();
+
+    for entry in launch_meta.classpath.iter_mut() {
+        let p = Path::new(entry.as_str());
+        if let Ok(rel) = p.strip_prefix(cache_dir) {
+            rel_paths.push(rel.to_path_buf());
+            *entry = instance_dir.join(rel).to_string_lossy().into_owned();
+        }
+        // Entries outside cache_dir are left unchanged (defensive pass-through).
+    }
+
+    for entry in launch_meta.natives.iter_mut() {
+        let p = Path::new(entry.as_str());
+        if let Ok(rel) = p.strip_prefix(cache_dir) {
+            if !rel_paths.contains(&rel.to_path_buf()) {
+                rel_paths.push(rel.to_path_buf());
+            }
+            *entry = instance_dir.join(rel).to_string_lossy().into_owned();
+        }
+    }
+
+    rel_paths
+}
+
 /// Send a kill signal to a running instance.
 ///
 /// Fires the kill oneshot without removing the registry entry. The monitor task
@@ -833,9 +898,10 @@ mod tests {
     fn make_paths() -> LaunchPaths {
         LaunchPaths {
             game_directory: PathBuf::from("/instances/my-world/mc"),
-            assets_root: PathBuf::from("/data/assets"),
+            assets_root: PathBuf::from("/data/cache/assets"),
             natives_directory: PathBuf::from("/instances/my-world/natives"),
-            legacy_assets_root: PathBuf::from("/data/assets/virtual/legacy"),
+            legacy_assets_root: PathBuf::from("/data/cache/assets/virtual/legacy"),
+            library_directory: PathBuf::from("/instances/my-world/libraries"),
         }
     }
 
@@ -948,7 +1014,7 @@ mod tests {
         assert!(game_str.contains("Player"), "${{auth_player_name}} not substituted");
         assert!(game_str.contains("1.21.1"), "${{version_name}} not substituted");
         assert!(game_str.contains("/instances/my-world/mc"), "${{game_directory}} not substituted");
-        assert!(game_str.contains("/data/assets"), "${{assets_root}} not substituted");
+        assert!(game_str.contains("/data/cache/assets"), "${{assets_root}} not substituted");
         assert!(game_str.contains("17"), "${{assets_index_name}} not substituted");
         assert!(
             game_str.contains("2e5dcd13-3805-3256-b49c-819167bf4871"),
@@ -1146,10 +1212,10 @@ mod tests {
         let paths = make_paths();
 
         let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error");
-        // Modern: uses /data/assets, NOT /data/assets/virtual/legacy.
+        // Modern: uses /data/cache/assets, NOT /data/cache/assets/virtual/legacy.
         assert!(
-            argv.iter().any(|a| a == "/data/assets"),
-            "modern assets must use /data/assets: {argv:?}"
+            argv.iter().any(|a| a == "/data/cache/assets"),
+            "modern assets must use /data/cache/assets: {argv:?}"
         );
         assert!(
             !argv.iter().any(|a| a.contains("virtual/legacy")),
@@ -1193,7 +1259,9 @@ mod tests {
     #[test]
     fn build_argv_forge_library_directory_substituted() {
         // Forge JVM args include: -DlibraryDirectory=${library_directory}
-        // ${library_directory} is resolved to <assets_root_parent>/libraries.
+        // After C2, ${library_directory} resolves to the per-instance libraries dir
+        // (paths.library_directory = /instances/my-world/libraries), NOT the shared
+        // cache. This is the key C2 invariant: Forge reads from the instance tree.
         let jvm_args = vec![
             "-DlibraryDirectory=${library_directory}",
             "-cp",
@@ -1203,12 +1271,12 @@ mod tests {
             "release",
             jvm_args,
             vec![],
-            vec!["/data/versions/1.21.1/1.21.1.jar"],
+            vec!["/data/cache/versions/1.21.1/1.21.1.jar"],
             false,
             None,
         );
         let paths = make_paths();
-        // assets_root = /data/assets → parent = /data → libraries = /data/libraries
+        // library_directory = /instances/my-world/libraries (per-instance, post-C2)
 
         let argv = build_argv(&meta, &paths, &offline_identity()).expect("no unresolved");
 
@@ -1216,13 +1284,64 @@ mod tests {
             .iter()
             .find(|a| a.starts_with("-DlibraryDirectory="))
             .expect("-DlibraryDirectory arg must be in argv");
+
+        // Must resolve to the per-instance libraries dir, not the cache.
         assert!(
             lib_dir_arg.ends_with("libraries"),
             "${{library_directory}} must resolve to .../libraries: {lib_dir_arg}"
         );
         assert!(
+            lib_dir_arg.contains("instances"),
+            "${{library_directory}} must point at the instance tree after C2: {lib_dir_arg}"
+        );
+        assert!(
             !lib_dir_arg.contains("${library_directory}"),
             "${{library_directory}} must be fully substituted: {lib_dir_arg}"
+        );
+        // Must NOT point at the shared cache.
+        assert!(
+            !lib_dir_arg.contains("/data/cache/libraries"),
+            "${{library_directory}} must NOT point at shared cache/libraries: {lib_dir_arg}"
+        );
+    }
+
+    /// `--assetsDir` must still point at the shared `cache/assets`, not the instance.
+    ///
+    /// This verifies design Recommendation A: assets stay shared. The materialization
+    /// step (C2) must not change where `${assets_root}` resolves.
+    #[test]
+    fn build_argv_assets_dir_stays_in_shared_cache() {
+        let game_args = vec!["--assetsDir", "${assets_root}"];
+        let meta = make_meta(
+            "release",
+            vec!["-cp", "${classpath}"],
+            game_args,
+            vec!["/data/cache/versions/1.21.1/1.21.1.jar"],
+            false,
+            None,
+        );
+        let paths = make_paths();
+        // assets_root = /data/cache/assets — must remain unchanged after C2.
+
+        let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error");
+
+        let assets_arg = argv
+            .iter()
+            .position(|a| a == "--assetsDir")
+            .and_then(|i| argv.get(i + 1))
+            .expect("--assetsDir must be in argv");
+
+        assert!(
+            assets_arg.contains("cache"),
+            "--assetsDir must point into the shared cache: {assets_arg}"
+        );
+        assert!(
+            assets_arg.ends_with("assets"),
+            "--assetsDir must end with 'assets': {assets_arg}"
+        );
+        assert!(
+            !assets_arg.contains("instances"),
+            "--assetsDir must NOT point at the instance tree: {assets_arg}"
         );
     }
 
@@ -1995,5 +2114,157 @@ mod tests {
         // New MS refresh token must be in keyring.
         let new_rt = store.get_refresh_token().expect("refresh token in keyring");
         assert_eq!(new_rt, "ms_refresh_new", "keyring updated with new MS refresh token");
+    }
+
+    // -----------------------------------------------------------------------
+    // C2 — rewrite_classpath_for_instance
+    //
+    // Pure helper: given cache_dir, instance_dir, and a LaunchMeta with
+    // absolute cache-rooted classpath+natives, rewrites them to instance-rooted
+    // paths and returns the relative paths to materialize.
+    // -----------------------------------------------------------------------
+
+    fn make_rewrite_meta(classpath: Vec<&str>, natives: Vec<&str>) -> crate::core::resolver::LaunchMeta {
+        crate::core::resolver::LaunchMeta {
+            version_id: "1.21.1".to_string(),
+            version_type: "release".to_string(),
+            main_class: "net.minecraft.client.main.Main".to_string(),
+            jvm_args: vec![],
+            game_args: vec![],
+            asset_index_id: "17".to_string(),
+            assets_legacy: false,
+            java_major: 21,
+            classpath: classpath.into_iter().map(str::to_owned).collect(),
+            natives: natives.into_iter().map(str::to_owned).collect(),
+            logging_config: None,
+        }
+    }
+
+    /// Classpath entries under cache_dir are rewritten to instance_dir.
+    /// Returned rel_paths are the stripped relative paths.
+    #[test]
+    fn rewrite_classpath_entries_resolve_under_instance_dir() {
+        let cache_dir = PathBuf::from("/data/cache");
+        let instance_dir = PathBuf::from("/data/instances/my-world");
+
+        let mut meta = make_rewrite_meta(
+            vec![
+                "/data/cache/libraries/com/example/foo/1.0/foo-1.0.jar",
+                "/data/cache/versions/1.21.1/1.21.1.jar",
+            ],
+            vec![],
+        );
+
+        let rel_paths = rewrite_classpath_for_instance(&cache_dir, &instance_dir, &mut meta);
+
+        // Both classpath entries must now point at the instance dir.
+        assert_eq!(meta.classpath.len(), 2);
+        assert!(
+            meta.classpath[0].starts_with("/data/instances/my-world"),
+            "classpath[0] must be under instance_dir: {}",
+            meta.classpath[0]
+        );
+        assert!(
+            meta.classpath[1].starts_with("/data/instances/my-world"),
+            "classpath[1] must be under instance_dir: {}",
+            meta.classpath[1]
+        );
+
+        // Rel paths must be the cache-relative paths.
+        assert_eq!(rel_paths.len(), 2);
+        assert_eq!(
+            rel_paths[0],
+            PathBuf::from("libraries/com/example/foo/1.0/foo-1.0.jar")
+        );
+        assert_eq!(
+            rel_paths[1],
+            PathBuf::from("versions/1.21.1/1.21.1.jar")
+        );
+    }
+
+    /// Natives entries under cache_dir are rewritten and included in rel_paths.
+    #[test]
+    fn rewrite_natives_entries_resolve_under_instance_dir() {
+        let cache_dir = PathBuf::from("/data/cache");
+        let instance_dir = PathBuf::from("/data/instances/my-world");
+
+        let mut meta = make_rewrite_meta(
+            vec!["/data/cache/libraries/net/java/jogl/1.0/jogl-1.0.jar"],
+            vec!["/data/cache/libraries/net/java/jogl/1.0/jogl-1.0-natives-linux.jar"],
+        );
+
+        let rel_paths = rewrite_classpath_for_instance(&cache_dir, &instance_dir, &mut meta);
+
+        // Natives entry rewritten to instance dir.
+        assert!(
+            meta.natives[0].starts_with("/data/instances/my-world"),
+            "natives[0] must be under instance_dir: {}",
+            meta.natives[0]
+        );
+
+        // Both the classpath jar and the natives jar appear in rel_paths.
+        assert_eq!(rel_paths.len(), 2, "both classpath and natives rel paths must be returned");
+    }
+
+    /// Entries outside cache_dir pass through unchanged.
+    #[test]
+    fn entries_outside_cache_dir_pass_through_unchanged() {
+        let cache_dir = PathBuf::from("/data/cache");
+        let instance_dir = PathBuf::from("/data/instances/my-world");
+
+        let outside_entry = "/opt/jdk/lib/rt.jar";
+        let mut meta = make_rewrite_meta(
+            vec![
+                "/data/cache/libraries/asm/asm/9.0/asm-9.0.jar",
+                outside_entry,
+            ],
+            vec![],
+        );
+
+        let rel_paths = rewrite_classpath_for_instance(&cache_dir, &instance_dir, &mut meta);
+
+        // Cache entry is rewritten; outside entry is left unchanged.
+        assert!(
+            meta.classpath[0].starts_with("/data/instances/my-world"),
+            "cache entry must be rewritten: {}",
+            meta.classpath[0]
+        );
+        assert_eq!(
+            meta.classpath[1], outside_entry,
+            "outside-cache entry must pass through unchanged"
+        );
+
+        // Only the cache-rooted entry appears in rel_paths.
+        assert_eq!(rel_paths.len(), 1, "only cache-rooted paths appear in rel_paths");
+    }
+
+    /// Rel paths returned are correct relative paths (no leading separator).
+    #[test]
+    fn returned_rel_paths_are_correct_relative_paths() {
+        let cache_dir = PathBuf::from("/some/cache");
+        let instance_dir = PathBuf::from("/some/instances/slug");
+
+        let mut meta = make_rewrite_meta(
+            vec![
+                "/some/cache/libraries/a/b/c.jar",
+                "/some/cache/versions/1.20/1.20.jar",
+            ],
+            vec![],
+        );
+
+        let rel_paths = rewrite_classpath_for_instance(&cache_dir, &instance_dir, &mut meta);
+
+        // Rel paths must not start with a separator.
+        for rel in &rel_paths {
+            assert!(
+                rel.is_relative(),
+                "rel_path must be relative: {}",
+                rel.display()
+            );
+        }
+
+        // Verify exact values.
+        assert!(rel_paths.contains(&PathBuf::from("libraries/a/b/c.jar")));
+        assert!(rel_paths.contains(&PathBuf::from("versions/1.20/1.20.jar")));
     }
 }

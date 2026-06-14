@@ -20,6 +20,20 @@ use std::{
 };
 
 // ---------------------------------------------------------------------------
+// EXDEV detection
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if `e` represents a cross-device link error (`EXDEV`, OS error 18).
+///
+/// Only this error class justifies a silent byte-copy fallback; all other link
+/// errors (permission denied, missing parent, etc.) must propagate as `Err`.
+fn is_cross_device(e: &io::Error) -> bool {
+    // ErrorKind::CrossesDevices is stable on Rust ≥ 1.75 — use it when available.
+    // raw_os_error == 18 covers Linux, macOS, and Windows (ERROR_NOT_SAME_DEVICE).
+    e.raw_os_error() == Some(18)
+}
+
+// ---------------------------------------------------------------------------
 // Core materializer (injectable link seam)
 // ---------------------------------------------------------------------------
 
@@ -58,6 +72,9 @@ where
         }
 
         // Already present → idempotent skip.
+        // Correctness assumption: artifacts are content-addressed / version-pinned
+        // maven coordinates, so an existing file at `dst` is byte-for-byte identical
+        // to the source. No content check is performed; presence is sufficient.
         if dst.exists() {
             continue;
         }
@@ -72,17 +89,28 @@ where
             })?;
         }
 
-        // Attempt hardlink; fall back to copy on any IO error.
+        // Attempt hardlink; fall back to byte copy ONLY on cross-device error
+        // (EXDEV, raw OS error 18 / ErrorKind::CrossesDevices). Any other link
+        // error (permission denied, missing parent, unsupported FS) propagates
+        // as Err — those are not transient cross-volume issues and silently
+        // copying would mask a real misconfiguration.
         match link_fn(&src, &dst) {
             Ok(()) => {}
-            Err(_) => {
-                fs::copy(&src, &dst).map_err(|e| {
+            Err(e) if is_cross_device(&e) => {
+                fs::copy(&src, &dst).map_err(|ce| {
                     format!(
-                        "materialize: copy fallback failed for {} → {}: {e}",
+                        "materialize: copy fallback failed for {} → {}: {ce}",
                         src.display(),
                         dst.display()
                     )
                 })?;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "materialize: hard_link failed for {} → {}: {e}",
+                    src.display(),
+                    dst.display()
+                ));
             }
         }
     }
@@ -286,6 +314,47 @@ mod tests {
         let inst_tmp = TempDir::new().unwrap();
         let result = materialize(cache_tmp.path(), inst_tmp.path(), &[]);
         assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // F-6: Non-EXDEV link error propagates — no silent copy.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn non_exdev_link_error_propagates_not_copied() {
+        let cache_tmp = TempDir::new().unwrap();
+        let inst_tmp = TempDir::new().unwrap();
+
+        let cache_root = cache_tmp.path();
+        let instance_dir = inst_tmp.path();
+
+        let rel: PathBuf = PathBuf::from("libraries/com/example/bar/2.0/bar-2.0.jar");
+        let src = cache_root.join(&rel);
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, b"some-jar-content").unwrap();
+
+        // Inject a non-EXDEV error (OS error 13 = EACCES / permission denied).
+        let eacces_linker = |_src: &Path, _dst: &Path| -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(13))
+        };
+
+        let result = materialize_core(cache_root, instance_dir, &[rel.clone()], eacces_linker);
+
+        // Must return Err — the copy fallback must NOT have run.
+        assert!(result.is_err(), "non-EXDEV link error must propagate as Err");
+
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("hard_link failed"),
+            "error must mention hard_link failure: {msg}"
+        );
+
+        // Destination must NOT exist (copy did not run).
+        let dst = instance_dir.join(&rel);
+        assert!(
+            !dst.exists(),
+            "destination must NOT exist when link fails with non-EXDEV error"
+        );
     }
 
     // Helper: return the platform EXDEV errno value.
