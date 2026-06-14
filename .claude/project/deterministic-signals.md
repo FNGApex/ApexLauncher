@@ -1,6 +1,6 @@
 ---
-generated_at: 2026-06-13T06:19:44Z
-atomic_version: 3.1.1
+generated_at: 2026-06-14T10:37:28Z
+atomic_version: 3.0.1
 ---
 # Deterministic signals
 
@@ -24,7 +24,7 @@ atomic_version: 3.1.1
 │   │   ├── java-manager.md (7bd5211, 134L, 9816ch, 9875B)
 │   │   ├── neoforge-forge-launch.md (ef134f7, 138L, 13317ch, 13377B)
 │   │   ├── providers-browse.md (6e3a441, 136L, 12555ch, 12604B)
-│   │   ├── storage-auth-reorg.md (b7d6819, 132L, 10399ch, 10468B)
+│   │   ├── storage-auth-reorg.md (5850201, 161L, 13115ch, 13218B)
 │   │   ├── vanilla-launch.md (f320cd1, 214L, 16473ch, 16598B)
 │   │   └── vanilla-resolver.md (2615797, 129L, 9461ch, 9520B)
 │   ├── ARCHITECTURE.md (1db3727, 211L, 9810ch, 10515B)
@@ -78,10 +78,10 @@ atomic_version: 3.1.1
 │   │   │   ├── forge_installer.rs (fdf4b7c, 931L, 36704ch, 36758B)
 │   │   │   ├── instances.rs (163e5cf, 318L, 10162ch, 10173B)
 │   │   │   ├── java.rs (0412f18, 1526L, 56342ch, 56494B)
-│   │   │   ├── launch.rs (cc60c03, 1999L, 76030ch, 76168B)
+│   │   │   ├── launch.rs (14844bd, 2299L, 88188ch, 88338B)
 │   │   │   ├── loader_profile.rs (1ca473a, 447L, 17641ch, 17661B)
 │   │   │   ├── loaders.rs (63e47c8, 194L, 7044ch, 7064B)
-│   │   │   ├── materialize.rs (0df3940, 296L, 10943ch, 10961B)
+│   │   │   ├── materialize.rs (7aa7f7c, 408L, 16012ch, 16044B)
 │   │   │   ├── meta.rs (75b608e, 64L, 1864ch, 1864B)
 │   │   │   ├── mod.rs (2cc546b, 37L, 1779ch, 1811B)
 │   │   │   ├── modrinth.rs (64330d1, 667L, 23209ch, 24247B)
@@ -90,7 +90,7 @@ atomic_version: 3.1.1
 │   │   │   ├── settings.rs (93f09ba, 91L, 3082ch, 3084B)
 │   │   │   ├── store.rs (7495bd3, 285L, 10182ch, 10192B)
 │   │   │   └── versions.rs (eb8cfac, 51L, 1656ch, 1658B)
-│   │   ├── lib.rs (f79569f, 893L, 33230ch, 33294B)
+│   │   ├── lib.rs (10be8c9, 906L, 34137ch, 34201B)
 │   │   └── main.rs (a29d976, 6L, 184ch, 184B)
 │   ├── tests/ (5)
 │   │   ├── platform_common.rs (72998d8, 37L, 1303ch, 1307B)
@@ -119,9 +119,9 @@ atomic_version: 3.1.1
 
 ## Languages
 
-- Rust: 14895 LOC (63%), 26 files (31%)
+- Rust: 15320 LOC (63%), 26 files (31%)
 - JSON: 3683 LOC (15%), 17 files (20%)
-- Markdown: 2705 LOC (11%), 21 files (25%)
+- Markdown: 2734 LOC (11%), 21 files (25%)
 - TypeScript: 2192 LOC (9%), 15 files (18%)
 - CSS: 92 LOC (0%), 1 file (1%)
 - TOML: 43 LOC (0%), 1 file (1%)
