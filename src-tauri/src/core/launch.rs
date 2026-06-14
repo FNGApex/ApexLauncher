@@ -778,8 +778,8 @@ async fn monitor_child<S: LaunchSink>(
 /// materialized artifacts from the per-instance tree instead of the shared cache.
 ///
 /// # What it does
-/// For each entry in `classpath` and `natives` that starts with
-/// `cache_dir/libraries/` or `cache_dir/versions/`:
+/// For each entry in `classpath` and `natives` that is rooted under `cache_dir`
+/// (any subdirectory, not just `libraries/` or `versions/`):
 /// - Strips the `cache_dir` prefix to produce a relative path.
 /// - Rewrites the entry to `instance_dir.join(rel)`.
 /// - Collects `rel` into the returned `Vec<PathBuf>` (the list to pass to

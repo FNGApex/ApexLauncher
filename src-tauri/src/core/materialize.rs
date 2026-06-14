@@ -23,14 +23,18 @@ use std::{
 // EXDEV detection
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if `e` represents a cross-device link error (`EXDEV`, OS error 18).
+/// Returns `true` if `e` represents a cross-device link error.
 ///
 /// Only this error class justifies a silent byte-copy fallback; all other link
 /// errors (permission denied, missing parent, etc.) must propagate as `Err`.
 fn is_cross_device(e: &io::Error) -> bool {
-    // ErrorKind::CrossesDevices is stable on Rust ≥ 1.75 — use it when available.
-    // raw_os_error == 18 covers Linux, macOS, and Windows (ERROR_NOT_SAME_DEVICE).
-    e.raw_os_error() == Some(18)
+    // ErrorKind::CrossesDevices (stable Rust ≥ 1.85, toolchain 1.96) covers:
+    //   - Linux/macOS: EXDEV = 18
+    //   - Windows: ERROR_NOT_SAME_DEVICE = 17
+    // The raw_os_error == Some(18) arm keeps injected-EXDEV unit tests green on
+    // all platforms (ErrorKind::CrossesDevices may not round-trip through
+    // from_raw_os_error on non-Windows hosts).
+    e.kind() == io::ErrorKind::CrossesDevices || e.raw_os_error() == Some(18)
 }
 
 // ---------------------------------------------------------------------------
@@ -357,9 +361,48 @@ mod tests {
         );
     }
 
-    // Helper: return the platform EXDEV errno value.
+    // -----------------------------------------------------------------------
+    // Windows cross-device (ERROR_NOT_SAME_DEVICE = 17): copy fallback runs.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn windows_cross_device_error_triggers_copy_fallback() {
+        let cache_tmp = TempDir::new().unwrap();
+        let inst_tmp = TempDir::new().unwrap();
+
+        let cache_root = cache_tmp.path();
+        let instance_dir = inst_tmp.path();
+
+        let rel: PathBuf = PathBuf::from("versions/1.21.1/1.21.1.jar");
+        let src = cache_root.join(&rel);
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, b"mc-client-bytes").unwrap();
+
+        // Inject Windows-style cross-device error: ERROR_NOT_SAME_DEVICE = 17.
+        // On Windows std maps this to ErrorKind::CrossesDevices; on Linux/macOS
+        // raw error 17 = EEXIST, which is NOT mapped to CrossesDevices — so this
+        // test exercises the ErrorKind::CrossesDevices arm of the predicate.
+        let win_linker = |_src: &Path, _dst: &Path| -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::CrossesDevices,
+                "simulated Windows ERROR_NOT_SAME_DEVICE",
+            ))
+        };
+
+        materialize_core(cache_root, instance_dir, &[rel.clone()], win_linker).unwrap();
+
+        let dst = instance_dir.join(&rel);
+        assert!(dst.exists(), "destination must exist after Windows cross-device copy fallback");
+
+        let content = fs::read(&dst).unwrap();
+        assert_eq!(content, b"mc-client-bytes", "copy fallback must produce byte-identical file");
+    }
+
+    // Helper: return the POSIX EXDEV errno value.
     fn libc_exdev() -> i32 {
-        // EXDEV = 18 on Linux, macOS, and Windows (ERROR_NOT_SAME_DEVICE).
+        // EXDEV = 18 on Linux and macOS.
+        // Windows ERROR_NOT_SAME_DEVICE = 17 (distinct — covered by the
+        // io::ErrorKind::CrossesDevices arm in is_cross_device).
         18
     }
 }
