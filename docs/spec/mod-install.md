@@ -79,3 +79,41 @@ Full rationale + Mermaid flow in `docs/design/mod-install.md`.
 ## Change log
 
 <!-- Populated on first amendment after approval. -->
+
+## Implementation log
+
+### shipped — 2026-06-15
+
+Built across 5 checkpoints (7 implement→review iterations) of /subagent-implementation.
+Commits (chronological):
+
+- `09d3b13` — CP1 dependency-resolving install planner (`resolve_install`, `InstallPlan`)
+- `2ad6cbd` — CP2 install executor + `add_mod` command (URL-based outcome attribution)
+- `6717db6` — CP3 enable/disable + remove commands + `validate_mod_file_name` traversal guard
+- `ba5a3a9` — CP4 `update_mod` command + provider-file-name traversal validation in both paths
+- `3553b97` — CP5 frontend UI (Browse add-to-instance modal, InstanceDetail per-mod controls)
+- `96a9d48` — polish: surface version-fetch errors in add-to-instance modal (F-12)
+
+Verified: 369 Rust lib tests pass (+54 from this work); `npm run build` green.
+
+**Out-of-scope work performed during this build:**
+- Provider-supplied `file_name` traversal validation added to the `add_mod` path too (not
+  just CP4's `update_mod`) — same security class, fixed together (CP4 review).
+- Windows drive-letter prefix rejection added to `validate_mod_file_name` (CP3 review).
+
+**Unforeseens — surprises that emerged during implementation:**
+- `resolve_install` needs `root_project_id` passed explicitly — `ProjectVersion.id` is the
+  version id, in a different namespace than `Dependency.project_id` used by the dedup guard.
+- `download::execute_plan` returns outcomes in completion order (FuturesUnordered) with
+  already-skipped items prepended; index-matching outcomes to the plan misattributes them.
+  Fixed with URL-based `attribute_outcomes` (CP2 review).
+- Provider `file_name` is network-trusted input; treated as a traversal vector and validated.
+
+**Deferred items still open:**
+- `mod-install-f-1` — thread provider client/server `side` into `ModEntry` (hardcoded
+  "unknown" today). Tracked in `.claude/project/followups/`.
+- `mod-install-f-6` — enable/disable rename + manifest write not atomic (self-heals via
+  `scan_mods` disk-truth). Tracked.
+- 11 cosmetic nits (F-2..F-5, F-7..F-11, F-13, F-14) — reviewed and dropped.
+- Pre-existing `cp4_concurrency_bound_not_exceeded` download-engine flake — unrelated to this
+  work, already tracked separately.
