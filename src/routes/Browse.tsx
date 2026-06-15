@@ -509,6 +509,10 @@ function AddToInstanceModal({ mod, onClose }: AddToInstanceModalProps) {
                     <Loader2 className="size-3 animate-spin" />
                     Fetching compatible versions…
                   </span>
+                ) : versionsQuery.isError ? (
+                  <span className="text-danger">
+                    Failed to fetch versions{versionsQuery.error instanceof Error ? `: ${versionsQuery.error.message}` : "."}
+                  </span>
                 ) : primaryVersion ? (
                   <span>Version: <span className="text-foreground">{primaryVersion.versionNumber}</span></span>
                 ) : (
