@@ -66,17 +66,22 @@ Done early so the create-instance flow picks real versions/builds:
 - **Done when:** a Fabric/NeoForge instance launches. Fabric ✔; NeoForge pending manual run.
 
 ## Phase 5 — Providers: browse & add mods
-- ⚠️ **Apply for the free CurseForge API key now** (<https://console.curseforge.com>) — it's
-  the first phase that calls the CF API. Store it backend-side (env/Tauri secret), never in
-  the frontend bundle; keep it out of git. Modrinth needs no key.
+- ⚠️ **CurseForge API key applied for** (<https://console.curseforge.com>) — approval
+  pending (~48-72h). Store it backend-side (env `MODLOADER_CF_API_KEY` or
+  `settings.curseforge_api_key`), never in the frontend bundle; keep it out of git. Inject as
+  a compile-time/build secret for distributed binaries (the Prism pattern). Modrinth needs no
+  key.
 - Modrinth + CurseForge clients behind the `ModProvider` trait. ✔ (slice A —
   `docs/spec/providers-browse.md`)
 - Unified Browse page (search, provider filter, MC/loader facets, infinite scroll). ✔ code-complete;
   manual UI verify + live CF run (needs the API key) pending
 - Add a mod to an instance with dependency resolution; enable/disable/update; surface
-  CF "download disabled" → open-in-browser fallback. (slice B — spec to be authored:
-  `docs/spec/mod-install.md`)
-- **Done when:** you can search, add Sodium (Modrinth) + a CF mod, and launch.
+  CF "download disabled" → open-in-browser fallback. ✔ (slice B —
+  `docs/spec/mod-install.md`). Modrinth path complete (no key); CF rides the same code path,
+  gated only by the pending key. Backend commands: `add_mod`, `set_mod_enabled`, `remove_mod`,
+  `update_mod`. UI: Browse add-to-instance modal + InstanceDetail per-mod controls.
+- **Done when:** you can search, add Sodium (Modrinth) + a CF mod, and launch. Modrinth
+  add-and-launch ready for manual verification; CF add pending the API key.
 
 ## Phase 6 — Modpack import (the headline feature)
 - `.mrpack` import (Modrinth) — direct downloads + overrides.
@@ -98,9 +103,11 @@ Done early so the create-instance flow picks real versions/builds:
 ---
 
 ### Suggested next action
-Phase 4 is code-complete: all four loaders (Fabric, Quilt, NeoForge, Forge) wire into the
-launch pipeline; NeoForge/Forge manual e2e verification is the only open box. Two external
-gates are pending in parallel: Mojang app-review approval for the MS-auth client id
-(`docs/design/auth-client-id-blocker.md`) and — before starting **Phase 5 — Providers** —
-the free CurseForge API key (<https://console.curseforge.com>; apply early, it gates the
-first CF API call).
+Phase 5 is code-complete: slice A (Browse) and slice B (mod install — add/enable/disable/
+update + CF download-disabled fallback) both shipped. Modrinth path is fully functional with
+no key; manual verification (add Sodium, launch) is the open box for slice B. Three external
+gates pending in parallel: CurseForge API key approval (applied, ~48-72h — unblocks the CF
+half of Browse + install), Mojang app-review for the MS-auth client id
+(`docs/design/auth-client-id-blocker.md`), and NeoForge/Forge manual e2e from Phase 4. Next
+build phase is **Phase 6 — Modpack import** (the headline feature), which reuses the
+`ModProvider` trait + normalized types as its pack-resolver substrate.
