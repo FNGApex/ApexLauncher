@@ -81,7 +81,7 @@ against fixtures with no network. The executor reuses `instances::create` and
 | 2 | Plan builder (pure): `build_pack_plan(&MrpackManifest, instance_mc_dir) -> Result<PackPlan,_>` where `PackPlan { items: Vec<DownloadItem>, mods: Vec<ModEntry>, skipped: Vec<String> }`; host allowlist; path-safety guard; hash pick; env filter; `mods/`→`ModEntry` | `src-tauri/src/core/modpack.rs` | atomic-builder | ~1 | unit tests: dest path under mc dir; sha512>sha1 pick; no-hash→err; disallowed host→err; `..`/absolute path→err; env-unsupported→skipped; only `mods/` files get `ModEntry` |
 | 3 | Overrides extraction (zip-slip safe): `extract_overrides(&mut ZipArchive, mc_dir) -> Result<u32,_>` applying `overrides/` then `client-overrides/`, ignoring `server-overrides/` | `src-tauri/src/core/modpack.rs` | atomic-builder | ~1 | unit tests w/ fixture zip: files land under mc dir; `..` entry rejected; client-overrides applied; server-overrides ignored; collision → override wins |
 | 4 | `import_mrpack` command + result type: open zip → read index → parse → `instances::create` → `build_pack_plan` → `execute_plan` → `extract_overrides` → write `ModEntry`s; `MrpackImportResult { slug, name, installed, failed, skipped }` | `src-tauri/src/lib.rs`, `src-tauri/src/core/modpack.rs` | atomic-builder | ~2 | test (no live net): malformed zip → error; result counts; happy path wires create+plan (download mocked/asserted by plan shape) |
-| 5 | Frontend: `importMrpack` ipc wrapper + import entry point (file picker via Tauri dialog plugin, calls command, shows result, navigates to new instance) | `src/lib/ipc.ts`, `src/routes/Home.tsx` (or NewInstanceModal), `src/components/` | atomic-builder | ~3 | `npm run build` green; ipc types mirror Rust (camelCase); result surfaced (installed/failed/skipped) |
+| 5 | Frontend: `importMrpack` ipc wrapper + import entry point (file picker via Tauri dialog plugin, calls command, shows result, navigates to new instance) | `src/lib/ipc.ts`, `src/components/NewInstanceModal.tsx` | atomic-builder | ~3 | `npm run build` green; ipc types mirror Rust (camelCase); result surfaced (installed/failed/skipped) |
 
 ## Risks
 
@@ -162,7 +162,7 @@ seam. Full rationale in the design doc.
 | B2 | CF single-file resolver: `get_file(project_id, file_id)` on `CurseForgeProvider` returning a normalized file (url Option, filename, hash, size) via the GET seam | `src-tauri/src/core/curseforge.rs`, `core/providers.rs` (if a shared type is needed) | atomic-builder | ~2 | mock-HTTP unit tests: happy path maps fields; `downloadUrl: null`→`url: None`; api-key header carried; key-absent path |
 | B3 | CF pack planner (pure): `build_cf_pack_plan(&CfManifest, &[ResolvedFile], mc_dir) -> Result<CfPackPlan { items, mods, manual, skipped }, _>`; url None or no-hash → manual; `mods/<fileName>` dest; path-safety reuse; `ModEntry` with CF ids | `src-tauri/src/core/modpack.rs` | atomic-builder | ~1 | unit tests: dest under mc/mods; ModEntry ids = projectID/fileID; url None→manual; no-hash→manual; unsafe filename→err |
 | B4 | `import_curseforge_zip` command + `CfImportResult`: open zip → read `manifest.json` → parse → `instances::create` → resolve files (CF API) → `build_cf_pack_plan` → `execute_plan` → reuse `extract_overrides` → write `ModEntry`s | `src-tauri/src/lib.rs`, `src-tauri/src/core/modpack.rs` | atomic-builder | ~2 | test (mock provider, no live net): malformed zip→error; result counts (installed/failed/manual); wiring routes through pure plan |
-| B5 | Frontend: `importCurseforgeZip` ipc wrapper + `CfImportResult` type; extend Home import entry (file picker accepts `.zip`; route by archive kind or a second button); surface manual list (links) + navigate | `src/lib/ipc.ts`, `src/routes/Home.tsx` | atomic-builder | ~2 | `npm run build` green; ipc types mirror Rust (camelCase); manual files surfaced |
+| B5 | Frontend: `importCurseforgeZip` ipc wrapper + `CfImportResult` type; extend New Instance modal Import tab (file picker accepts `.zip`; route by archive kind); surface manual list (links) + navigate | `src/lib/ipc.ts`, `src/components/NewInstanceModal.tsx` | atomic-builder | ~2 | `npm run build` green; ipc types mirror Rust (camelCase); manual files surfaced |
 
 ### Risks (slice B)
 
@@ -175,6 +175,23 @@ seam. Full rationale in the design doc.
 | Partial instance left on disk if resolution/download fails after `instances::create` | med | Same gap as slice A (follow-up `modpack-import-partial-cleanup`); not re-litigated in slice B |
 
 ## Change log
+
+### 2026-06-16 — Import entry point moved to New Instance modal
+
+**What changed:** The modpack import entry points (`.mrpack` and CurseForge `.zip`) are no
+longer buttons on the Instances list header. They live inside a Create/Import tab switch in
+the New Instance modal (`src/components/NewInstanceModal.tsx`). The modal's Import tab opens
+a single file picker accepting both extensions and routes to the matching IPC command by
+extension. On success the modal closes, the caller navigates to the new instance, and the
+existing result-summary toasts (`ImportResultToast` / `CfImportResultToast`) are surfaced from
+`Home.tsx` via callbacks (`onMrpackImport` / `onCfImport`). `Home.tsx` header now contains
+only the New instance button.
+
+**Why:** Consolidates instance creation paths into a single modal entry point, reducing header
+clutter. Decided in the `ui-modpack-rework` spec (CP4).
+
+**Superseded:** Import was triggered from two standalone buttons (`Import .mrpack`, `Import
+CurseForge .zip`) in the `Home.tsx` header alongside the New instance button.
 
 ### 2026-06-15 — Slice B (CurseForge `.zip` import) added
 

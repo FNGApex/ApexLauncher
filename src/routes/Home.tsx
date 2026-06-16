@@ -1,14 +1,12 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { open } from "@tauri-apps/plugin-dialog";
-import { Box, Loader2, Plus, Server, Trash2, Upload, X } from "lucide-react";
+import { Box, Plus, Server, Trash2, X } from "lucide-react";
 import {
   deleteInstance,
-  importCurseforgeZip,
-  importMrpack,
   listInstances,
   type CfImportResult,
+  type CfManualFile,
   type Instance,
   type MrpackImportResult,
 } from "@/lib/ipc";
@@ -22,42 +20,6 @@ export function Home() {
     queryKey: ["instances"],
     queryFn: listInstances,
   });
-  const qc = useQueryClient();
-  const navigate = useNavigate();
-
-  const importMutation = useMutation({
-    mutationFn: async () => {
-      const selected = await open({
-        multiple: false,
-        filters: [{ name: "Modrinth modpack", extensions: ["mrpack"] }],
-      });
-      if (!selected) return null;
-      return importMrpack(selected);
-    },
-    onSuccess: async (result) => {
-      if (!result) return;
-      await qc.invalidateQueries({ queryKey: ["instances"] });
-      setImportResult(result);
-      navigate(`/instances/${result.slug}`);
-    },
-  });
-
-  const importCfMutation = useMutation({
-    mutationFn: async () => {
-      const selected = await open({
-        multiple: false,
-        filters: [{ name: "CurseForge modpack", extensions: ["zip"] }],
-      });
-      if (!selected) return null;
-      return importCurseforgeZip(selected);
-    },
-    onSuccess: async (result) => {
-      if (!result) return;
-      await qc.invalidateQueries({ queryKey: ["instances"] });
-      setCfImportResult(result);
-      navigate(`/instances/${result.slug}`);
-    },
-  });
 
   return (
     <div className="px-8 py-7">
@@ -66,52 +28,14 @@ export function Home() {
           <h1 className="text-2xl font-semibold">Instances</h1>
           <p className="text-sm text-muted">Your Minecraft profiles</p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => importMutation.mutate()}
-            disabled={importMutation.isPending}
-            className="flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-surface disabled:opacity-50"
-          >
-            {importMutation.isPending ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Upload className="size-4" />
-            )}
-            Import .mrpack
-          </button>
-          <button
-            onClick={() => importCfMutation.mutate()}
-            disabled={importCfMutation.isPending}
-            className="flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-surface disabled:opacity-50"
-          >
-            {importCfMutation.isPending ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Upload className="size-4" />
-            )}
-            Import CurseForge .zip
-          </button>
-          <button
-            onClick={() => setShowModal(true)}
-            className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
-          >
-            <Plus className="size-4" />
-            New instance
-          </button>
-        </div>
+        <button
+          onClick={() => setShowModal(true)}
+          className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
+        >
+          <Plus className="size-4" />
+          New instance
+        </button>
       </header>
-
-      {importMutation.isError && (
-        <p className="mb-4 rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-          Import failed: {String(importMutation.error)}
-        </p>
-      )}
-
-      {importCfMutation.isError && (
-        <p className="mb-4 rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-          Import failed: {String(importCfMutation.error)}
-        </p>
-      )}
 
       {isLoading ? (
         <p className="text-sm text-muted">Loading…</p>
@@ -126,14 +50,19 @@ export function Home() {
           <Server className="mb-4 size-10 text-muted" />
           <h2 className="text-lg font-medium">No instances yet</h2>
           <p className="mt-1 max-w-sm text-sm text-muted">
-            Create a fresh instance, or head to{" "}
-            <span className="text-foreground">Browse</span> to install a modpack
-            from CurseForge or Modrinth.
+            Create a fresh instance or import a modpack via{" "}
+            <span className="text-foreground">New instance</span>.
           </p>
         </div>
       )}
 
-      {showModal && <NewInstanceModal onClose={() => setShowModal(false)} />}
+      {showModal && (
+        <NewInstanceModal
+          onClose={() => setShowModal(false)}
+          onMrpackImport={(result) => setImportResult(result)}
+          onCfImport={(result) => setCfImportResult(result)}
+        />
+      )}
 
       {importResult && (
         <ImportResultToast result={importResult} onClose={() => setImportResult(null)} />
@@ -207,7 +136,7 @@ function CfImportResultToast({
             {result.manual.length} file{result.manual.length === 1 ? "" : "s"} need manual download:
           </p>
           <ul className="mt-1 max-h-28 overflow-y-auto text-xs">
-            {result.manual.map((m) => (
+            {result.manual.map((m: CfManualFile) => (
               <li key={`${m.projectId}-${m.fileId}`} className="truncate">
                 <a
                   href={m.pageUrl}

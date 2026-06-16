@@ -1,11 +1,17 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, X } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { Loader2, Upload, X } from "lucide-react";
 import {
   createInstance,
   getLoaders,
+  importCurseforgeZip,
+  importMrpack,
   listMinecraftVersions,
+  type CfImportResult,
   type LoaderKind,
+  type MrpackImportResult,
 } from "@/lib/ipc";
 import { META_STALE_TIME } from "@/lib/query";
 
@@ -17,10 +23,95 @@ const LOADER_LABELS: Record<LoaderKind, string> = {
   forge: "Forge",
 };
 
+type Tab = "create" | "import";
+
 /** Create-instance dialog. MC version and loader builds are fetched live from
  *  Mojang/Forge/Fabric/Quilt/NeoForge metadata; the loader list is filtered to
- *  what each MC version actually supports. */
-export function NewInstanceModal({ onClose }: { onClose: () => void }) {
+ *  what each MC version actually supports.
+ *
+ *  The Import tab accepts a local `.mrpack` or CurseForge `.zip` and calls the
+ *  matching IPC command, routing by file extension. On success the caller is
+ *  notified via `onMrpackImport` / `onCfImport` so it can surface the result
+ *  summary toast outside the modal. */
+export function NewInstanceModal({
+  onClose,
+  onMrpackImport,
+  onCfImport,
+}: {
+  onClose: () => void;
+  onMrpackImport?: (result: MrpackImportResult) => void;
+  onCfImport?: (result: CfImportResult) => void;
+}) {
+  const [tab, setTab] = useState<Tab>("create");
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-xl border border-border bg-surface p-6 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="mb-5 flex items-center justify-between">
+          <h2 className="text-lg font-semibold">New instance</h2>
+          <button
+            onClick={onClose}
+            className="rounded-md p-1 text-muted hover:bg-background hover:text-foreground"
+          >
+            <X className="size-4" />
+          </button>
+        </header>
+
+        {/* Tab switcher */}
+        <div className="mb-5 flex rounded-lg border border-border bg-background p-1">
+          <TabButton active={tab === "create"} onClick={() => setTab("create")}>
+            Create
+          </TabButton>
+          <TabButton active={tab === "import"} onClick={() => setTab("import")}>
+            Import pack
+          </TabButton>
+        </div>
+
+        {tab === "create" ? (
+          <CreateTab onClose={onClose} />
+        ) : (
+          <ImportTab
+            onClose={onClose}
+            onMrpackImport={onMrpackImport}
+            onCfImport={onCfImport}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+        active
+          ? "bg-surface text-foreground shadow-sm"
+          : "text-muted hover:text-foreground"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function CreateTab({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
   const [name, setName] = useState("");
   const [minecraft, setMinecraft] = useState("");
@@ -86,128 +177,197 @@ export function NewInstanceModal({ onClose }: { onClose: () => void }) {
     !mutation.isPending;
 
   return (
-    <div
-      className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4"
-      onClick={onClose}
+    <form
+      className="space-y-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (canSubmit) mutation.mutate();
+      }}
     >
-      <div
-        className="w-full max-w-md rounded-xl border border-border bg-surface p-6 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
+      <Field label="Name">
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="My instance"
+          className="input"
+        />
+      </Field>
+
+      <Field
+        label={
+          mcQuery.isLoading ? "Minecraft version (loading…)" : "Minecraft version"
+        }
       >
-        <header className="mb-5 flex items-center justify-between">
-          <h2 className="text-lg font-semibold">New instance</h2>
-          <button
-            onClick={onClose}
-            className="rounded-md p-1 text-muted hover:bg-background hover:text-foreground"
-          >
-            <X className="size-4" />
-          </button>
-        </header>
-
-        <form
-          className="space-y-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (canSubmit) mutation.mutate();
-          }}
+        <select
+          value={minecraft}
+          onChange={(e) => setMinecraft(e.target.value)}
+          disabled={mcQuery.isLoading || !mcQuery.data}
+          className="input"
         >
-          <Field label="Name">
-            <input
-              autoFocus
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="My instance"
-              className="input"
-            />
-          </Field>
+          {mcQuery.data?.map((v) => (
+            <option key={v.id} value={v.id}>
+              {v.id}
+            </option>
+          ))}
+        </select>
+      </Field>
 
-          <Field
-            label={
-              mcQuery.isLoading ? "Minecraft version (loading…)" : "Minecraft version"
-            }
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Mod loader">
+          <select
+            value={loaderKind}
+            onChange={(e) => setLoaderKind(e.target.value as LoaderKind)}
+            disabled={loadersQuery.isFetching || !loaders}
+            className="input"
           >
-            <select
-              value={minecraft}
-              onChange={(e) => setMinecraft(e.target.value)}
-              disabled={mcQuery.isLoading || !mcQuery.data}
-              className="input"
-            >
-              {mcQuery.data?.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.id}
+            {loaders?.map((l) => (
+              <option key={l.kind} value={l.kind}>
+                {LOADER_LABELS[l.kind]}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field
+          label={
+            needsBuild && selected
+              ? `Loader build (${selected.versions.length})`
+              : "Loader build"
+          }
+        >
+          <select
+            value={loaderVersion}
+            onChange={(e) => setLoaderVersion(e.target.value)}
+            disabled={!needsBuild || loadersQuery.isFetching}
+            className="input disabled:opacity-40"
+          >
+            {!needsBuild ? (
+              <option value="">—</option>
+            ) : (
+              selected?.versions.map((v) => (
+                <option key={v} value={v}>
+                  {v}
                 </option>
-              ))}
-            </select>
-          </Field>
+              ))
+            )}
+          </select>
+        </Field>
+      </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Mod loader">
-              <select
-                value={loaderKind}
-                onChange={(e) => setLoaderKind(e.target.value as LoaderKind)}
-                disabled={loadersQuery.isFetching || !loaders}
-                className="input"
-              >
-                {loaders?.map((l) => (
-                  <option key={l.kind} value={l.kind}>
-                    {LOADER_LABELS[l.kind]}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field
-              label={
-                needsBuild && selected
-                  ? `Loader build (${selected.versions.length})`
-                  : "Loader build"
-              }
-            >
-              <select
-                value={loaderVersion}
-                onChange={(e) => setLoaderVersion(e.target.value)}
-                disabled={!needsBuild || loadersQuery.isFetching}
-                className="input disabled:opacity-40"
-              >
-                {!needsBuild ? (
-                  <option value="">—</option>
-                ) : (
-                  selected?.versions.map((v) => (
-                    <option key={v} value={v}>
-                      {v}
-                    </option>
-                  ))
-                )}
-              </select>
-            </Field>
-          </div>
+      {loadersQuery.isError && (
+        <p className="text-sm text-danger">
+          Couldn't load loader versions: {String(loadersQuery.error)}
+        </p>
+      )}
+      {mutation.isError && (
+        <p className="text-sm text-danger">{String(mutation.error)}</p>
+      )}
 
-          {loadersQuery.isError && (
-            <p className="text-sm text-danger">
-              Couldn’t load loader versions: {String(loadersQuery.error)}
-            </p>
+      <div className="flex justify-end gap-2 pt-2">
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-lg px-4 py-2 text-sm font-medium text-muted hover:bg-background hover:text-foreground"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={!canSubmit}
+          className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          {mutation.isPending && <Loader2 className="size-4 animate-spin" />}
+          Create
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function ImportTab({
+  onClose,
+  onMrpackImport,
+  onCfImport,
+}: {
+  onClose: () => void;
+  onMrpackImport?: (result: MrpackImportResult) => void;
+  onCfImport?: (result: CfImportResult) => void;
+}) {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+
+  const importMutation = useMutation({
+    mutationFn: async () => {
+      const selected = await open({
+        multiple: false,
+        filters: [
+          { name: "Modrinth modpack", extensions: ["mrpack"] },
+          { name: "CurseForge modpack", extensions: ["zip"] },
+        ],
+      });
+      if (!selected) return null;
+
+      // Route by extension; extension check is lowercase so .MRPACK also matches.
+      const lower = selected.toLowerCase();
+      if (lower.endsWith(".mrpack")) {
+        const result = await importMrpack(selected);
+        return { kind: "mrpack" as const, result };
+      }
+      if (lower.endsWith(".zip")) {
+        const result = await importCurseforgeZip(selected);
+        return { kind: "cf" as const, result };
+      }
+      throw new Error(
+        `Unsupported file type: ${selected}. Choose a .mrpack or .zip file.`,
+      );
+    },
+    onSuccess: async (outcome) => {
+      if (!outcome) return;
+      await qc.invalidateQueries({ queryKey: ["instances"] });
+      onClose();
+      if (outcome.kind === "mrpack") {
+        onMrpackImport?.(outcome.result);
+        navigate(`/instances/${outcome.result.slug}`);
+      } else {
+        onCfImport?.(outcome.result);
+        navigate(`/instances/${outcome.result.slug}`);
+      }
+    },
+  });
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted">
+        Import a Modrinth <span className="font-mono text-foreground">.mrpack</span> or a
+        CurseForge modpack <span className="font-mono text-foreground">.zip</span> from
+        your computer.
+      </p>
+
+      {importMutation.isError && (
+        <p className="text-sm text-danger">{String(importMutation.error)}</p>
+      )}
+
+      <div className="flex justify-end gap-2 pt-2">
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-lg px-4 py-2 text-sm font-medium text-muted hover:bg-background hover:text-foreground"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={() => importMutation.mutate()}
+          disabled={importMutation.isPending}
+          className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          {importMutation.isPending ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <Upload className="size-4" />
           )}
-          {mutation.isError && (
-            <p className="text-sm text-danger">{String(mutation.error)}</p>
-          )}
-
-          <div className="flex justify-end gap-2 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-lg px-4 py-2 text-sm font-medium text-muted hover:bg-background hover:text-foreground"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={!canSubmit}
-              className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              {mutation.isPending && <Loader2 className="size-4 animate-spin" />}
-              Create
-            </button>
-          </div>
-        </form>
+          {importMutation.isPending ? "Importing…" : "Choose file…"}
+        </button>
       </div>
     </div>
   );
