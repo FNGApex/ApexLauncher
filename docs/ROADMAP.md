@@ -84,9 +84,9 @@ Done early so the create-instance flow picks real versions/builds:
   add-and-launch ready for manual verification; CF add pending the API key.
 
 ## Phase 6 — Modpack import (the headline feature)
-- `.mrpack` import (Modrinth) — direct downloads + overrides.
-- CF zip import — per-file URL resolution + manual-download surfacing.
-- Browse & one-click install modpacks from both providers.
+- `.mrpack` import (Modrinth) — direct downloads + overrides. ✔ (slice A — `505670b`).
+- CF zip import — per-file URL resolution + manual-download surfacing. ✔ (slice B — `cfbabf2`..`f6a6556`; backend + UI, headless-verified, GUI import pending).
+- Browse & one-click install modpacks from both providers. (slice C)
 - Pack update / re-resolve.
 - **Done when:** you install a real CF and a real Modrinth modpack end to end.
 

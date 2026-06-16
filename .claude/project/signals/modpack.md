@@ -1,0 +1,41 @@
+# modpack
+
+## What it does
+
+Imports a local modpack archive (Modrinth `.mrpack` slice A, CurseForge `.zip` slice B) into a new instance: parse the pack's manifest, create the instance with the pack's MC version + loader, resolve/verify each file, download into `mc/`, apply `overrides/`, and record installed files as `ModEntry`s. `core/modpack.rs` is a pure parse/plan module (no Tauri commands, no filesystem writes except `extract_overrides`); `import_mrpack` and `import_curseforge_zip` in `lib.rs` are the thin executors that wire zip I/O, instance creation, the download engine, and CF API resolution around the pure core.
+
+## Artifacts
+
+- `src/routes/Home.tsx` — "Import .mrpack" and "Import CurseForge .zip" buttons; each opens a file picker via `@tauri-apps/plugin-dialog`'s `open()`, calls `importMrpack`/`importCurseforgeZip` via a `useMutation`, invalidates `["instances"]` on success, and renders `ImportResultToast` / `CfImportResultToast` (installed/failed/skipped or installed/failed/manual counts; CF toast lists `CfManualFile` entries with project-page links)
+
+## CLI code
+
+- `src-tauri/src/core/modpack.rs` — pure parse/plan/extract module; slice A: `MrpackManifest`/`MrpackFile`/`FileEnv`/`PackLoader` types, `parse_modrinth_index`, `PackPlan`, `build_pack_plan` (host allowlist, hash pick sha512>sha1, env filter, path-safety guard), `extract_overrides`/`extract_prefix`/`is_safe_dest` (zip-slip-safe, applies `overrides/` then `client-overrides/`, ignores `server-overrides/`), `read_mrpack` (in-memory zip seam); slice B: `CfManifest`/`CfManifestFile`/`CfManualFile`/`CfResolveFailure` types, `parse_cf_manifest` (splits primary `modLoaders[].id` on first `-` into kind+version), `CfPackPlan`, `build_cf_pack_plan` (pure — url-or-hash-missing routes to `manual`, dest always `mc_dir/mods/<fileName>`), `resolve_and_build_cf_plan` (async, calls `CurseForgeProvider::get_file` per manifest entry via injectable `ProviderHttpClient`; `ProviderError::KeyMissing` aborts the whole import with `ModpackError::ResolverKeyMissing`, other per-file errors land in `CfPackPlan::failed` without aborting), `read_cf_manifest` (in-memory zip seam reading `manifest.json`); shared `ModpackError` enum (`MalformedManifest`, `MissingHash`, `NoDownloadUrls`, `DisallowedHost`, `UnsafePath`, `ZipSlip`, `IndexNotFound`, `ResolverKeyMissing`, `Io`, `Zip`); shared `validate_relative_path` path-safety guard reused by both slices; 58 unit tests against fixture JSON + fixture zips
+- `src-tauri/src/core/curseforge.rs` — `CurseForgeProvider::get_file(client, project_id, file_id)` (line 308): single-file resolver added for slice B, calling `GET /v1/mods/{projectId}/files/{fileId}`; returns a normalized `VersionFile` (`url: None` on `downloadUrl: null`; prefers sha1 over md5 hash); 8 dedicated `get_file_*` mock-HTTP tests plus the module's pre-existing 26 search/files tests (34 total)
+- `src-tauri/src/lib.rs` — `import_mrpack` (async Tauri command, ~line 1177): reads file bytes, pre-parses the manifest once to build `CreateInstanceReq` (instance slug doesn't exist yet), calls `instances::create`, then re-parses through the tested `read_mrpack(bytes, mc_dir)` seam to get the real `PackPlan`, runs `download::execute_plan`, calls `extract_overrides`, merges `ModEntry`s into the manifest, returns `MrpackImportResult { slug, name, installed, failed, skipped }`; `import_curseforge_zip` (async, ~line 1313): reads bytes, `read_cf_manifest`, `instances::create`, resolves the CF key via `cf_api_key_from`, builds a `CurseForgeProvider` + `ReqwestProviderClient`, calls `resolve_and_build_cf_plan`, runs `execute_plan`, `extract_overrides`, merges `ModEntry`s, returns `CfImportResult { slug, name, installed, failed, manual }`; both commands registered in the `tauri::generate_handler!` invocation
+
+## Docs
+
+- `docs/spec/modpack-import.md` — implementation contract for both slices; slice A marked shipped (commit `505670b`); slice B success criteria/checkpoints/risks + implementation log (shipped 2026-06-15, full lib 436 tests pass on the Windows toolchain)
+- `docs/design/modpack-import.md` — design doc: slice A/B format ground truth, behavior rules, Mermaid architecture diagrams, file-resolution approach comparison (single-file GET chosen over batch POST), rejected approaches (stream-download during parse, reusing `mod_install::resolve_install`, frontend zip parsing), open questions
+
+## Coupling
+
+- **providers domain** — `resolve_and_build_cf_plan` calls `CurseForgeProvider::get_file` and depends on `ProviderHttpClient`/`ProviderError`/`VersionFile` from `providers.rs`/`curseforge.rs`; any change to those types or to `cf_api_key_from` requires a matching update here.
+- **instances domain** — `import_mrpack`/`import_curseforge_zip` call `instances::create`, `instances::load_manifest`, `instances::save_manifest`; `ModEntry` (defined in `instances.rs`) is the output shape both `build_pack_plan` and `build_cf_pack_plan` produce.
+- **download domain** — both executors build a `DownloadPlan` from planner output and call `download::execute_plan`/`build_client`; `ItemStatus`/`NoOpSink` come from `download.rs`.
+- **frontend-shell / IPC** — `MrpackImportResult`, `CfImportResult`, `CfManualFile` are hand-mirrored in `src/lib/ipc.ts` (camelCase via `serde rename_all`); any Rust struct change requires a manual `ipc.ts` edit. `Home.tsx` is shared with the instances domain (instance grid lives in the same file as the import buttons).
+- **resolver/mod-install domains** — explicitly NOT reused: `mod_install::resolve_install` does provider-id BFS dependency walking, which doesn't apply to pre-resolved mrpack files or pack-manifest-driven CF files; `modpack.rs` is a separate planner by design (see design doc's rejected-approaches section).
+
+## Conventions worth knowing
+
+- Pure-planner / thin-executor split mirrors `mod_install.rs` and `resolver.rs`: all security-critical logic (host allowlist, path safety, hash verification, env filtering) lives in unit-tested pure functions; the Tauri command only does I/O orchestration.
+- mrpack download host allowlist (`ALLOWED_HOSTS` in `modpack.rs`): `cdn.modrinth.com`, `github.com`, `raw.githubusercontent.com`, `gitlab.com` — a `downloads[]` URL outside this list aborts the whole import via `ModpackError::DisallowedHost`. No equivalent allowlist exists for CF slice B — CF URLs come from the authenticated API response, not an untrusted manifest.
+- `validate_relative_path` rejects absolute paths, `\`-prefixed paths, Windows drive-letter prefixes, and any `..` component; used by both slice-A file paths and slice-B `mods/<fileName>` dest construction.
+- `is_safe_dest` is a purely structural relative-path walk (no `canonicalize`) — chosen deliberately so `mc_dir` need not exist on disk before extraction runs.
+- CF hash preference in `build_cf_pack_plan`: only `sha1` is checked (not md5) — a resolved file with only an md5 hash routes to `manual` rather than downloading unverified.
+- `CfPackPlan::failed` (population only happens via `resolve_and_build_cf_plan`) is distinct from `CfPackPlan::manual`: `failed` = the `get_file` network/HTTP/JSON call itself errored; `manual` = the call succeeded but the file has no usable URL or hash. `build_cf_pack_plan` alone always returns `failed: vec![]`.
+- `CfManualFile.page_url` is built as `https://www.curseforge.com/projects/<projectID>` — numeric-id-based, not the mod's actual slug; tracked as follow-up `modpack-import-cf-manual-slug-link`.
+- No rollback on partial failure: if planning or downloading fails after `instances::create`, a half-populated instance is left on disk in both slices — tracked follow-up `modpack-import-partial-cleanup`.
+- CF non-default `overrides` manifest key (rare) is parsed into `CfManifest.overrides` but `extract_overrides` (reused unchanged from slice A) always looks for the literal `"overrides/"` prefix — tracked follow-up `modpack-import-cf-overrides-dir`.
+- `src-tauri/tests/curseforge_live.rs` is a `#[ignore]`d integration test hitting the real CF API; reads the key from a gitignored `.env` (not the shell env, since the Windows cargo toolchain over WSL UNC doesn't see WSL-exported vars) via the same `cf_api_key_from` resolver production uses.

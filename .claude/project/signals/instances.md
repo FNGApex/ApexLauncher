@@ -6,7 +6,7 @@ Manages the full lifecycle of Minecraft instances: create, list, get (with mods-
 
 ## Artifacts
 
-- `src/routes/Home.tsx` — instance grid; delete via confirmation dialog; opens `NewInstanceModal`; TanStack Query key `["instances"]`
+- `src/routes/Home.tsx` — instance grid; delete via confirmation dialog; opens `NewInstanceModal`; "Import .mrpack" / "Import CurseForge .zip" buttons (file picker via `@tauri-apps/plugin-dialog`, calls `importMrpack`/`importCurseforgeZip` — modpack domain) with result toasts; TanStack Query key `["instances"]`
 - `src/routes/InstanceDetail.tsx` — detail view: stats (memory, Java, mod count, created, last-played, playtime), reconciled mods list (`folderMods`) with per-mod enable/disable toggle, update, and remove buttons; launch/stop controls; log console (max 500 lines); subscribes to `launch://log`, `launch://exit`, `install://log` events
 - `src/components/NewInstanceModal.tsx` — create-instance dialog; fetches MC version list and per-MC loader builds live; guards submit on name + MC version + (if non-vanilla) loader build being set
 
@@ -29,6 +29,7 @@ Manages the full lifecycle of Minecraft instances: create, list, get (with mods-
 - `create` reads `settings::load` to seed `memory_mb` on new instances; settings domain changes cascade here.
 - `launch_instance` in `lib.rs` calls `materialize` after `launch::rewrite_classpath_for_instance`; changes to the classpath rewrite contract affect what paths are materialized into the instance tree (launch domain).
 - `add_mod` and `update_mod` in `lib.rs` both call into the mod-install domain (`core/mod_install.rs`), which owns the resolve/swap/update logic; `update_mod` additionally calls `instances::remove_mod_from_disk_files` + `instances::save_manifest` directly.
+- `import_mrpack` and `import_curseforge_zip` in `lib.rs` (modpack domain) call `instances::create`, `instances::load_manifest`, and `instances::save_manifest` to create the instance and merge the pack's resolved `ModEntry`s into `instance.json`.
 - `src/lib/ipc.ts` hand-mirrors Rust struct field names (camelCase via `serde rename_all`); types are not generated — drift is a manual risk. Note: the `Settings` interface in `ipc.ts` is missing the `offlineMode` field that exists in the Rust `Settings` struct.
 
 ## Conventions worth knowing
