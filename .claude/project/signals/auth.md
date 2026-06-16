@@ -11,7 +11,7 @@ Implements Microsoft OAuth 2.0 device-code flow → Xbox Live chain → Minecraf
 
 ## CLI code
 
-- `src-tauri/src/core/auth.rs` (1804L) — full auth implementation:
+- `src-tauri/src/core/auth.rs` (789L) — full auth implementation:
   - `request_device_code`, `poll_token_once`, `refresh_ms_token` — MS OAuth2 device-code + poll + refresh (CP1)
   - `xbox_chain` — XBL authenticate → XSTS authorize → MC `login_with_xbox` → MC profile GET (CP2)
   - `AccountStore` — single-account store: `load`, `new_empty`, `set_account`, `get_account`, `logout`, `get_refresh_token` (CP3)
@@ -19,7 +19,7 @@ Implements Microsoft OAuth 2.0 device-code flow → Xbox Live chain → Minecraf
   - `KeyringBackend` trait + `SystemKeyringBackend` (production, backed by `keyring` crate) — injectable seam so tests never call the real OS keyring
   - `AuthHttpClient` trait + `ReqwestAuthClient` (production) — injectable HTTP seam; all tests use mock responses
   - `AuthError` enum — 11 named variants covering device-code expiry, authorization decline, XSTS XErr codes (2148916233 / 2148916235 / 2148916238), no Minecraft license (profile 404), keyring failure, store I/O failure
-  - 40 unit tests (all mock HTTP via `MockAuthClient` VecDeque; keyring via `FakeKeyring`/`FailingKeyring` — no real TCP, no OS keyring)
+  - tests relocated to sibling `auth_tests.rs` (1023L, 40 `#[test]`/`#[tokio::test]` fns — all mock HTTP via `MockAuthClient` VecDeque; keyring via `FakeKeyring`/`FailingKeyring` — no real TCP, no OS keyring); wired back via `#[cfg(test)] #[path = "auth_tests.rs"] mod tests;` stub at the end of `auth.rs`; module-scope test scaffolding (mocks, helpers) stays in `auth.rs`
 - `src-tauri/src/lib.rs` (auth section, lines ~1–228) — Tauri command layer:
   - `begin_login` — long-lived async command: requests device code, emits `auth://device-code` event, runs poll loop with cancel-token check, runs Xbox chain, persists account with MS refresh token in keyring, returns `AccountMeta`
   - `cancel_login` — fires a oneshot to abort the in-flight `begin_login` poll loop; no-op if not running

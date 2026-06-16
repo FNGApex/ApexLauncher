@@ -11,7 +11,8 @@ Resolves and installs mods from Modrinth or CurseForge into an instance via a sp
 
 ## CLI code
 
-- `src-tauri/src/core/mod_install.rs` — pure planner (`resolve_install`, `InstallPlan`, `PlannedMod`, `ManualMod`, `UnresolvedDep`, `Suggestion`, `IncompatibleWarning`), executor helpers (`build_download_items`, `planned_to_mod_entry`, `merge_mod_entries`, `partition_by_file_name`, `attribute_outcomes`), update helpers (`decide_update`, `apply_swap`, `UpdateAction`, `UpdateModResult`), result types (`AddModResult`, `FailedMod`), page-URL builder (`page_url_for`), internal version fetcher (`fetch_newest_compatible`); 40 unit tests using `MockProvider` (VecDeque-backed) and `MockProviderClient`
+- `src-tauri/src/core/mod_install.rs` (599 lines) — pure planner (`resolve_install`, `InstallPlan`, `PlannedMod`, `ManualMod`, `UnresolvedDep`, `Suggestion`, `IncompatibleWarning`), executor helpers (`build_download_items`, `planned_to_mod_entry`, `merge_mod_entries`, `partition_by_file_name`, `attribute_outcomes`), update helpers (`decide_update`, `apply_swap`, `UpdateAction`, `UpdateModResult`), result types (`AddModResult`, `FailedMod`), page-URL builder (`page_url_for`), internal version fetcher (`fetch_newest_compatible`); ends with a `#[path = "mod_install_tests.rs"] mod tests;` stub
+- `src-tauri/src/core/mod_install_tests.rs` (1164 lines) — 40 unit tests using `MockProvider` (VecDeque-backed) and `MockProviderClient`, wired back into `mod_install.rs` via the `#[path]` stub
 - `src-tauri/src/lib.rs` — Tauri command implementations: `add_mod` (async), `set_mod_enabled`, `remove_mod`, `update_mod` (async); registered in the `tauri::generate_handler!` invocation; slug validated via `validate_slug` at the join site inside `add_mod` and `update_mod`; `set_mod_enabled` and `remove_mod` delegate validation into their `instances` counterparts
 
 ## Docs
