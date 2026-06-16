@@ -365,6 +365,107 @@ pub fn parse_cf_manifest(json: &str) -> Result<CfManifest, ModpackError> {
     })
 }
 
+// ── B3: CurseForge pack planner ──────────────────────────────────────────────
+
+/// A CurseForge file the user must download manually (distribution-disabled,
+/// or lacking a usable hash to verify an automated download).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CfManualFile {
+    /// CurseForge project (mod) id.
+    pub project_id: u64,
+    /// CurseForge file id (specific version of the mod).
+    pub file_id: u64,
+    /// Filename as declared by the resolved file.
+    pub file_name: String,
+    /// Best-effort project page URL (projectID-based; slug-based link is a follow-up).
+    pub page_url: String,
+}
+
+/// The result of [`build_cf_pack_plan`]: items to download, mod entries to record,
+/// files requiring manual download, and files skipped (reserved for future filters).
+#[derive(Debug, Clone)]
+pub struct CfPackPlan {
+    /// Download items ready for the download engine.
+    pub items: Vec<DownloadItem>,
+    /// Mod entries for files that were auto-resolved to a download.
+    pub mods: Vec<ModEntry>,
+    /// Files the user must download manually (no URL, or no usable hash).
+    pub manual: Vec<CfManualFile>,
+    /// Paths/names of files skipped (reserved; currently always empty).
+    pub skipped: Vec<String>,
+}
+
+/// Build a [`CfPackPlan`] from a parsed [`CfManifest`] and its resolved files.
+///
+/// `resolved` pairs each manifest file entry with its [`crate::core::providers::VersionFile`]
+/// resolution (from `CurseForgeProvider::get_file`). `mc_dir` is the absolute path to the
+/// instance's `mc/` directory; every dest resolves under `mc_dir/mods/`.
+///
+/// A manifest file routes to `manual` (not `items`) when the resolved `url` is `None`
+/// (distribution disabled) or no usable `sha1` hash is present (md5-only/hashless files
+/// are not auto-downloaded unverified). Only auto-installed files get a [`ModEntry`].
+///
+/// # Errors
+/// - [`ModpackError::UnsafePath`] — the computed `mods/<fileName>` path is unsafe
+///   (contains `..`, is absolute, or has a drive-letter prefix).
+pub fn build_cf_pack_plan(
+    resolved: &[(CfManifestFile, crate::core::providers::VersionFile)],
+    mc_dir: &Path,
+) -> Result<CfPackPlan, ModpackError> {
+    let mut items: Vec<DownloadItem> = Vec::new();
+    let mut mods: Vec<ModEntry> = Vec::new();
+    let mut manual: Vec<CfManualFile> = Vec::new();
+    let skipped: Vec<String> = Vec::new();
+
+    for (manifest_file, file) in resolved {
+        let rel = format!("mods/{}", file.file_name);
+        validate_relative_path(&rel)?;
+
+        let sha1 = file.hashes.get("sha1");
+
+        match (&file.url, sha1) {
+            (Some(url), Some(hash)) => {
+                let dest = mc_dir.join(&rel);
+
+                items.push(DownloadItem {
+                    url: url.clone(),
+                    dest,
+                    expected_hash: Some(ExpectedHash::Sha1(hash.clone())),
+                    size: file.size,
+                });
+
+                mods.push(ModEntry {
+                    provider: "curseforge".to_string(),
+                    project_id: manifest_file.project_id.to_string(),
+                    version_id: manifest_file.file_id.to_string(),
+                    file_name: file.file_name.clone(),
+                    hashes: file.hashes.clone().into_iter().collect(),
+                    enabled: true,
+                    side: "both".to_string(),
+                });
+            }
+            _ => {
+                manual.push(CfManualFile {
+                    project_id: manifest_file.project_id,
+                    file_id: manifest_file.file_id,
+                    file_name: file.file_name.clone(),
+                    page_url: format!(
+                        "https://www.curseforge.com/projects/{}",
+                        manifest_file.project_id
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(CfPackPlan {
+        items,
+        mods,
+        manual,
+        skipped,
+    })
+}
+
 // ── CP2: Plan builder ─────────────────────────────────────────────────────────
 
 /// The result of [`build_pack_plan`]: items to download, mod entries to record, and
@@ -948,6 +1049,143 @@ mod tests {
         }"#;
         let result = parse_cf_manifest(json);
         assert!(matches!(result, Err(ModpackError::MalformedManifest(_))));
+    }
+
+    // ── B3: build_cf_pack_plan ─────────────────────────────────────────────────
+
+    use crate::core::providers::VersionFile;
+
+    fn cf_manifest_file(project_id: u64, file_id: u64) -> CfManifestFile {
+        CfManifestFile {
+            project_id,
+            file_id,
+            required: true,
+        }
+    }
+
+    fn version_file_with(
+        url: Option<&str>,
+        file_name: &str,
+        hashes: &[(&str, &str)],
+    ) -> VersionFile {
+        VersionFile {
+            url: url.map(|s| s.to_string()),
+            file_name: file_name.to_string(),
+            size: Some(1024),
+            hashes: hashes
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            primary: true,
+        }
+    }
+
+    #[test]
+    fn b3_dest_resolves_under_mc_mods() {
+        let tmp = mc_dir();
+        let resolved = vec![(
+            cf_manifest_file(238222, 4536804),
+            version_file_with(
+                Some("https://edge.forgecdn.net/files/1/2/jei.jar"),
+                "jei.jar",
+                &[("sha1", "aabbcc")],
+            ),
+        )];
+        let plan = build_cf_pack_plan(&resolved, tmp.path()).unwrap();
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].dest, tmp.path().join("mods/jei.jar"));
+    }
+
+    #[test]
+    fn b3_mod_entry_ids_are_project_and_file_id() {
+        let tmp = mc_dir();
+        let resolved = vec![(
+            cf_manifest_file(238222, 4536804),
+            version_file_with(
+                Some("https://edge.forgecdn.net/files/1/2/jei.jar"),
+                "jei.jar",
+                &[("sha1", "aabbcc")],
+            ),
+        )];
+        let plan = build_cf_pack_plan(&resolved, tmp.path()).unwrap();
+        assert_eq!(plan.mods.len(), 1);
+        assert_eq!(plan.mods[0].provider, "curseforge");
+        assert_eq!(plan.mods[0].project_id, "238222");
+        assert_eq!(plan.mods[0].version_id, "4536804");
+        assert!(plan.mods[0].enabled);
+    }
+
+    #[test]
+    fn b3_url_none_routes_to_manual() {
+        let tmp = mc_dir();
+        let resolved = vec![(
+            cf_manifest_file(238222, 4536804),
+            version_file_with(None, "jei.jar", &[("sha1", "aabbcc")]),
+        )];
+        let plan = build_cf_pack_plan(&resolved, tmp.path()).unwrap();
+        assert!(plan.items.is_empty());
+        assert!(plan.mods.is_empty());
+        assert_eq!(plan.manual.len(), 1);
+        assert_eq!(plan.manual[0].project_id, 238222);
+        assert_eq!(plan.manual[0].file_id, 4536804);
+        assert_eq!(
+            plan.manual[0].page_url,
+            "https://www.curseforge.com/projects/238222"
+        );
+    }
+
+    #[test]
+    fn b3_no_sha1_md5_only_routes_to_manual() {
+        let tmp = mc_dir();
+        let resolved = vec![(
+            cf_manifest_file(238222, 4536804),
+            version_file_with(
+                Some("https://edge.forgecdn.net/files/1/2/jei.jar"),
+                "jei.jar",
+                &[("md5", "ddeeff")],
+            ),
+        )];
+        let plan = build_cf_pack_plan(&resolved, tmp.path()).unwrap();
+        assert!(plan.items.is_empty());
+        assert_eq!(plan.manual.len(), 1);
+    }
+
+    #[test]
+    fn b3_manual_file_does_not_abort_other_entries() {
+        let tmp = mc_dir();
+        let resolved = vec![
+            (
+                cf_manifest_file(1, 2),
+                version_file_with(None, "manual-mod.jar", &[("sha1", "aabbcc")]),
+            ),
+            (
+                cf_manifest_file(238222, 4536804),
+                version_file_with(
+                    Some("https://edge.forgecdn.net/files/1/2/jei.jar"),
+                    "jei.jar",
+                    &[("sha1", "aabbcc")],
+                ),
+            ),
+        ];
+        let plan = build_cf_pack_plan(&resolved, tmp.path()).unwrap();
+        assert_eq!(plan.manual.len(), 1);
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.mods.len(), 1);
+    }
+
+    #[test]
+    fn b3_unsafe_filename_returns_error() {
+        let tmp = mc_dir();
+        let resolved = vec![(
+            cf_manifest_file(238222, 4536804),
+            version_file_with(
+                Some("https://edge.forgecdn.net/files/1/2/evil.jar"),
+                "../../etc/passwd",
+                &[("sha1", "aabbcc")],
+            ),
+        )];
+        let result = build_cf_pack_plan(&resolved, tmp.path());
+        assert!(matches!(result, Err(ModpackError::UnsafePath(_))));
     }
 
     // ── CP2: build_pack_plan ──────────────────────────────────────────────────
