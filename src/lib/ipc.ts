@@ -460,6 +460,12 @@ export function logout(): Promise<void> {
 export type ProviderKind = "modrinth" | "curseForge";
 
 /**
+ * Which project class to search for. Mirrors `ProjectType` in `core/providers.rs`.
+ * Serialized as `"mod"` or `"modpack"` over IPC.
+ */
+export type ProjectType = "mod" | "modpack";
+
+/**
  * Condensed summary of a mod project, as returned by `searchMods`.
  * Mirrors `ProjectSummary` in `core/providers.rs`.
  */
@@ -472,6 +478,12 @@ export interface ProjectSummary {
   downloads: number;
   iconUrl: string | null;
   categories: string[];
+  /**
+   * Provider project page URL.
+   * Modrinth: `https://modrinth.com/{project_type}/{slug}`.
+   * CurseForge: `links.websiteUrl` from the search row; `null` when absent.
+   */
+  pageUrl: string | null;
 }
 
 /**
@@ -537,6 +549,7 @@ export interface ProviderCommandError {
  *
  * `provider` accepts `"modrinth"` or `"curseforge"` (lowercase routing strings,
  * distinct from the `ProviderKind` response value casing e.g. `"curseForge"`).
+ * `projectType` selects the content class: `"mod"` (default) or `"modpack"`.
  * Returns a paginated `SearchResult` with `hits`, `offset`, and `total` for
  * infinite scroll. CF key absence surfaces as a rejected promise with
  * `kind: "key_missing"`.
@@ -548,6 +561,7 @@ export function searchMods(
   loader: string | null,
   offset: number,
   limit: number,
+  projectType: ProjectType = "mod",
 ): Promise<SearchResult> {
   return invoke<SearchResult>("search_mods", {
     provider,
@@ -556,6 +570,7 @@ export function searchMods(
     loader,
     offset,
     limit,
+    projectType,
   });
 }
 

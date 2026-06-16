@@ -6,7 +6,7 @@
 //! by a pre-loaded response queue.
 
 use super::*;
-use crate::core::providers::{ProviderError, ProviderHttpClient, SearchParams};
+use crate::core::providers::{ProviderError, ProviderHttpClient, ProjectType, SearchParams};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -97,6 +97,7 @@ fn search_url_includes_query_facets_offset_limit() {
         loader: Some("fabric".to_string()),
         offset: 0,
         limit: 20,
+        project_type: ProjectType::Mod,
     };
     let url = ModrinthProvider::build_search_url(&params);
     assert!(url.contains("query=sodium"), "query missing: {url}");
@@ -126,6 +127,7 @@ fn search_url_no_filters_still_includes_project_type_mod() {
         loader: None,
         offset: 20,
         limit: 10,
+        project_type: ProjectType::Mod,
     };
     let url = ModrinthProvider::build_search_url(&params);
     let decoded = percent_decode(&url);
@@ -170,6 +172,7 @@ async fn search_returns_correct_project_summary_count_and_fields() {
         loader: Some("fabric".to_string()),
         offset: 0,
         limit: 20,
+        project_type: ProjectType::Mod,
     };
 
     let result = provider.search(&client, &params).await.unwrap();
@@ -198,6 +201,7 @@ async fn search_request_url_contains_facets_query_offset_limit() {
         loader: Some("fabric".to_string()),
         offset: 0,
         limit: 20,
+        project_type: ProjectType::Mod,
     };
 
     provider.search(&client, &params).await.unwrap();
@@ -237,6 +241,7 @@ async fn search_request_carries_user_agent_header() {
         loader: None,
         offset: 0,
         limit: 10,
+        project_type: ProjectType::Mod,
     };
 
     provider.search(&client, &params).await.unwrap();
@@ -259,6 +264,7 @@ async fn search_returns_provider_error_on_non_200() {
         loader: None,
         offset: 0,
         limit: 10,
+        project_type: ProjectType::Mod,
     };
 
     let err = provider.search(&client, &params).await.unwrap_err();
@@ -415,5 +421,106 @@ async fn get_versions_returns_provider_error_on_non_200() {
         matches!(err, ProviderError::HttpStatus { status: 404, .. }),
         "expected HttpStatus(404), got {:?}",
         err
+    );
+}
+
+// ── project_type selector: facet switching ────────────────────────────────
+
+#[test]
+fn search_url_with_project_type_mod_includes_mod_facet() {
+    let params = SearchParams {
+        query: "sodium".to_string(),
+        mc_version: None,
+        loader: None,
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Mod,
+    };
+    let url = ModrinthProvider::build_search_url(&params);
+    let decoded = percent_decode(&url);
+    assert!(
+        decoded.contains("project_type:mod"),
+        "project_type:mod facet missing: {decoded}"
+    );
+    assert!(
+        !decoded.contains("project_type:modpack"),
+        "project_type:modpack should not appear: {decoded}"
+    );
+}
+
+#[test]
+fn search_url_with_project_type_modpack_includes_modpack_facet() {
+    let params = SearchParams {
+        query: "all the mods".to_string(),
+        mc_version: None,
+        loader: None,
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = ModrinthProvider::build_search_url(&params);
+    let decoded = percent_decode(&url);
+    assert!(
+        decoded.contains("project_type:modpack"),
+        "project_type:modpack facet missing: {decoded}"
+    );
+    assert!(
+        !decoded.contains("project_type:mod\""),
+        "project_type:mod should not appear when modpack selected: {decoded}"
+    );
+}
+
+// ── page_url: populated from hit's project_type + slug ────────────────────
+
+#[tokio::test]
+async fn search_populates_page_url_for_mod_hits() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_SEARCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+    let params = SearchParams {
+        query: "sodium".to_string(),
+        mc_version: None,
+        loader: None,
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Mod,
+    };
+
+    let result = provider.search(&client, &params).await.unwrap();
+    let sodium = &result.hits[0];
+
+    // Fixture hit has project_type: "mod" and slug: "sodium"
+    assert_eq!(
+        sodium.page_url,
+        Some("https://modrinth.com/mod/sodium".to_string()),
+        "page_url mismatch: {:?}",
+        sodium.page_url
+    );
+}
+
+#[tokio::test]
+async fn search_populates_page_url_using_response_project_type_not_selector() {
+    // The fixture hits have project_type: "mod" in the response.
+    // Even if the selector param says "modpack", the page_url is derived from
+    // the actual hit's project_type field (response-driven, not selector-driven).
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_SEARCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+    let params = SearchParams {
+        query: "sodium".to_string(),
+        mc_version: None,
+        loader: None,
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+
+    let result = provider.search(&client, &params).await.unwrap();
+    let sodium = &result.hits[0];
+
+    // Response project_type is "mod" → page_url must use "mod" segment
+    assert_eq!(
+        sodium.page_url,
+        Some("https://modrinth.com/mod/sodium".to_string()),
+        "page_url must derive from response project_type, not selector: {:?}",
+        sodium.page_url
     );
 }

@@ -14,8 +14,8 @@
 use serde::Deserialize;
 
 use crate::core::providers::{
-    Dependency, ModProvider, MrSearchResponse, ProjectVersion, ProviderError, ProviderHttpClient,
-    ProviderKind, SearchParams, SearchResult, VersionFile,
+    Dependency, ModProvider, MrSearchResponse, ProjectType, ProjectVersion, ProviderError,
+    ProviderHttpClient, ProviderKind, SearchParams, SearchResult, VersionFile,
 };
 
 // ── Percent-encoding helper ────────────────────────────────────────────────────
@@ -161,9 +161,13 @@ impl ModrinthProvider {
     /// Build the Modrinth `/search` URL from `SearchParams`.
     ///
     /// Facets are encoded as a JSON array-of-arrays as required by the Modrinth API.
-    /// `project_type:mod` is always included so resource packs and modpacks are excluded.
+    /// The `project_type` facet is derived from `params.project_type`.
     fn build_search_url(params: &SearchParams) -> String {
-        let mut facets: Vec<String> = vec![r#"["project_type:mod"]"#.to_string()];
+        let project_type_str = match params.project_type {
+            ProjectType::Mod => "mod",
+            ProjectType::Modpack => "modpack",
+        };
+        let mut facets: Vec<String> = vec![format!(r#"["project_type:{}"]"#, project_type_str)];
 
         if let Some(mc) = &params.mc_version {
             facets.push(format!(r#"["versions:{}"]"#, mc));

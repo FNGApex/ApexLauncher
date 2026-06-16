@@ -67,6 +67,12 @@ pub struct ProjectSummary {
     pub icon_url: Option<String>,
     /// Category tags (normalized to lowercase strings).
     pub categories: Vec<String>,
+    /// Provider project page URL, if available.
+    ///
+    /// Modrinth: `https://modrinth.com/{project_type}/{slug}` (derived from the response hit's
+    /// `project_type` field, not the search selector).
+    /// CurseForge: `links.websiteUrl` from the search row verbatim; `None` when absent/null.
+    pub page_url: Option<String>,
 }
 
 /// A specific release of a mod project.
@@ -122,6 +128,23 @@ pub struct Dependency {
     pub dependency_type: String,
 }
 
+/// Which class of projects to search for.
+///
+/// Maps to provider-specific selectors:
+/// - Modrinth: `project_type` facet (`"mod"` or `"modpack"`).
+/// - CurseForge: `classId` query param (`6` for mods, `4471` for modpacks).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectType {
+    /// Standard mods (default).
+    #[default]
+    #[serde(rename = "mod")]
+    Mod,
+    /// Modpacks.
+    #[serde(rename = "modpack")]
+    Modpack,
+}
+
 /// Query parameters for searching mods.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,6 +159,9 @@ pub struct SearchParams {
     pub offset: u32,
     /// Maximum number of results to return.
     pub limit: u32,
+    /// Which project class to search (mod or modpack). Defaults to `Mod`.
+    #[serde(default)]
+    pub project_type: ProjectType,
 }
 
 /// Paginated search response.
@@ -274,10 +300,16 @@ pub struct MrHit {
     pub categories: Vec<String>,
     pub downloads: u64,
     pub icon_url: Option<String>,
+    /// Modrinth project type string (e.g. `"mod"`, `"modpack"`). Used to build `page_url`.
+    pub project_type: String,
 }
 
 impl MrHit {
     pub fn into_summary(self) -> ProjectSummary {
+        let page_url = Some(format!(
+            "https://modrinth.com/{}/{}",
+            self.project_type, self.slug
+        ));
         ProjectSummary {
             provider: ProviderKind::Modrinth,
             id: self.project_id,
@@ -287,6 +319,7 @@ impl MrHit {
             downloads: self.downloads,
             icon_url: self.icon_url,
             categories: self.categories,
+            page_url,
         }
     }
 }
@@ -310,6 +343,8 @@ pub struct CfMod {
     pub download_count: u64,
     pub logo: Option<CfLogo>,
     pub categories: Vec<CfCategory>,
+    /// CF search row links block — `websiteUrl` is used for `page_url`.
+    pub links: Option<CfLinks>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -322,6 +357,13 @@ pub struct CfCategory {
     pub name: String,
 }
 
+/// Links block from a CF search row.
+#[derive(Debug, Deserialize)]
+pub struct CfLinks {
+    #[serde(rename = "websiteUrl")]
+    pub website_url: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CfPagination {
     pub index: u32,
@@ -331,6 +373,7 @@ pub struct CfPagination {
 
 impl CfMod {
     pub fn into_summary(self) -> ProjectSummary {
+        let page_url = self.links.and_then(|l| l.website_url);
         ProjectSummary {
             provider: ProviderKind::CurseForge,
             id: self.id.to_string(),
@@ -340,6 +383,7 @@ impl CfMod {
             downloads: self.download_count,
             icon_url: self.logo.map(|l| l.url),
             categories: self.categories.into_iter().map(|c| c.name).collect(),
+            page_url,
         }
     }
 }

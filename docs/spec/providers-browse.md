@@ -11,7 +11,7 @@ scroll, inspect versions. Installation is slice B.
 
 - Mod install, dependency resolution, enable/disable/update (slice B / `docs/spec/mod-install.md`).
 - Modpack import (`.mrpack`, CF zip) — Phase 6.
-- Resource packs, shaders, datapacks (`classId` / `project_type` locked to mods).
+- Resource packs, shaders, datapacks (other `classId` / `project_type` values).
 - Jar fingerprint reconciliation of manually added mods (Murmur2 / sha512 lookup).
 - Provider account auth (CF/Modrinth user accounts).
 - Disk-caching of search results (TanStack Query's 30 s `staleTime` is sufficient; rate-limit
@@ -19,33 +19,40 @@ scroll, inspect versions. Installation is slice B.
 
 ## Success criteria
 
-- [ ] `ModProvider` trait compiles; both Modrinth and CurseForge implementations satisfy it
+- [x] `ModProvider` trait compiles; both Modrinth and CurseForge implementations satisfy it
       with a mock-injectable HTTP seam (same async_trait pattern as `AuthHttpClient`,
       `auth.rs:226`).
-- [ ] `search_mods` Tauri command returns a `SearchResult` (hits: `Vec<ProjectSummary>`,
-      plus `offset`/`total` for the pagination contract) for Modrinth (no key) and
-      CurseForge (key present), passing the query, MC version, loader, offset, and limit
-      parameters through to the respective APIs.
-- [ ] `get_mod_versions` Tauri command returns `Vec<ProjectVersion>` filtered to versions
+- [x] `search_mods` Tauri command accepts an optional `project_type` selector (`"mod"` |
+      `"modpack"`, default `"mod"`); Modrinth uses `project_type:<value>` facet, CurseForge
+      uses `classId` `6` (mod) or `4471` (modpack). Existing mod searches unchanged when the
+      selector is omitted or set to `"mod"`.
+- [x] `ProjectSummary` carries `page_url` (IPC camelCase `pageUrl`): Modrinth =
+      `https://modrinth.com/{project_type}/{slug}` (derived from the response hit's
+      `project_type` field, not the selector); CurseForge = `links.websiteUrl` verbatim;
+      `Option` — `null` when absent.
+- [x] `get_mod_versions` Tauri command returns `Vec<ProjectVersion>` filtered to versions
       compatible with the supplied MC version + loader.
-- [ ] CF `downloadUrl: null` maps to `VersionFile.url = None` (not an error); the field is
+- [x] CF `downloadUrl: null` maps to `VersionFile.url = None` (not an error); the field is
       serialized to the frontend as `null`.
-- [ ] CF key absent: `search_mods` for the `curseforge` provider returns a
+- [x] CF key absent: `search_mods` for the `curseforge` provider returns a
       `ProviderCommandError { kind: "key_missing", … }` rather than a panic or an
       untyped string error.
-- [ ] All new Rust tests pass under `cargo test`; no live HTTP calls in any test (all
+- [x] All new Rust tests pass under `cargo test`; no live HTTP calls in any test (all
       responses fixture-backed via the injectable seam).
-- [ ] `cargo check` produces 0 errors.
-- [ ] `npm run build` (tsc + vite) passes with 0 type errors after `ipc.ts` is updated.
+- [x] `cargo check` produces 0 errors.
+- [x] `ipc.ts` mirrors new param (`projectType: ProjectType = "mod"` on `searchMods`) and
+      new field (`pageUrl: string | null` on `ProjectSummary`); existing callers still
+      typecheck (new param has a default).
 - [ ] Browse page: typing in the search box fires a debounced (≥ 300 ms; 400 ms target per
-      design) query; results
-      render as cards; infinite scroll loads the next page on scroll-to-bottom.
+      design) query; results render as cards; infinite scroll loads the next page on
+      scroll-to-bottom.
 - [ ] Browse page: MC version + loader facet selectors are visible and wired to the query
       parameters.
-- [ ] Browse page: "All" tab renders two side-by-side columns (one per provider) with
-      independent pagination; "Modrinth" and "CurseForge" tabs show a single provider column.
-- [ ] Browse page: when CF key is absent, the CurseForge column/tab shows a "API key
-      required" state (not a crash, not an empty list with no explanation).
+- [ ] Browse page: shows unified modpack feed (downloads-desc merge of both providers,
+      provider-badged cards, click opens `pageUrl` in system browser; no add-to-instance
+      modal). `project_type = "modpack"` passed to both `searchMods` calls.
+- [ ] Browse page: when CF key is absent, CF results are hidden with an inline notice;
+      Modrinth results still render.
 
 ## Approaches
 
@@ -95,6 +102,31 @@ live there. B forks normalization; C leaks the key. Full rationale and sub-decis
 ## Change log
 
 <!-- new entries prepended below this line: ### YYYY-MM-DD — <title> -->
+
+### 2026-06-16 — project-type selector + `page_url` on `ProjectSummary`
+
+**What changed:**
+- `search_mods` Tauri command gains an optional `project_type: Option<ProjectType>` parameter
+  (default `"mod"`). Modrinth maps it to the `project_type` facet; CurseForge maps it to
+  `classId` (`6` for mod, `4471` for modpack).
+- `ProjectSummary` gains a `page_url: Option<String>` field (IPC `pageUrl`). Modrinth
+  populates it from `https://modrinth.com/{response_hit.project_type}/{slug}`. CurseForge
+  populates it from `links.websiteUrl` in the search row; `None` when absent/null.
+- `ProjectType` enum (`Mod | Modpack`) added to `core/providers.rs`; `#[derive(Default)]`
+  defaults to `Mod`.
+- `MrHit` deserialization struct gains `project_type: String`; `CfMod` gains `links:
+  Option<CfLinks>` / `CfLinks.website_url`.
+- `ipc.ts`: `ProjectType` type alias added; `searchMods` signature adds
+  `projectType: ProjectType = "mod"` (optional, back-compat for existing callers); `pageUrl:
+  string | null` added to `ProjectSummary` interface.
+- Success criteria updated to reflect the new contract and mark shipped items.
+
+**Why:** CP1 of the UI/modpack-rework spec (ui-modpack-rework.md). Browse becomes a unified
+modpack discovery feed; the provider layer needs to switch facets/classId per project type,
+and cards need a `page_url` to open in the system browser.
+
+**Superseded:** `classId` and Modrinth `project_type` facet were hardcoded to mods only.
+`ProjectSummary` had no `page_url` field.
 
 ### 2026-06-11 — search_mods returns SearchResult, not bare Vec
 

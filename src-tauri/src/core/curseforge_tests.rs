@@ -6,7 +6,7 @@
 //! pre-loaded response queue — same pattern as `modrinth.rs`.
 
 use super::*;
-use crate::core::providers::{ProviderError, ProviderHttpClient, SearchParams};
+use crate::core::providers::{ProviderError, ProviderHttpClient, ProjectType, SearchParams};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -223,6 +223,7 @@ async fn search_key_absent_returns_key_missing_without_http() {
         loader: None,
         offset: 0,
         limit: 20,
+        project_type: ProjectType::default(),
     };
 
     let err = provider.search(&client, &params).await.unwrap_err();
@@ -269,6 +270,7 @@ async fn search_carries_api_key_header() {
         loader: None,
         offset: 0,
         limit: 20,
+        project_type: ProjectType::default(),
     };
 
     provider.search(&client, &params).await.unwrap();
@@ -311,6 +313,7 @@ async fn search_maps_fixture_to_project_summaries() {
         loader: None,
         offset: 0,
         limit: 20,
+        project_type: ProjectType::default(),
     };
 
     let result = provider.search(&client, &params).await.unwrap();
@@ -348,6 +351,7 @@ async fn search_url_contains_gameid_classid_index_pagesize() {
         loader: Some("forge".to_string()),
         offset: 20,
         limit: 10,
+        project_type: ProjectType::Mod,
     };
 
     provider.search(&client, &params).await.unwrap();
@@ -679,6 +683,7 @@ async fn search_returns_http_error_on_403() {
         loader: None,
         offset: 0,
         limit: 10,
+        project_type: ProjectType::default(),
     };
 
     let err = provider.search(&client, &params).await.unwrap_err();
@@ -686,5 +691,121 @@ async fn search_returns_http_error_on_403() {
         matches!(err, ProviderError::HttpStatus { status: 403, .. }),
         "expected HttpStatus(403), got {:?}",
         err
+    );
+}
+
+// ── project_type selector: classId switching ──────────────────────────────
+
+#[tokio::test]
+async fn search_url_with_project_type_mod_uses_class_id_6() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_SEARCH_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+    let params = SearchParams {
+        query: "jei".to_string(),
+        mc_version: None,
+        loader: None,
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Mod,
+    };
+
+    provider.search(&client, &params).await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert!(
+        urls[0].contains("classId=6"),
+        "classId=6 (mods) expected for ProjectType::Mod: {}",
+        urls[0]
+    );
+}
+
+#[tokio::test]
+async fn search_url_with_project_type_modpack_uses_class_id_4471() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_SEARCH_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+    let params = SearchParams {
+        query: "all the mods".to_string(),
+        mc_version: None,
+        loader: None,
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+
+    provider.search(&client, &params).await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert!(
+        urls[0].contains("classId=4471"),
+        "classId=4471 (modpacks) expected for ProjectType::Modpack: {}",
+        urls[0]
+    );
+    assert!(
+        !urls[0].contains("classId=6"),
+        "classId=6 must not appear for modpack: {}",
+        urls[0]
+    );
+}
+
+// ── page_url: populated from links.websiteUrl ─────────────────────────────
+
+#[tokio::test]
+async fn search_populates_page_url_from_links_website_url() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_SEARCH_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+    let params = SearchParams {
+        query: "jei".to_string(),
+        mc_version: None,
+        loader: None,
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Mod,
+    };
+
+    let result = provider.search(&client, &params).await.unwrap();
+    let jei = &result.hits[0];
+
+    assert_eq!(
+        jei.page_url,
+        Some("https://www.curseforge.com/minecraft/mc-mods/jei".to_string()),
+        "page_url should come from links.websiteUrl: {:?}",
+        jei.page_url
+    );
+}
+
+#[tokio::test]
+async fn search_page_url_none_when_website_url_absent() {
+    // Build a fixture without links.websiteUrl (or with null websiteUrl).
+    let fixture = r#"{
+        "data": [{
+            "id": 99999,
+            "name": "No Links Mod",
+            "slug": "no-links-mod",
+            "summary": "A mod with no links.",
+            "downloadCount": 100,
+            "logo": null,
+            "categories": [],
+            "links": { "websiteUrl": null, "wikiUrl": null, "issuesUrl": null, "sourceUrl": null }
+        }],
+        "pagination": { "index": 0, "pageSize": 20, "resultCount": 1, "totalCount": 1 }
+    }"#;
+    let client = CapturingMockClient::new(vec![MockResp::ok(fixture)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: None,
+        loader: None,
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Mod,
+    };
+
+    let result = provider.search(&client, &params).await.unwrap();
+    let hit = &result.hits[0];
+
+    assert!(
+        hit.page_url.is_none(),
+        "page_url should be None when websiteUrl is null: {:?}",
+        hit.page_url
     );
 }

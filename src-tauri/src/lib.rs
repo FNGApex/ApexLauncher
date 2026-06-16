@@ -20,8 +20,8 @@ use core::mod_install::{AddModResult, UpdateModResult};
 use core::modpack;
 use core::modrinth::ModrinthProvider;
 use core::providers::{
-    self, cf_api_key_from, ModProvider, ProviderError, ReqwestProviderClient, SearchParams,
-    SearchResult, ProjectVersion,
+    self, cf_api_key_from, ModProvider, ProjectType, ProviderError, ReqwestProviderClient,
+    SearchParams, SearchResult, ProjectVersion,
 };
 use core::settings::{self, Settings};
 use core::versions::{self, McVersion};
@@ -726,6 +726,7 @@ fn unknown_provider_err(other: &str) -> ProviderCommandError {
 /// `provider` must be `"modrinth"` or `"curseforge"` (case-sensitive).
 /// Unknown provider strings return a typed `unknown_provider` error rather than panicking.
 /// The CF key is resolved from `MODLOADER_CF_API_KEY` env or `settings.curseforge_api_key`.
+/// `project_type` selects the content class: `"mod"` (default) or `"modpack"`.
 #[tauri::command]
 async fn search_mods(
     app: tauri::AppHandle,
@@ -735,8 +736,16 @@ async fn search_mods(
     loader: Option<String>,
     offset: u32,
     limit: u32,
+    project_type: Option<ProjectType>,
 ) -> Result<SearchResult, ProviderCommandError> {
-    let params = SearchParams { query, mc_version, loader, offset, limit };
+    let params = SearchParams {
+        query,
+        mc_version,
+        loader,
+        offset,
+        limit,
+        project_type: project_type.unwrap_or_default(),
+    };
     let http = ReqwestProviderClient(reqwest::Client::new());
 
     match provider.as_str() {

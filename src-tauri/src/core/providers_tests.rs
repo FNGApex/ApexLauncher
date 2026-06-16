@@ -233,6 +233,7 @@ fn project_summary_serializes_to_camel_case() {
         downloads: 1_000_000,
         icon_url: Some("https://example.com/icon.png".to_string()),
         categories: vec!["optimization".to_string()],
+        page_url: Some("https://modrinth.com/mod/sodium".to_string()),
     };
     let json = serde_json::to_value(&summary).unwrap();
     assert!(json.get("iconUrl").is_some(), "iconUrl key missing");
@@ -268,6 +269,7 @@ fn search_params_serializes_to_camel_case() {
         loader: Some("fabric".to_string()),
         offset: 0,
         limit: 20,
+        project_type: ProjectType::default(),
     };
     let json = serde_json::to_value(&params).unwrap();
     assert!(json.get("mcVersion").is_some(), "mcVersion key missing");
@@ -319,4 +321,79 @@ fn provider_error_http_status_display() {
         body: "Forbidden".to_string(),
     };
     assert!(err.to_string().contains("403"));
+}
+
+// ── ProjectType enum + SearchParams.project_type ─────────────────────────
+
+#[test]
+fn project_type_default_is_mod() {
+    let pt = ProjectType::default();
+    assert!(matches!(pt, ProjectType::Mod));
+}
+
+#[test]
+fn project_type_mod_serializes_to_camel_case_string() {
+    let pt = ProjectType::Mod;
+    let json = serde_json::to_value(&pt).unwrap();
+    assert_eq!(json.as_str().unwrap(), "mod");
+}
+
+#[test]
+fn project_type_modpack_serializes_to_camel_case_string() {
+    let pt = ProjectType::Modpack;
+    let json = serde_json::to_value(&pt).unwrap();
+    assert_eq!(json.as_str().unwrap(), "modpack");
+}
+
+#[test]
+fn search_params_with_project_type_serializes_to_camel_case() {
+    let params = SearchParams {
+        query: "sodium".to_string(),
+        mc_version: None,
+        loader: None,
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let json = serde_json::to_value(&params).unwrap();
+    assert_eq!(json.get("projectType").and_then(|v| v.as_str()), Some("modpack"));
+    assert!(json.get("project_type").is_none(), "snake_case key must not appear");
+}
+
+#[test]
+fn project_summary_page_url_serializes_to_camel_case() {
+    let summary = ProjectSummary {
+        provider: ProviderKind::Modrinth,
+        id: "AANobbMI".to_string(),
+        slug: "sodium".to_string(),
+        name: "Sodium".to_string(),
+        summary: "A rendering engine".to_string(),
+        downloads: 1_000_000,
+        icon_url: Some("https://example.com/icon.png".to_string()),
+        categories: vec!["optimization".to_string()],
+        page_url: Some("https://modrinth.com/mod/sodium".to_string()),
+    };
+    let json = serde_json::to_value(&summary).unwrap();
+    assert_eq!(
+        json.get("pageUrl").and_then(|v| v.as_str()),
+        Some("https://modrinth.com/mod/sodium")
+    );
+    assert!(json.get("page_url").is_none(), "snake_case key must not appear");
+}
+
+#[test]
+fn project_summary_page_url_null_when_none() {
+    let summary = ProjectSummary {
+        provider: ProviderKind::CurseForge,
+        id: "238222".to_string(),
+        slug: "jei".to_string(),
+        name: "JEI".to_string(),
+        summary: "".to_string(),
+        downloads: 0,
+        icon_url: None,
+        categories: vec![],
+        page_url: None,
+    };
+    let json = serde_json::to_value(&summary).unwrap();
+    assert_eq!(json.get("pageUrl").unwrap(), &serde_json::Value::Null);
 }

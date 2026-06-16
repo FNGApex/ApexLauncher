@@ -16,7 +16,7 @@
 
 use modloader_lib::core::curseforge::CurseForgeProvider;
 use modloader_lib::core::providers::{
-    cf_api_key_from, ModProvider, ReqwestProviderClient, SearchParams,
+    cf_api_key_from, ModProvider, ProjectType, ReqwestProviderClient, SearchParams,
 };
 
 /// Read `MODLOADER_CF_API_KEY` out of a gitignored `.env` file at the repo root.
@@ -80,6 +80,7 @@ async fn cf_live_search_returns_results() {
         loader: None,
         offset: 0,
         limit: 10,
+        project_type: ProjectType::Mod,
     };
 
     let result = provider

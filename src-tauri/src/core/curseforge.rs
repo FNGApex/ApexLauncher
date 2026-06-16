@@ -22,7 +22,7 @@
 use serde::Deserialize;
 
 use crate::core::providers::{
-    Dependency, ModProvider, ProjectVersion, ProviderError, ProviderHttpClient,
+    Dependency, ModProvider, ProjectType, ProjectVersion, ProviderError, ProviderHttpClient,
     ProviderKind, SearchParams, SearchResult, VersionFile,
 };
 
@@ -35,6 +35,9 @@ const MINECRAFT_GAME_ID: u32 = 432;
 
 /// CF class ID for mods.
 const MODS_CLASS_ID: u32 = 6;
+
+/// CF class ID for modpacks.
+const MODPACKS_CLASS_ID: u32 = 4471;
 
 /// CF `ModsSearchSortField` value for Popularity. Used as the default search
 /// sort so a text query surfaces well-known mods (CF returns an arbitrary order
@@ -266,11 +269,15 @@ impl CurseForgeProvider {
 
     /// Build the CF `/v1/mods/search` URL from `SearchParams`.
     fn build_search_url(params: &SearchParams) -> String {
+        let class_id = match params.project_type {
+            ProjectType::Mod => MODS_CLASS_ID,
+            ProjectType::Modpack => MODPACKS_CLASS_ID,
+        };
         let mut url = format!(
             "{}/v1/mods/search?gameId={}&classId={}&index={}&pageSize={}&sortField={}&sortOrder=desc",
             BASE_URL,
             MINECRAFT_GAME_ID,
-            MODS_CLASS_ID,
+            class_id,
             params.offset,
             params.limit,
             SORT_FIELD_POPULARITY,
