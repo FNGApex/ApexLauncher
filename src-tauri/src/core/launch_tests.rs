@@ -990,6 +990,8 @@ fn make_identity_meta() -> LaunchMeta {
             "--userType",
             "${user_type}",
             "--clientId",
+            "${clientid}",
+            "--xuid",
             "${auth_xuid}",
         ],
         vec!["/data/versions/1.21.1/1.21.1.jar"],
@@ -1010,6 +1012,7 @@ fn cp4_online_identity_in_argv() {
         access_token: "real_mc_token_xyz".to_string(),
         xuid: "xuid_online_999".to_string(),
         user_type: "msa".to_string(),
+        client_id: "azure_client_xyz".to_string(),
     };
 
     let argv = build_argv(&meta, &paths, &identity).expect("no unresolved placeholders");
@@ -1081,6 +1084,7 @@ fn cp4_auth_xuid_placeholder_is_substituted() {
         access_token: "tok".to_string(),
         xuid: "xuid_check_123".to_string(),
         user_type: "msa".to_string(),
+        client_id: "client_check_456".to_string(),
     };
 
     let argv = build_argv(&meta, &paths, &identity).expect("no error");
@@ -1095,6 +1099,39 @@ fn cp4_auth_xuid_placeholder_is_substituted() {
     assert!(
         argv.iter().any(|a| a.contains("xuid_check_123")),
         "xuid must be substituted into argv: {argv:?}"
+    );
+}
+
+/// ${clientid} (the `--clientId` telemetry arg in MS-auth version JSONs) must be
+/// in the substitution table. Regression: a real modern manifest emits
+/// `--clientId ${clientid}` and argv assembly failed with an unsubstituted
+/// placeholder because the table only had ${auth_xuid}.
+#[test]
+fn cp4_clientid_placeholder_is_substituted() {
+    let meta = make_identity_meta();
+    let paths = make_paths();
+
+    let identity = LaunchIdentity {
+        player_name: "AnyPlayer".to_string(),
+        uuid: "aaaabbbb-0000-0000-0000-ccccddddeeee".to_string(),
+        access_token: "tok".to_string(),
+        xuid: "xuid_1".to_string(),
+        user_type: "msa".to_string(),
+        client_id: "client_id_value_789".to_string(),
+    };
+
+    let argv = build_argv(&meta, &paths, &identity).expect("no error");
+    // No raw placeholder must survive.
+    for arg in &argv {
+        assert!(
+            !arg.contains("${clientid}"),
+            "raw ${{clientid}} must not appear in argv: {arg}"
+        );
+    }
+    // The client_id value must appear.
+    assert!(
+        argv.iter().any(|a| a.contains("client_id_value_789")),
+        "client_id must be substituted into argv: {argv:?}"
     );
 }
 

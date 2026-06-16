@@ -110,6 +110,9 @@ pub struct LaunchIdentity {
     pub xuid: String,
     /// Auth user type, e.g. `"msa"`.
     pub user_type: String,
+    /// MSA application client ID, substituted into `${clientid}` (the
+    /// `--clientId` telemetry arg in MS-auth version JSONs). Empty for offline.
+    pub client_id: String,
 }
 
 impl LaunchIdentity {
@@ -121,6 +124,7 @@ impl LaunchIdentity {
             access_token: "0".to_string(),
             xuid: "0".to_string(),
             user_type: "msa".to_string(),
+            client_id: String::new(),
         }
     }
 }
@@ -181,6 +185,7 @@ pub async fn resolve_launch_identity(
         access_token: account.mc_access_token,
         xuid: account.xuid,
         user_type: "msa".to_string(),
+        client_id: crate::core::auth::ms_client_id(),
     })
 }
 
@@ -248,6 +253,9 @@ pub fn build_argv(launch: &LaunchMeta, paths: &LaunchPaths, identity: &LaunchIde
         ("${auth_uuid}", identity.uuid.clone()),
         ("${auth_access_token}", identity.access_token.clone()),
         ("${auth_xuid}", identity.xuid.clone()),
+        // ${clientid} = MSA application client ID (the `--clientId` telemetry arg
+        // in MS-auth version JSONs). Empty for offline identities.
+        ("${clientid}", identity.client_id.clone()),
         ("${user_type}", identity.user_type.clone()),
         // ${path} for log4j config — handled specially below (omitted when None).
     ];
