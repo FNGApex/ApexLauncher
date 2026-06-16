@@ -49,9 +49,16 @@ pub enum ModpackError {
     #[error("override entry '{0}' would escape the target directory (zip-slip)")]
     ZipSlip(String),
 
-    /// The `modrinth.index.json` entry was not found inside the archive.
-    #[error("modrinth.index.json not found in archive")]
+    /// The pack index/manifest entry (`modrinth.index.json` or CF `manifest.json`)
+    /// was not found inside the archive.
+    #[error("pack index/manifest not found in archive")]
     IndexNotFound,
+
+    /// The CurseForge API key is not configured — no pack file can be resolved,
+    /// so the whole import aborts rather than producing a pack full of "manual"
+    /// entries that hide a config problem.
+    #[error("CurseForge API key is not configured — cannot resolve pack files")]
+    ResolverKeyMissing,
 
     /// An I/O error occurred during overrides extraction.
     #[error("I/O error during overrides extraction: {0}")]
@@ -381,6 +388,19 @@ pub struct CfManualFile {
     pub page_url: String,
 }
 
+/// A CurseForge `files[]` entry whose resolution (`get_file`) itself failed
+/// (network error, non-2xx HTTP status, or unparseable response) — distinct
+/// from a successfully-resolved file with no usable URL/hash (`CfManualFile`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CfResolveFailure {
+    /// CurseForge project (mod) id.
+    pub project_id: u64,
+    /// CurseForge file id (specific version of the mod).
+    pub file_id: u64,
+    /// Human-readable reason the resolution failed.
+    pub reason: String,
+}
+
 /// The result of [`build_cf_pack_plan`]: items to download, mod entries to record,
 /// files requiring manual download, and files skipped (reserved for future filters).
 #[derive(Debug, Clone)]
@@ -393,6 +413,10 @@ pub struct CfPackPlan {
     pub manual: Vec<CfManualFile>,
     /// Paths/names of files skipped (reserved; currently always empty).
     pub skipped: Vec<String>,
+    /// Entries whose `get_file` resolution itself failed (network/HTTP/JSON
+    /// error) — counted as `failed`, not `manual`. Always empty when produced
+    /// directly by [`build_cf_pack_plan`]; populated by [`resolve_and_build_cf_plan`].
+    pub failed: Vec<CfResolveFailure>,
 }
 
 /// Build a [`CfPackPlan`] from a parsed [`CfManifest`] and its resolved files.
@@ -463,7 +487,88 @@ pub fn build_cf_pack_plan(
         mods,
         manual,
         skipped,
+        failed: Vec::new(),
     })
+}
+
+// ── B4: CF file resolution + zip read (testable seam) ─────────────────────────
+
+/// Resolve every `files[]` entry in `manifest` via `CurseForgeProvider::get_file`,
+/// then build the [`CfPackPlan`].
+///
+/// This is the seam the `import_curseforge_zip` Tauri command calls; it takes an
+/// injectable [`crate::core::providers::ProviderHttpClient`] so tests can drive it
+/// with a mock client (canned responses) — no live network. Resolution is
+/// per-entry (slice B: single-file GET, no batch endpoint).
+///
+/// `get_file` errors are branched by kind:
+/// - [`crate::core::providers::ProviderError::KeyMissing`] — no CF API key configured;
+///   no file can possibly resolve, so the whole import aborts with `Err` rather than
+///   silently producing a pack full of "manual" entries that hide a config problem.
+/// - Network / HTTP-status / JSON-decode errors — a genuine resolution failure for
+///   that one entry; recorded in [`CfPackPlan::failed`] (not `manual`) so the rest of
+///   the pack still installs.
+///
+/// A successfully-resolved file with `url: None` or no usable hash still routes to
+/// `manual` via [`build_cf_pack_plan`] (distribution-disabled or hashless — the user
+/// must download it themselves; this is not an error).
+pub async fn resolve_and_build_cf_plan(
+    provider: &crate::core::curseforge::CurseForgeProvider,
+    client: &dyn crate::core::providers::ProviderHttpClient,
+    manifest: &CfManifest,
+    mc_dir: &Path,
+) -> Result<CfPackPlan, ModpackError> {
+    let mut resolved: Vec<(CfManifestFile, crate::core::providers::VersionFile)> = Vec::new();
+    let mut failed: Vec<CfResolveFailure> = Vec::new();
+
+    for entry in &manifest.files {
+        match provider
+            .get_file(client, entry.project_id as u32, entry.file_id as u32)
+            .await
+        {
+            Ok(file) => resolved.push((entry.clone(), file)),
+            Err(crate::core::providers::ProviderError::KeyMissing) => {
+                return Err(ModpackError::ResolverKeyMissing);
+            }
+            Err(e) => failed.push(CfResolveFailure {
+                project_id: entry.project_id,
+                file_id: entry.file_id,
+                reason: e.to_string(),
+            }),
+        }
+    }
+
+    let mut plan = build_cf_pack_plan(&resolved, mc_dir)?;
+    plan.failed = failed;
+    Ok(plan)
+}
+
+/// Open a CurseForge pack `.zip` from raw bytes and parse its `manifest.json`.
+///
+/// Pure (no network); the in-memory analog of `read_mrpack`'s index read. The
+/// caller resolves files (network) separately via [`resolve_and_build_cf_plan`],
+/// then re-opens the same bytes for `extract_overrides`.
+///
+/// # Errors
+/// - [`ModpackError::IndexNotFound`] — `manifest.json` absent from archive.
+/// - [`ModpackError::MalformedManifest`] — JSON parse error.
+/// - [`ModpackError::Zip`] — zip crate error reading the archive.
+pub fn read_cf_manifest(bytes: &[u8]) -> Result<CfManifest, ModpackError> {
+    use std::io::Cursor;
+
+    let cursor = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor)?;
+
+    let manifest_json = {
+        let mut entry = archive
+            .by_name("manifest.json")
+            .map_err(|_| ModpackError::IndexNotFound)?;
+        let mut buf = String::new();
+        entry.read_to_string(&mut buf)?;
+        buf
+    };
+
+    parse_cf_manifest(&manifest_json)
 }
 
 // ── CP2: Plan builder ─────────────────────────────────────────────────────────
@@ -1641,5 +1746,191 @@ mod tests {
             "expected DisallowedHost from read_mrpack, got: {:?}",
             result
         );
+    }
+
+    // ── B4: resolve_and_build_cf_plan + read_cf_manifest ─────────────────────
+
+    use crate::core::curseforge::CurseForgeProvider;
+    use crate::core::providers::ProviderHttpClient;
+    use std::collections::VecDeque;
+    use tokio::sync::Mutex as TokioMutex;
+
+    struct MockResp(u16, String);
+
+    /// Minimal mock `ProviderHttpClient` returning canned responses in order —
+    /// same pattern as `curseforge.rs`'s test client, kept local to avoid
+    /// widening that module's test-only visibility.
+    struct MockCfClient {
+        responses: TokioMutex<VecDeque<MockResp>>,
+    }
+
+    impl MockCfClient {
+        fn new(responses: Vec<MockResp>) -> Self {
+            Self {
+                responses: TokioMutex::new(responses.into_iter().collect()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderHttpClient for MockCfClient {
+        async fn get(
+            &self,
+            _url: &str,
+            _headers: &[(&str, &str)],
+        ) -> Result<(u16, String), reqwest::Error> {
+            let mut q = self.responses.lock().await;
+            let MockResp(s, b) = q.pop_front().expect("MockCfClient: no more canned responses");
+            Ok((s, b))
+        }
+    }
+
+    fn build_cf_zip(manifest_json: &str) -> Vec<u8> {
+        build_test_zip(&[("manifest.json", manifest_json.as_bytes())])
+    }
+
+    #[test]
+    fn b4_read_cf_manifest_happy_path() {
+        let json = include_str!("fixtures/cf_manifest_forge.json");
+        let zip_bytes = build_cf_zip(json);
+        let manifest = read_cf_manifest(&zip_bytes).expect("should parse");
+        assert_eq!(manifest.name, "Test Forge Pack");
+        assert_eq!(manifest.minecraft, "1.20.1");
+        assert_eq!(manifest.loader.kind, "forge");
+        assert_eq!(manifest.files.len(), 2);
+    }
+
+    #[test]
+    fn b4_read_cf_manifest_malformed_zip_returns_error() {
+        let not_a_zip = b"this is definitely not a zip file";
+        let result = read_cf_manifest(not_a_zip);
+        assert!(
+            matches!(result, Err(ModpackError::Zip(_))),
+            "expected Zip error for non-zip bytes, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn b4_read_cf_manifest_missing_manifest_returns_error() {
+        let zip_bytes = build_test_zip(&[("README.txt", b"hello")]);
+        let result = read_cf_manifest(&zip_bytes);
+        assert!(
+            matches!(result, Err(ModpackError::IndexNotFound)),
+            "expected IndexNotFound, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn b4_resolve_and_build_cf_plan_happy_path_counts() {
+        let json = include_str!("fixtures/cf_manifest_forge.json");
+        let manifest = parse_cf_manifest(json).unwrap();
+        let tmp = mc_dir();
+
+        // Forge fixture has 2 files; resolve both to the auto-installable fixture.
+        let cf_file_fixture = include_str!("fixtures/cf_file.json");
+        let client = MockCfClient::new(vec![
+            MockResp(200, cf_file_fixture.to_string()),
+            MockResp(200, cf_file_fixture.to_string()),
+        ]);
+        let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+        let plan = resolve_and_build_cf_plan(&provider, &client, &manifest, tmp.path())
+            .await
+            .expect("should resolve and plan");
+
+        assert_eq!(plan.items.len(), 2, "both files should be downloadable");
+        assert_eq!(plan.mods.len(), 2);
+        assert!(plan.manual.is_empty());
+    }
+
+    #[tokio::test]
+    async fn b4_resolve_and_build_cf_plan_routes_through_pure_build_cf_pack_plan() {
+        // One file resolves with a usable url+hash (installed), one resolves
+        // with downloadUrl: null (manual) — proves the wiring routes resolved
+        // pairs through the same `build_cf_pack_plan` decision logic tested in B3.
+        let json = include_str!("fixtures/cf_manifest_forge.json");
+        let manifest = parse_cf_manifest(json).unwrap();
+        let tmp = mc_dir();
+
+        let cf_file_fixture = include_str!("fixtures/cf_file.json");
+        let cf_file_no_url = include_str!("fixtures/cf_file_no_url_md5_only.json");
+        let client = MockCfClient::new(vec![
+            MockResp(200, cf_file_fixture.to_string()),
+            MockResp(200, cf_file_no_url.to_string()),
+        ]);
+        let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+        let plan = resolve_and_build_cf_plan(&provider, &client, &manifest, tmp.path())
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items.len(), 1, "only the resolved-with-hash file installs");
+        assert_eq!(plan.mods.len(), 1);
+        assert_eq!(plan.manual.len(), 1, "null-url/no-sha1 file routes to manual");
+    }
+
+    #[tokio::test]
+    async fn b4_resolve_and_build_cf_plan_get_file_error_routes_to_failed_not_manual() {
+        // A CF outage / 404 for one entry must not abort the whole import —
+        // but it is a resolution *error*, not a legitimate "must download
+        // manually" entry, so it must land in `failed`, not `manual`.
+        let json = include_str!("fixtures/cf_manifest_forge.json");
+        let manifest = parse_cf_manifest(json).unwrap();
+        let tmp = mc_dir();
+
+        let cf_file_fixture = include_str!("fixtures/cf_file.json");
+        let client = MockCfClient::new(vec![
+            MockResp(404, "Not Found".to_string()),
+            MockResp(200, cf_file_fixture.to_string()),
+        ]);
+        let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+        let plan = resolve_and_build_cf_plan(&provider, &client, &manifest, tmp.path())
+            .await
+            .expect("a per-entry resolution failure must not abort the whole plan");
+
+        assert_eq!(plan.items.len(), 1, "the successfully-resolved entry still installs");
+        assert!(plan.manual.is_empty(), "a resolution error is not a manual entry");
+        assert_eq!(plan.failed.len(), 1, "the failed entry routes to failed");
+        assert!(plan.failed[0].reason.contains("404"));
+    }
+
+    #[tokio::test]
+    async fn b4_resolve_and_build_cf_plan_key_missing_aborts_import() {
+        // No CF API key configured means no file can possibly resolve —
+        // the whole import must abort instead of silently producing a pack
+        // full of misleading "manual" entries.
+        let json = include_str!("fixtures/cf_manifest_forge.json");
+        let manifest = parse_cf_manifest(json).unwrap();
+        let tmp = mc_dir();
+
+        let client = MockCfClient::new(vec![]);
+        let provider = CurseForgeProvider::new(None); // no key configured
+
+        let result = resolve_and_build_cf_plan(&provider, &client, &manifest, tmp.path()).await;
+
+        assert!(
+            matches!(result, Err(ModpackError::ResolverKeyMissing)),
+            "expected ResolverKeyMissing, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn b4_manual_entries_never_have_empty_file_name() {
+        // Once get_file errors are routed to `failed`, `manual` entries come
+        // only from build_cf_pack_plan, which always carries the real
+        // file_name from the resolved VersionFile.
+        let tmp = mc_dir();
+        let resolved = vec![(
+            cf_manifest_file(238222, 4536804),
+            version_file_with(None, "jei-real-name.jar", &[("sha1", "aabbcc")]),
+        )];
+        let plan = build_cf_pack_plan(&resolved, tmp.path()).unwrap();
+        assert_eq!(plan.manual.len(), 1);
+        assert!(!plan.manual[0].file_name.is_empty());
+        assert_eq!(plan.manual[0].file_name, "jei-real-name.jar");
     }
 }

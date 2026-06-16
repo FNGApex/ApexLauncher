@@ -1274,6 +1274,130 @@ async fn import_mrpack(
     })
 }
 
+// ---------------------------------------------------------------------------
+// CP B4: CurseForge `.zip` modpack import
+// ---------------------------------------------------------------------------
+
+/// Result returned to the frontend after a successful CurseForge `.zip` import.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CfImportResult {
+    /// Slug of the newly-created instance.
+    pub slug: String,
+    /// Display name of the instance (from the pack manifest or `name_override`).
+    pub name: String,
+    /// Number of pack files that were downloaded successfully.
+    pub installed: u32,
+    /// Number of pack files whose download failed.
+    pub failed: u32,
+    /// Files the user must download manually (distribution-disabled, or
+    /// resolved without a usable hash).
+    pub manual: Vec<core::modpack::CfManualFile>,
+}
+
+/// Import a local CurseForge modpack `.zip` into a new instance.
+///
+/// # Flow
+/// 1. Read `cf_zip_path` bytes from disk; parse `manifest.json` via `read_cf_manifest`.
+/// 2. Create an instance via `instances::create` (name = `name_override` or manifest.name;
+///    mc + loader from manifest).
+/// 3. Resolve every `files[]` entry via `CurseForgeProvider::get_file` and build the
+///    `CfPackPlan` (`resolve_and_build_cf_plan` — the tested seam).
+/// 4. Execute the download plan (`execute_plan`, `NoOpSink`); tally installed/failed.
+/// 5. Extract overrides (`extract_overrides`, reused unchanged) into the instance `mc/` dir.
+/// 6. Merge `CfPackPlan.mods` into the instance manifest; persist.
+/// 7. Return [`CfImportResult`].
+///
+/// All errors map to `String`.
+#[tauri::command]
+async fn import_curseforge_zip(
+    app: tauri::AppHandle,
+    cf_zip_path: String,
+    name_override: Option<String>,
+) -> Result<CfImportResult, String> {
+    use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
+    use core::modpack::{extract_overrides, read_cf_manifest, resolve_and_build_cf_plan};
+
+    // 1. Read file bytes; parse manifest.json.
+    let bytes = std::fs::read(&cf_zip_path)
+        .map_err(|e| format!("could not read CurseForge zip '{cf_zip_path}': {e}"))?;
+    let manifest = read_cf_manifest(&bytes).map_err(|e| e.to_string())?;
+
+    // 2. Create the instance.
+    let instance_name = name_override
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| manifest.name.clone());
+
+    let inst = instances::create(
+        &app,
+        CreateInstanceReq {
+            name: instance_name,
+            minecraft: manifest.minecraft.clone(),
+            loader: instances::Loader {
+                kind: manifest.loader.kind.clone(),
+                version: manifest.loader.version.clone(),
+            },
+        },
+    )?;
+
+    let inst_dir = core::store::instances_dir(&app)?.join(&inst.slug);
+    let mc_dir = inst_dir.join("mc");
+
+    // 3. Resolve files (CF API) + build the plan through the tested seam.
+    let settings = settings::load(&app).unwrap_or_default();
+    let cf_key = cf_api_key_from(
+        std::env::var(providers::CF_API_KEY_ENV).ok(),
+        settings.curseforge_api_key,
+    );
+    let provider = CurseForgeProvider::new(cf_key);
+    let http = ReqwestProviderClient(reqwest::Client::new());
+
+    let plan = resolve_and_build_cf_plan(&provider, &http, &manifest, &mc_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let manual = plan.manual.clone();
+    let mod_entries = plan.mods.clone();
+    let resolve_failed_count = plan.failed.len() as u32;
+    let download_plan = DownloadPlan::new(plan.items);
+
+    // 4. Execute downloads.
+    let client = dl::build_client().map_err(|e| e.to_string())?;
+    let plan_result = dl::execute_plan(&client, &download_plan, &NoOpSink, 8).await;
+
+    let mut installed: u32 = 0;
+    let mut failed: u32 = resolve_failed_count;
+
+    for outcome in &plan_result.outcomes {
+        match &outcome.status {
+            ItemStatus::Ok | ItemStatus::Skipped => installed += 1,
+            ItemStatus::Failed { .. } => failed += 1,
+        }
+    }
+
+    // 5. Extract overrides into mc_dir (reused unchanged).
+    {
+        use std::io::Cursor;
+        let cursor = Cursor::new(&bytes);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| format!("could not re-open CF zip for overrides: {e}"))?;
+        extract_overrides(&mut archive, &mc_dir).map_err(|e| e.to_string())?;
+    }
+
+    // 6. Merge mod entries into manifest and persist.
+    let mut instance = instances::load_manifest(&app, &inst.slug)?;
+    instance.mods = mod_entries;
+    instances::save_manifest(&app, &inst.slug, &instance)?;
+
+    Ok(CfImportResult {
+        slug: inst.slug,
+        name: inst.name,
+        installed,
+        failed,
+        manual,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1389,7 +1513,8 @@ pub fn run() {
             set_mod_enabled,
             remove_mod,
             update_mod,
-            import_mrpack
+            import_mrpack,
+            import_curseforge_zip
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
