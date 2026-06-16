@@ -2,14 +2,16 @@
 
 ## Goal
 
-Expose Modrinth and CurseForge mod search to the user from a single Browse page. A
-`ModProvider` trait + normalized types let the UI and the future pack resolver
-(Phase 6) remain provider-agnostic. Slice A is read-only discovery: search, filter,
-scroll, inspect versions. Installation is slice B.
+Expose a unified modpack discovery feed from both Modrinth and CurseForge on a single
+Browse page. Results from both providers are merged client-side and sorted by downloads
+descending; each card is provider-badged. Clicking a card opens the project page in the
+system browser — there is no add-to-instance affordance on Browse. Provider discovery
+uses `project_type = "modpack"` for both `searchMods` calls.
 
 ## Non-goals
 
-- Mod install, dependency resolution, enable/disable/update (slice B / `docs/spec/mod-install.md`).
+- Add-to-instance from Browse (moved to per-instance slide-over; `docs/spec/mod-install.md`).
+- Mod (non-modpack) search on Browse.
 - Modpack import (`.mrpack`, CF zip) — Phase 6.
 - Resource packs, shaders, datapacks (other `classId` / `project_type` values).
 - Jar fingerprint reconciliation of manually added mods (Murmur2 / sha512 lookup).
@@ -43,16 +45,16 @@ scroll, inspect versions. Installation is slice B.
 - [x] `ipc.ts` mirrors new param (`projectType: ProjectType = "mod"` on `searchMods`) and
       new field (`pageUrl: string | null` on `ProjectSummary`); existing callers still
       typecheck (new param has a default).
-- [ ] Browse page: typing in the search box fires a debounced (≥ 300 ms; 400 ms target per
+- [x] Browse page: typing in the search box fires a debounced (≥ 300 ms; 400 ms target per
       design) query; results render as cards; infinite scroll loads the next page on
-      scroll-to-bottom.
-- [ ] Browse page: MC version + loader facet selectors are visible and wired to the query
+      scroll-to-bottom for both providers.
+- [x] Browse page: MC version + loader facet selectors are visible and wired to the query
       parameters.
-- [ ] Browse page: shows unified modpack feed (downloads-desc merge of both providers,
+- [x] Browse page: shows unified modpack feed (downloads-desc merge of both providers,
       provider-badged cards, click opens `pageUrl` in system browser; no add-to-instance
-      modal). `project_type = "modpack"` passed to both `searchMods` calls.
-- [ ] Browse page: when CF key is absent, CF results are hidden with an inline notice;
-      Modrinth results still render.
+      affordance). `project_type = "modpack"` passed to both `searchMods` calls.
+- [x] Browse page: when CF key is absent, CF results are hidden with an inline dismissible
+      notice; Modrinth results still render.
 
 ## Approaches
 
@@ -87,7 +89,7 @@ live there. B forks normalization; C leaks the key. Full rationale and sub-decis
 | 2 | **Modrinth client.** `core/modrinth.rs` implementing `ModProvider`: `search` (GET `/search`, facets for loader + MC version, UA header per `docs/PROVIDERS.md:8`) and `get_versions` (GET `/project/{id}/version`, filtered by `game_versions` + `loaders`). HTTP injected via the seam from CP1. | `src-tauri/src/core/modrinth.rs`, `core/mod.rs` | atomic-builder | ~2 | Unit tests: fixture-backed search returns correct `ProjectSummary` count + field mapping; fixture-backed versions returns only compatible entries; SHA-1 + SHA-512 hash fields present in `VersionFile.hashes`; `cargo test` green |
 | 3 | **CurseForge client.** `core/curseforge.rs` implementing `ModProvider`: `search` (GET `/v1/mods/search?gameId=432`, `x-api-key` header, `modLoaderType`, `classId` fixed to mods) and `get_versions` (GET `/v1/mods/{id}/files`, `gameVersions[]` splitting to extract MC versions vs loader names). `downloadUrl: null` → `VersionFile.url = None`. Key-absent path returns an `Err` with `kind = "key_missing"` before any HTTP call. | `src-tauri/src/core/curseforge.rs`, `core/mod.rs`, `core/fixtures/cf_files.json` | atomic-builder | ~3 | Unit tests: fixture search maps to `ProjectSummary`; `downloadUrl: null` deserializes to `url: None`; key-absent returns `key_missing` error without HTTP; `gameVersions` mixing is split correctly; `cargo test` green |
 | 4 | **Tauri commands + `ipc.ts` mirrors.** `search_mods(provider, query, mc_version, loader, offset, limit)` and `get_mod_versions(provider, project_id, mc_version, loader)` commands in `lib.rs`; `ProviderCommandError { kind, message }` serializable struct (mirrors `AuthCommandError`); both commands registered in `invoke_handler`. Mirror types in `src/lib/ipc.ts` (`ProjectSummary`, `ProjectVersion`, `VersionFile`, `ProviderCommandError`, `searchMods`, `getModVersions` typed wrappers). | `src-tauri/src/lib.rs`, `src/lib/ipc.ts` | atomic-builder | ~2 | `cargo check` 0 errors; `npm run build` 0 type errors; commands appear in `invoke_handler` registry (`lib.rs:708-730` block) |
-| 5 | **Browse UI.** Replace the `Browse.tsx` stub with a live implementation: debounced search input (≥ 300 ms; 400 ms target), MC version + loader facet selectors (populated from `listMinecraftVersions` / `getLoaders`), provider tabs (All / Modrinth / CurseForge), `useInfiniteQuery` per-provider, mod result cards (icon, name, summary, download count), "All" tab side-by-side columns, CF-key-missing empty state. No install affordances (slice B). | `src/routes/Browse.tsx`, `src/lib/ipc.ts` (additions only if needed) | atomic-builder | ~1–2 | `npm run build` 0 type errors; manual verify: debounce fires, results render, scroll loads next page, All tab shows two columns, CF key absent shows "API key required" copy |
+| 5 | **Browse UI — unified modpack feed.** Replace the `Browse.tsx` stub with a live unified modpack discovery feed: debounced search input (≥ 300 ms; 400 ms target), MC version + loader facet selectors (populated from `listMinecraftVersions` / `getLoaders`), two independent `useInfiniteQuery` calls (`project_type = "modpack"`), client-side merge sorted by downloads desc, provider-badged cards (icon, name, summary, download count). Click opens `pageUrl` in the system browser; no add-to-instance affordance. CF key absent: inline dismissible notice; Modrinth results still render. CF non-key error: inline error notice. | `src/routes/Browse.tsx`, `src/lib/ipc.ts` (additions only if needed) | atomic-builder | ~1–2 | `npm run build` 0 type errors; manual verify: debounce fires, merged results render downloads-desc, scroll loads next page on both providers, CF key absent shows inline notice without blanking Modrinth |
 
 ## Risks
 
@@ -102,6 +104,28 @@ live there. B forks normalization; C leaks the key. Full rationale and sub-decis
 ## Change log
 
 <!-- new entries prepended below this line: ### YYYY-MM-DD — <title> -->
+
+### 2026-06-16 — Browse unified modpack feed
+
+**What changed:**
+- Browse is now a single ordered modpack discovery feed: both providers searched with
+  `project_type = "modpack"`, results merged client-side and sorted by downloads descending,
+  each card provider-badged.
+- Clicking a card opens the provider page in the system browser (`openUrl`). There is no
+  add-to-instance affordance on Browse — that interaction lives in the per-instance slide-over.
+- CF key absent: inline dismissible notice is shown; Modrinth results continue to render
+  (no blank-out of the feed).
+- CF non-key error: separate inline error notice.
+- Goal, Non-goals, CP5 checkpoint description, and success criteria updated to reflect this
+  contract.
+
+**Why:** CP3 deliverable of the ui-modpack-rework spec. Browse's purpose shifted from general
+mod browsing with per-tab columns to focused modpack discovery with a single merged feed.
+The add-to-instance affordance was removed from Browse to separate discovery (Browse) from
+installation (per-instance slide-over).
+
+**Superseded:** Browse had provider tabs (All / Modrinth / CurseForge) showing side-by-side
+columns of mod (not modpack) results, with an add-to-instance modal accessible from each card.
 
 ### 2026-06-16 — project-type selector + `page_url` on `ProjectSummary`
 
