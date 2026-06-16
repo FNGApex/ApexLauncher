@@ -1,0 +1,29 @@
+{
+  "data": {
+    "id": 5034058,
+    "modId": 238222,
+    "displayName": "jei-1.20.1-forge-15.3.0.4.jar",
+    "fileName": "jei-1.20.1-forge-15.3.0.4.jar",
+    "fileDate": "2024-01-18T10:00:00.000Z",
+    "fileLength": 1234567,
+    "fileSizeOnDisk": 1234600,
+    "downloadCount": 1000000,
+    "downloadUrl": "https://edge.forgecdn.net/files/5034/058/jei-1.20.1-forge-15.3.0.4.jar",
+    "gameVersions": ["1.20.1", "Forge", "Java 17"],
+    "sortableGameVersions": [],
+    "dependencies": [
+      {
+        "modId": 308702,
+        "relationType": 3
+      }
+    ],
+    "isAvailable": true,
+    "isServerPack": false,
+    "fileFingerprint": 1234567890,
+    "hashes": [
+      { "value": "abc123sha1hash", "algo": 1 },
+      { "value": "def456md5hash", "algo": 2 }
+    ],
+    "modules": []
+  }
+}

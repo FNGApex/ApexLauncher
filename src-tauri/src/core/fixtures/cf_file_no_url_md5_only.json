@@ -1,0 +1,22 @@
+{
+  "data": {
+    "id": 5034060,
+    "modId": 238222,
+    "displayName": "jei-1.20.1-fabric-15.3.0.4.jar",
+    "fileName": "jei-1.20.1-fabric-15.3.0.4.jar",
+    "fileDate": "2024-01-20T10:00:00.000Z",
+    "fileLength": 1100000,
+    "downloadCount": 200000,
+    "downloadUrl": null,
+    "gameVersions": ["1.20.1", "Fabric", "Quilt"],
+    "sortableGameVersions": [],
+    "dependencies": [],
+    "isAvailable": true,
+    "isServerPack": false,
+    "fileFingerprint": 1111111111,
+    "hashes": [
+      { "value": "def456md5hash", "algo": 2 }
+    ],
+    "modules": []
+  }
+}

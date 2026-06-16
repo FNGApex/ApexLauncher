@@ -141,6 +141,54 @@ struct CfDependency {
     relation_type: u32,
 }
 
+/// Raw CF `/v1/mods/{project_id}/files/{file_id}` response.
+#[derive(Debug, Deserialize)]
+struct CfFileResponse {
+    data: CfFileDetail,
+}
+
+/// Single-file detail record. Distinct from `CfFile` (the `/files` list entry) because
+/// it additionally carries `hashes[]`, which the list endpoint omits.
+#[derive(Debug, Deserialize)]
+struct CfFileDetail {
+    #[serde(rename = "fileName")]
+    file_name: String,
+    #[serde(rename = "fileLength")]
+    file_length: Option<u64>,
+    #[serde(rename = "fileSizeOnDisk")]
+    file_size_on_disk: Option<u64>,
+    #[serde(rename = "downloadUrl")]
+    download_url: Option<String>,
+    #[serde(default)]
+    hashes: Vec<CfHash>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CfHash {
+    value: String,
+    algo: u32,
+}
+
+impl CfFileDetail {
+    fn into_version_file(self) -> VersionFile {
+        // Prefer sha1 (algo 1) over md5 (algo 2) — CF carries no sha256/sha512 here.
+        let mut hashes = std::collections::HashMap::new();
+        if let Some(h) = self.hashes.iter().find(|h| h.algo == 1) {
+            hashes.insert("sha1".to_string(), h.value.clone());
+        } else if let Some(h) = self.hashes.iter().find(|h| h.algo == 2) {
+            hashes.insert("md5".to_string(), h.value.clone());
+        }
+
+        VersionFile {
+            url: self.download_url,
+            file_name: self.file_name,
+            size: self.file_length.or(self.file_size_on_disk),
+            hashes,
+            primary: true,
+        }
+    }
+}
+
 impl CfFile {
     fn into_project_version(self) -> ProjectVersion {
         let (mc_versions, loader_tags) = split_game_versions(&self.game_versions);
@@ -244,6 +292,41 @@ impl CurseForgeProvider {
     /// Build the CF `/v1/mods/{id}/files` URL.
     fn build_files_url(mod_id: &str) -> String {
         format!("{}/v1/mods/{}/files", BASE_URL, mod_id)
+    }
+
+    /// Build the CF `/v1/mods/{project_id}/files/{file_id}` URL.
+    fn build_file_url(project_id: u32, file_id: u32) -> String {
+        format!("{}/v1/mods/{}/files/{}", BASE_URL, project_id, file_id)
+    }
+
+    /// Resolve a single `(project_id, file_id)` to a normalized `VersionFile`.
+    ///
+    /// Used by the modpack importer (slice B) to resolve CF manifest entries to
+    /// download URLs. `downloadUrl: null` maps to `url: None` exactly like
+    /// `get_versions`. Hash preference: sha1 (algo 1) over md5 (algo 2) — CF
+    /// `hashes[]` carries no SHA-256/512, so sha1 is the strongest available.
+    pub async fn get_file(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: u32,
+        file_id: u32,
+    ) -> Result<VersionFile, ProviderError> {
+        let key = self.require_key()?;
+        let url = Self::build_file_url(project_id, file_id);
+
+        let (status, body) = client
+            .get(&url, &[("x-api-key", key)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw: CfFileResponse =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        Ok(raw.data.into_version_file())
     }
 }
 
@@ -429,6 +512,9 @@ mod tests {
 
     const CF_SEARCH_FIXTURE: &str = include_str!("fixtures/cf_search.json");
     const CF_FILES_FIXTURE: &str = include_str!("fixtures/cf_files.json");
+    const CF_FILE_FIXTURE: &str = include_str!("fixtures/cf_file.json");
+    const CF_FILE_NO_URL_MD5_ONLY_FIXTURE: &str =
+        include_str!("fixtures/cf_file_no_url_md5_only.json");
 
     // ── split_game_versions unit tests ─────────────────────────────────────────
 
@@ -829,6 +915,117 @@ mod tests {
             .unwrap();
 
         assert_eq!(versions.len(), 3, "all 3 fixture files expected, got {}", versions.len());
+    }
+
+    // ── get_file: single-file resolver (CP B2) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn get_file_key_absent_returns_key_missing_without_http() {
+        let client = CapturingMockClient::new(vec![]);
+        let provider = CurseForgeProvider::new(None);
+
+        let err = provider.get_file(&client, 238222, 5034058).await.unwrap_err();
+
+        assert!(
+            matches!(err, ProviderError::KeyMissing),
+            "expected KeyMissing, got {:?}",
+            err
+        );
+        assert_eq!(client.request_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn get_file_carries_api_key_header() {
+        let client = CapturingMockClient::new(vec![MockResp::ok(CF_FILE_FIXTURE)]);
+        let provider = CurseForgeProvider::new(Some("test-cf-key".to_string()));
+
+        provider.get_file(&client, 238222, 5034058).await.unwrap();
+
+        let all_headers = client.captured_headers().await;
+        let headers = &all_headers[0];
+        let has_key = headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("x-api-key") && v == "test-cf-key");
+        assert!(has_key, "x-api-key header missing: {:?}", headers);
+    }
+
+    #[tokio::test]
+    async fn get_file_url_targets_project_and_file_id() {
+        let client = CapturingMockClient::new(vec![MockResp::ok(CF_FILE_FIXTURE)]);
+        let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+        provider.get_file(&client, 238222, 5034058).await.unwrap();
+
+        let urls = client.captured_urls().await;
+        assert!(
+            urls[0].ends_with("/v1/mods/238222/files/5034058"),
+            "unexpected url: {}",
+            urls[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_file_maps_fixture_fields() {
+        let client = CapturingMockClient::new(vec![MockResp::ok(CF_FILE_FIXTURE)]);
+        let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+        let file = provider.get_file(&client, 238222, 5034058).await.unwrap();
+
+        assert_eq!(file.file_name, "jei-1.20.1-forge-15.3.0.4.jar");
+        assert_eq!(file.size, Some(1234567));
+        assert_eq!(
+            file.url,
+            Some("https://edge.forgecdn.net/files/5034/058/jei-1.20.1-forge-15.3.0.4.jar".to_string())
+        );
+        assert_eq!(file.hashes.get("sha1"), Some(&"abc123sha1hash".to_string()));
+        assert!(file.primary);
+    }
+
+    #[tokio::test]
+    async fn get_file_download_url_null_maps_to_none() {
+        let client =
+            CapturingMockClient::new(vec![MockResp::ok(CF_FILE_NO_URL_MD5_ONLY_FIXTURE)]);
+        let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+        let file = provider.get_file(&client, 238222, 5034060).await.unwrap();
+
+        assert!(file.url.is_none(), "downloadUrl: null should map to url: None");
+    }
+
+    #[tokio::test]
+    async fn get_file_prefers_sha1_over_md5() {
+        let client = CapturingMockClient::new(vec![MockResp::ok(CF_FILE_FIXTURE)]);
+        let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+        let file = provider.get_file(&client, 238222, 5034058).await.unwrap();
+
+        assert!(file.hashes.contains_key("sha1"), "sha1 should be picked when present");
+        assert!(!file.hashes.contains_key("md5"), "md5 should not be picked when sha1 present");
+    }
+
+    #[tokio::test]
+    async fn get_file_falls_back_to_md5_when_no_sha1() {
+        let client =
+            CapturingMockClient::new(vec![MockResp::ok(CF_FILE_NO_URL_MD5_ONLY_FIXTURE)]);
+        let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+        let file = provider.get_file(&client, 238222, 5034060).await.unwrap();
+
+        assert_eq!(file.hashes.get("md5"), Some(&"def456md5hash".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_file_returns_http_error_on_404() {
+        let client = CapturingMockClient::new(vec![MockResp(404, "Not Found".to_string())]);
+        let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+        let err = provider.get_file(&client, 238222, 999999).await.unwrap_err();
+
+        assert!(
+            matches!(err, ProviderError::HttpStatus { status: 404, .. }),
+            "expected HttpStatus(404), got {:?}",
+            err
+        );
     }
 
     // ── search: HTTP error propagation ────────────────────────────────────────
