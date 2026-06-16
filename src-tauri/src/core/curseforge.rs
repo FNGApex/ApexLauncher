@@ -36,6 +36,11 @@ const MINECRAFT_GAME_ID: u32 = 432;
 /// CF class ID for mods.
 const MODS_CLASS_ID: u32 = 6;
 
+/// CF `ModsSearchSortField` value for Popularity. Used as the default search
+/// sort so a text query surfaces well-known mods (CF returns an arbitrary order
+/// when no sort is given, which can push even the obvious match off page one).
+const SORT_FIELD_POPULARITY: u32 = 2;
+
 // ── gameVersions split heuristic ──────────────────────────────────────────────
 
 /// Returns `true` if the entry looks like a Minecraft version string.
@@ -214,8 +219,13 @@ impl CurseForgeProvider {
     /// Build the CF `/v1/mods/search` URL from `SearchParams`.
     fn build_search_url(params: &SearchParams) -> String {
         let mut url = format!(
-            "{}/v1/mods/search?gameId={}&classId={}&index={}&pageSize={}",
-            BASE_URL, MINECRAFT_GAME_ID, MODS_CLASS_ID, params.offset, params.limit,
+            "{}/v1/mods/search?gameId={}&classId={}&index={}&pageSize={}&sortField={}&sortOrder=desc",
+            BASE_URL,
+            MINECRAFT_GAME_ID,
+            MODS_CLASS_ID,
+            params.offset,
+            params.limit,
+            SORT_FIELD_POPULARITY,
         );
         if !params.query.is_empty() {
             url.push_str(&format!("&searchFilter={}", percent_encode(&params.query)));
@@ -669,6 +679,10 @@ mod tests {
         assert!(url.contains("pageSize=10"), "pageSize/limit missing: {url}");
         assert!(url.contains("gameVersion=1.20.1"), "gameVersion missing: {url}");
         assert!(url.contains("modLoaderType=1"), "modLoaderType=1 (Forge) missing: {url}");
+        // Default sort: Popularity desc, so a text query like "jei" surfaces the
+        // well-known mod instead of CF's arbitrary unsorted default order.
+        assert!(url.contains("sortField=2"), "sortField=2 (Popularity) missing: {url}");
+        assert!(url.contains("sortOrder=desc"), "sortOrder=desc missing: {url}");
     }
 
     // ── get_versions: downloadUrl: null → url: None ────────────────────────────
