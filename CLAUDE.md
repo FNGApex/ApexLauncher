@@ -105,6 +105,32 @@ modloader/
 Folder- and domain-level knowledge lives in **project signals**, not per-folder files —
 read the relevant domain's `signals/*.md`, regenerate with `/refresh-signals`.
 
+### Rust test layout (convention)
+
+Source files (`src-tauri/src/**/*.rs`) hold **no `mod tests { … }` block**. Unit tests
+live in a sibling `<stem>_tests.rs` file, wired back from the source module by a three-line
+declaration at the end of the source file:
+
+```rust
+#[cfg(test)]
+#[path = "<stem>_tests.rs"]
+mod tests;
+```
+
+This keeps test bodies out of the source files while the tests remain **unit tests** — the
+sibling is still compiled as a child module, so `use super::*;` and direct access to the
+parent module's private items keep working with zero `pub`-leaking. When adding tests:
+
+- New test for an existing module → add it to that module's `<stem>_tests.rs` (create the
+  sibling + the `#[path]` stub if the module has none yet).
+- Shared test scaffolding that must be reachable across modules (mock sinks like
+  `CapturingSink`/`CapturingLaunchSink`, helpers like `read_manifest_pub`) stays at
+  **module scope** in the source file under `#[cfg(test)]` — it is conditionally compiled
+  out of release builds and several items are `pub` + cross-referenced, so it must not move
+  into a child `tests` module.
+- True cross-crate integration tests (public-API only) still go in `src-tauri/tests/*.rs`
+  (e.g. `platform_*.rs`, `curseforge_live.rs`).
+
 Networking lives in Rust (crate `reqwest`, native-tls); all version/loader/provider metadata
 flows through `core/` and is disk-cached under `<appdata>/ApexLauncher/cache/meta/`. Switch
 reqwest to `rustls-tls` before Linux/Windows CI to avoid the OpenSSL build dep.
