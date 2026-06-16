@@ -1,0 +1,54 @@
+{
+  "formatVersion": 1,
+  "game": "minecraft",
+  "name": "Test Fabric Pack",
+  "versionId": "1.0.0",
+  "summary": "A test fabric modpack",
+  "dependencies": {
+    "minecraft": "1.21.1",
+    "fabric-loader": "0.16.0"
+  },
+  "files": [
+    {
+      "path": "mods/sodium-fabric-0.6.0.jar",
+      "hashes": {
+        "sha1": "aabbccdd",
+        "sha512": "deadbeef01234567deadbeef01234567deadbeef01234567deadbeef01234567deadbeef01234567deadbeef01234567deadbeef01234567deadbeef01234567"
+      },
+      "env": {
+        "client": "required",
+        "server": "unsupported"
+      },
+      "downloads": [
+        "https://cdn.modrinth.com/data/AANobbMI/versions/mc1.21.1/sodium-fabric-0.6.0.jar"
+      ],
+      "fileSize": 1048576
+    },
+    {
+      "path": "mods/server-only-mod.jar",
+      "hashes": {
+        "sha1": "11223344",
+        "sha512": "cafebabe01234567cafebabe01234567cafebabe01234567cafebabe01234567cafebabe01234567cafebabe01234567cafebabe01234567cafebabe01234567"
+      },
+      "env": {
+        "client": "unsupported",
+        "server": "required"
+      },
+      "downloads": [
+        "https://cdn.modrinth.com/data/SERVERMOD/versions/1.0/server-only-mod.jar"
+      ],
+      "fileSize": 512
+    },
+    {
+      "path": "config/some-config.toml",
+      "hashes": {
+        "sha1": "55667788",
+        "sha512": "beefcafe01234567beefcafe01234567beefcafe01234567beefcafe01234567beefcafe01234567beefcafe01234567beefcafe01234567beefcafe01234567"
+      },
+      "downloads": [
+        "https://raw.githubusercontent.com/example/repo/main/config/some-config.toml"
+      ],
+      "fileSize": 256
+    }
+  ]
+}

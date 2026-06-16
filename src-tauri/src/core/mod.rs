@@ -17,6 +17,7 @@
 //! - `modrinth`  — Modrinth `ModProvider` implementation (Phase 5 slice A, CP2).
 //! - `curseforge` — CurseForge `ModProvider` implementation (Phase 5 slice A, CP3).
 //! - `materialize` — hardlink-with-copy-fallback instance file-tree builder (storage-auth-reorg C1).
+//! - `modpack`     — Modrinth `.mrpack` parse + plan + overrides extraction (Phase 6 slice A).
 
 pub mod auth;
 pub mod curseforge;
@@ -29,6 +30,7 @@ pub mod loader_profile;
 pub mod loaders;
 pub mod materialize;
 pub mod meta;
+pub mod modpack;
 pub mod mod_install;
 pub mod modrinth;
 pub mod providers;

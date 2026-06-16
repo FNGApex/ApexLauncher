@@ -1,15 +1,36 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Box, Plus, Server, Trash2 } from "lucide-react";
-import { deleteInstance, listInstances, type Instance } from "@/lib/ipc";
+import { open } from "@tauri-apps/plugin-dialog";
+import { Box, Loader2, Plus, Server, Trash2, Upload, X } from "lucide-react";
+import { deleteInstance, importMrpack, listInstances, type Instance, type MrpackImportResult } from "@/lib/ipc";
 import { NewInstanceModal } from "@/components/NewInstanceModal";
 
 export function Home() {
   const [showModal, setShowModal] = useState(false);
+  const [importResult, setImportResult] = useState<MrpackImportResult | null>(null);
   const { data: instances, isLoading } = useQuery({
     queryKey: ["instances"],
     queryFn: listInstances,
+  });
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+
+  const importMutation = useMutation({
+    mutationFn: async () => {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "Modrinth modpack", extensions: ["mrpack"] }],
+      });
+      if (!selected) return null;
+      return importMrpack(selected);
+    },
+    onSuccess: async (result) => {
+      if (!result) return;
+      await qc.invalidateQueries({ queryKey: ["instances"] });
+      setImportResult(result);
+      navigate(`/instances/${result.slug}`);
+    },
   });
 
   return (
@@ -19,14 +40,34 @@ export function Home() {
           <h1 className="text-2xl font-semibold">Instances</h1>
           <p className="text-sm text-muted">Your Minecraft profiles</p>
         </div>
-        <button
-          onClick={() => setShowModal(true)}
-          className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
-        >
-          <Plus className="size-4" />
-          New instance
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => importMutation.mutate()}
+            disabled={importMutation.isPending}
+            className="flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-surface disabled:opacity-50"
+          >
+            {importMutation.isPending ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Upload className="size-4" />
+            )}
+            Import .mrpack
+          </button>
+          <button
+            onClick={() => setShowModal(true)}
+            className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
+          >
+            <Plus className="size-4" />
+            New instance
+          </button>
+        </div>
       </header>
+
+      {importMutation.isError && (
+        <p className="mb-4 rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
+          Import failed: {String(importMutation.error)}
+        </p>
+      )}
 
       {isLoading ? (
         <p className="text-sm text-muted">Loading…</p>
@@ -49,6 +90,44 @@ export function Home() {
       )}
 
       {showModal && <NewInstanceModal onClose={() => setShowModal(false)} />}
+
+      {importResult && (
+        <ImportResultToast result={importResult} onClose={() => setImportResult(null)} />
+      )}
+    </div>
+  );
+}
+
+function ImportResultToast({
+  result,
+  onClose,
+}: {
+  result: MrpackImportResult;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed bottom-6 right-6 z-50 w-80 rounded-xl border border-border bg-surface p-4 shadow-xl">
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <p className="font-medium">{result.name} imported</p>
+        <button
+          onClick={onClose}
+          className="shrink-0 rounded-md p-1 text-muted hover:bg-background hover:text-foreground"
+        >
+          <X className="size-4" />
+        </button>
+      </div>
+      <p className="text-sm text-muted">
+        {result.installed} installed · {result.skipped} skipped · {result.failed} failed
+      </p>
+      {result.failedFiles.length > 0 && (
+        <ul className="mt-2 max-h-28 overflow-y-auto text-xs text-danger">
+          {result.failedFiles.map((f) => (
+            <li key={f} className="truncate">
+              {f}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

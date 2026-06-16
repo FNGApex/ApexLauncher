@@ -17,6 +17,7 @@ use core::loaders::{self, LoaderOption};
 use core::resolver::{self, ResolveResult};
 use core::curseforge::CurseForgeProvider;
 use core::mod_install::{AddModResult, UpdateModResult};
+use core::modpack;
 use core::modrinth::ModrinthProvider;
 use core::providers::{
     self, cf_api_key_from, ModProvider, ProviderError, ReqwestProviderClient, SearchParams,
@@ -1137,6 +1138,142 @@ async fn update_mod(
     }
 }
 
+// ---------------------------------------------------------------------------
+// CP4: Modpack import
+// ---------------------------------------------------------------------------
+
+/// Result returned to the frontend after a successful `.mrpack` import.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MrpackImportResult {
+    /// Slug of the newly-created instance.
+    pub slug: String,
+    /// Display name of the instance (from the pack manifest or `name_override`).
+    pub name: String,
+    /// Number of pack files that were downloaded successfully.
+    pub installed: u32,
+    /// Number of pack files whose download failed.
+    pub failed: u32,
+    /// Number of pack files skipped because they are client-unsupported.
+    pub skipped: u32,
+    /// File paths of any downloads that failed (empty on full success).
+    pub failed_files: Vec<String>,
+}
+
+/// Import a local Modrinth `.mrpack` file into a new instance.
+///
+/// # Flow
+/// 1. Read `mrpack_path` bytes from disk.
+/// 2. Call `read_mrpack` to parse `modrinth.index.json` and build a [`PackPlan`].
+/// 3. Create an instance via `instances::create` (name = `name_override` or manifest.name;
+///    mc + loader from manifest).
+/// 4. Execute the download plan (`execute_plan`, `NoOpSink`); tally installed/failed.
+/// 5. Extract overrides (`extract_overrides`) into the instance `mc/` dir.
+/// 6. Merge `PackPlan.mods` into the instance manifest; persist.
+/// 7. Return [`MrpackImportResult`].
+///
+/// All errors map to `String`.
+#[tauri::command]
+async fn import_mrpack(
+    app: tauri::AppHandle,
+    mrpack_path: String,
+    name_override: Option<String>,
+) -> Result<MrpackImportResult, String> {
+    use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
+    use core::modpack::extract_overrides;
+
+    // 1. Read file bytes.
+    let bytes = std::fs::read(&mrpack_path)
+        .map_err(|e| format!("could not read mrpack file '{mrpack_path}': {e}"))?;
+
+    // 2. Parse manifest minimally to obtain name/mc/loader for instance creation.
+    //    The full parse+plan goes through the tested `read_mrpack` seam below (step 4).
+    let pre_create_manifest = {
+        use std::io::{Cursor, Read};
+        let mut archive = zip::ZipArchive::new(Cursor::new(&bytes))
+            .map_err(|e| format!("could not open mrpack zip: {e}"))?;
+        let index_json = {
+            let mut entry = archive
+                .by_name("modrinth.index.json")
+                .map_err(|_| "modrinth.index.json not found in archive".to_string())?;
+            let mut buf = String::new();
+            entry.read_to_string(&mut buf).map_err(|e| e.to_string())?;
+            buf
+        };
+        modpack::parse_modrinth_index(&index_json).map_err(|e| e.to_string())?
+    };
+
+    // 3. Create the instance.
+    let instance_name = name_override
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| pre_create_manifest.name.clone());
+
+    let inst = instances::create(
+        &app,
+        CreateInstanceReq {
+            name: instance_name,
+            minecraft: pre_create_manifest.minecraft.clone(),
+            loader: instances::Loader {
+                kind: pre_create_manifest.loader.kind.clone(),
+                version: pre_create_manifest.loader.version.clone(),
+            },
+        },
+    )?;
+
+    // Locate the instance mc/ directory.
+    let inst_dir = core::store::instances_dir(&app)?.join(&inst.slug);
+    let mc_dir = inst_dir.join("mc");
+
+    // 4. Parse manifest + build plan through the tested seam.
+    //    `read_mrpack` opens the zip, re-parses modrinth.index.json, and runs
+    //    `build_pack_plan` — the same path exercised by the unit tests.
+    let (_manifest, plan) = modpack::read_mrpack(&bytes, &mc_dir).map_err(|e| e.to_string())?;
+    let skipped_count = plan.skipped.len() as u32;
+    let mod_entries = plan.mods.clone();
+    let download_plan = DownloadPlan::new(plan.items);
+
+    // Execute downloads.
+    let client = dl::build_client().map_err(|e| e.to_string())?;
+    let plan_result = dl::execute_plan(&client, &download_plan, &NoOpSink, 8).await;
+
+    let mut installed: u32 = 0;
+    let mut failed: u32 = 0;
+    let mut failed_files: Vec<String> = Vec::new();
+
+    for outcome in &plan_result.outcomes {
+        match &outcome.status {
+            ItemStatus::Ok | ItemStatus::Skipped => installed += 1,
+            ItemStatus::Failed { .. } => {
+                failed += 1;
+                failed_files.push(outcome.url.clone());
+            }
+        }
+    }
+
+    // 5. Extract overrides into mc_dir.
+    {
+        use std::io::Cursor;
+        let cursor = Cursor::new(&bytes);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| format!("could not re-open mrpack zip for overrides: {e}"))?;
+        extract_overrides(&mut archive, &mc_dir).map_err(|e| e.to_string())?;
+    }
+
+    // 6. Merge mod entries into manifest and persist.
+    let mut instance = instances::load_manifest(&app, &inst.slug)?;
+    instance.mods = mod_entries;
+    instances::save_manifest(&app, &inst.slug, &instance)?;
+
+    Ok(MrpackImportResult {
+        slug: inst.slug,
+        name: inst.name,
+        installed,
+        failed,
+        skipped: skipped_count,
+        failed_files,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1202,6 +1339,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(registry)
         .manage(cancel_token)
         .setup(|app| {
@@ -1250,7 +1388,8 @@ pub fn run() {
             add_mod,
             set_mod_enabled,
             remove_mod,
-            update_mod
+            update_mod,
+            import_mrpack
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,0 +1,22 @@
+{
+  "formatVersion": 1,
+  "game": "minecraft",
+  "name": "Quilt Pack",
+  "versionId": "0.1.0",
+  "dependencies": {
+    "minecraft": "1.21.4",
+    "quilt-loader": "0.27.1"
+  },
+  "files": [
+    {
+      "path": "mods/qfapi.jar",
+      "hashes": {
+        "sha512": "aaaa0000bbbb1111cccc2222dddd3333aaaa0000bbbb1111cccc2222dddd3333aaaa0000bbbb1111cccc2222dddd3333aaaa0000bbbb1111cccc2222dddd3333"
+      },
+      "downloads": [
+        "https://cdn.modrinth.com/data/QFAPI/versions/1.0/qfapi.jar"
+      ],
+      "fileSize": 200000
+    }
+  ]
+}

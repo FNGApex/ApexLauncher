@@ -700,3 +700,40 @@ export function removeMod(slug: string, fileName: string): Promise<void> {
 export function updateMod(slug: string, projectId: string): Promise<UpdateModResult> {
   return invoke<UpdateModResult>("update_mod", { slug, projectId });
 }
+
+// --- Phase 6 slice A: mrpack import. Mirrors MrpackImportResult in lib.rs. ---
+
+/**
+ * Result returned by the `import_mrpack` command.
+ * Mirrors `MrpackImportResult` in `src-tauri/src/lib.rs` (serde camelCase).
+ */
+export interface MrpackImportResult {
+  /** Slug of the newly created instance. */
+  slug: string;
+  /** Display name from the pack manifest. */
+  name: string;
+  /** Number of mod files successfully downloaded. */
+  installed: number;
+  /** Number of mod files that failed to download. */
+  failed: number;
+  /** Number of mod files skipped (e.g. server-only, env unsupported). */
+  skipped: number;
+  /** File names of the failed downloads, if any. */
+  failedFiles: string[];
+}
+
+/**
+ * Import a local `.mrpack` file into a new instance.
+ *
+ * `mrpackPath` is the absolute path to the `.mrpack` file on disk.
+ * `nameOverride` optionally overrides the pack's `name` field for the instance name.
+ */
+export function importMrpack(
+  mrpackPath: string,
+  nameOverride?: string,
+): Promise<MrpackImportResult> {
+  return invoke<MrpackImportResult>("import_mrpack", {
+    mrpackPath,
+    nameOverride: nameOverride ?? null,
+  });
+}

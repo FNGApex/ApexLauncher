@@ -1,0 +1,10 @@
+{
+  "formatVersion": 1,
+  "game": "minecraft",
+  "name": "Vanilla Pack",
+  "versionId": "2.0.0",
+  "dependencies": {
+    "minecraft": "1.20.4"
+  },
+  "files": []
+}
