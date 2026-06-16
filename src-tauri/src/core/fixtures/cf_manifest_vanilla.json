@@ -1,0 +1,13 @@
+{
+  "minecraft": {
+    "version": "1.20.4",
+    "modLoaders": []
+  },
+  "manifestType": "minecraftModpack",
+  "manifestVersion": 1,
+  "name": "Test Vanilla CF Pack",
+  "version": "1.0.0",
+  "author": "Vanilla Author",
+  "files": [],
+  "overrides": "overrides"
+}

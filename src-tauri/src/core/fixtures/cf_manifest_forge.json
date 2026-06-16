@@ -1,0 +1,29 @@
+{
+  "minecraft": {
+    "version": "1.20.1",
+    "modLoaders": [
+      {
+        "id": "forge-47.2.0",
+        "primary": true
+      }
+    ]
+  },
+  "manifestType": "minecraftModpack",
+  "manifestVersion": 1,
+  "name": "Test Forge Pack",
+  "version": "1.0.0",
+  "author": "Test Author",
+  "files": [
+    {
+      "projectID": 238222,
+      "fileID": 4536804,
+      "required": true
+    },
+    {
+      "projectID": 248787,
+      "fileID": 4503326,
+      "required": false
+    }
+  ],
+  "overrides": "overrides"
+}

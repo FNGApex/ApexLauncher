@@ -232,6 +232,139 @@ pub fn parse_modrinth_index(json: &str) -> Result<MrpackManifest, ModpackError> 
     })
 }
 
+// ── B1: CurseForge manifest model ───────────────────────────────────────────
+
+/// A single file entry from a CurseForge `manifest.json` `files[]` array.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CfManifestFile {
+    /// CurseForge project (mod) id.
+    pub project_id: u64,
+    /// CurseForge file id (specific version of the mod).
+    pub file_id: u64,
+    /// Whether this file is required (vs. optional).
+    pub required: bool,
+}
+
+/// The parsed contents of a CurseForge `manifest.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CfManifest {
+    /// Pack display name.
+    pub name: String,
+    /// Pack version string.
+    pub version: String,
+    /// Pack author.
+    pub author: String,
+    /// Minecraft version string (from `minecraft.version`).
+    pub minecraft: String,
+    /// Resolved loader for this pack.
+    pub loader: PackLoader,
+    /// All files declared in the pack manifest.
+    pub files: Vec<CfManifestFile>,
+    /// Name of the overrides directory inside the zip (default `"overrides"`).
+    pub overrides: String,
+}
+
+// Raw deserialization shapes — match the on-disk CF manifest.json exactly.
+#[derive(Deserialize)]
+struct RawCfManifest {
+    minecraft: RawCfMinecraft,
+    name: String,
+    version: String,
+    author: String,
+    files: Vec<RawCfFile>,
+    #[serde(default = "default_overrides_dir")]
+    overrides: String,
+}
+
+fn default_overrides_dir() -> String {
+    "overrides".to_string()
+}
+
+#[derive(Deserialize)]
+struct RawCfMinecraft {
+    version: String,
+    #[serde(default, rename = "modLoaders")]
+    mod_loaders: Vec<RawCfModLoader>,
+}
+
+#[derive(Deserialize)]
+struct RawCfModLoader {
+    id: String,
+    #[serde(default)]
+    primary: bool,
+}
+
+#[derive(Deserialize)]
+struct RawCfFile {
+    #[serde(rename = "projectID")]
+    project_id: u64,
+    #[serde(rename = "fileID")]
+    file_id: u64,
+    required: bool,
+}
+
+/// Parse a CurseForge `manifest.json` JSON string into a [`CfManifest`].
+///
+/// The primary `minecraft.modLoaders[].id` is split on the first `-` into
+/// loader kind + version (e.g. `"forge-47.2.0"` → `("forge", "47.2.0")`).
+/// No `modLoaders` entries → `vanilla`.
+///
+/// # Errors
+/// - [`ModpackError::MalformedManifest`] if the JSON is invalid, missing required
+///   fields, or the primary loader id has no `-` separator.
+pub fn parse_cf_manifest(json: &str) -> Result<CfManifest, ModpackError> {
+    let raw: RawCfManifest = serde_json::from_str(json)
+        .map_err(|e| ModpackError::MalformedManifest(e.to_string()))?;
+
+    let loader = {
+        let primary = raw
+            .minecraft
+            .mod_loaders
+            .iter()
+            .find(|m| m.primary)
+            .or_else(|| raw.minecraft.mod_loaders.first());
+
+        match primary {
+            None => PackLoader {
+                kind: "vanilla".to_string(),
+                version: None,
+            },
+            Some(m) => match m.id.split_once('-') {
+                Some((kind, version)) => PackLoader {
+                    kind: kind.to_string(),
+                    version: Some(version.to_string()),
+                },
+                None => {
+                    return Err(ModpackError::MalformedManifest(format!(
+                        "primary modLoaders[].id '{}' has no '-' separator",
+                        m.id
+                    )));
+                }
+            },
+        }
+    };
+
+    let files = raw
+        .files
+        .into_iter()
+        .map(|f| CfManifestFile {
+            project_id: f.project_id,
+            file_id: f.file_id,
+            required: f.required,
+        })
+        .collect();
+
+    Ok(CfManifest {
+        name: raw.name,
+        version: raw.version,
+        author: raw.author,
+        minecraft: raw.minecraft.version,
+        loader,
+        files,
+        overrides: raw.overrides,
+    })
+}
+
 // ── CP2: Plan builder ─────────────────────────────────────────────────────────
 
 /// The result of [`build_pack_plan`]: items to download, mod entries to record, and
@@ -685,6 +818,135 @@ mod tests {
             "files": []
         }"#;
         let result = parse_modrinth_index(json);
+        assert!(matches!(result, Err(ModpackError::MalformedManifest(_))));
+    }
+
+    // ── B1: parse_cf_manifest ─────────────────────────────────────────────────
+
+    #[test]
+    fn b1_parse_forge_manifest() {
+        let json = include_str!("fixtures/cf_manifest_forge.json");
+        let manifest = parse_cf_manifest(json).expect("should parse");
+        assert_eq!(manifest.name, "Test Forge Pack");
+        assert_eq!(manifest.version, "1.0.0");
+        assert_eq!(manifest.minecraft, "1.20.1");
+        assert_eq!(manifest.loader.kind, "forge");
+        assert_eq!(manifest.loader.version.as_deref(), Some("47.2.0"));
+        assert_eq!(manifest.files.len(), 2);
+        assert_eq!(manifest.files[0].project_id, 238222);
+        assert_eq!(manifest.files[0].file_id, 4536804);
+        assert!(manifest.files[0].required);
+        assert!(!manifest.files[1].required);
+    }
+
+    #[test]
+    fn b1_loader_fabric_prefix_maps_correctly() {
+        let json = include_str!("fixtures/cf_manifest_fabric.json");
+        let manifest = parse_cf_manifest(json).unwrap();
+        assert_eq!(manifest.loader.kind, "fabric");
+        assert_eq!(manifest.loader.version.as_deref(), Some("0.16.0"));
+    }
+
+    #[test]
+    fn b1_loader_quilt_prefix_maps_correctly() {
+        let json = r#"{
+            "minecraft": { "version": "1.21.1", "modLoaders": [{ "id": "quilt-0.27.1", "primary": true }] },
+            "manifestType": "minecraftModpack",
+            "manifestVersion": 1,
+            "name": "Quilt Pack",
+            "version": "1.0",
+            "author": "X",
+            "files": [],
+            "overrides": "overrides"
+        }"#;
+        let manifest = parse_cf_manifest(json).unwrap();
+        assert_eq!(manifest.loader.kind, "quilt");
+        assert_eq!(manifest.loader.version.as_deref(), Some("0.27.1"));
+    }
+
+    #[test]
+    fn b1_loader_neoforge_prefix_maps_correctly() {
+        let json = r#"{
+            "minecraft": { "version": "1.21.1", "modLoaders": [{ "id": "neoforge-21.1.0", "primary": true }] },
+            "manifestType": "minecraftModpack",
+            "manifestVersion": 1,
+            "name": "NeoForge Pack",
+            "version": "1.0",
+            "author": "X",
+            "files": [],
+            "overrides": "overrides"
+        }"#;
+        let manifest = parse_cf_manifest(json).unwrap();
+        assert_eq!(manifest.loader.kind, "neoforge");
+        assert_eq!(manifest.loader.version.as_deref(), Some("21.1.0"));
+    }
+
+    #[test]
+    fn b1_no_loader_entry_maps_to_vanilla() {
+        let json = include_str!("fixtures/cf_manifest_vanilla.json");
+        let manifest = parse_cf_manifest(json).unwrap();
+        assert_eq!(manifest.loader.kind, "vanilla");
+        assert!(manifest.loader.version.is_none());
+        assert_eq!(manifest.minecraft, "1.20.4");
+        assert!(manifest.files.is_empty());
+    }
+
+    #[test]
+    fn b1_non_primary_loader_entry_is_ignored() {
+        // Only the primary modLoaders[] entry should be used.
+        let json = r#"{
+            "minecraft": { "version": "1.20.1", "modLoaders": [
+                { "id": "forge-47.2.0", "primary": true },
+                { "id": "fabric-0.16.0", "primary": false }
+            ] },
+            "manifestType": "minecraftModpack",
+            "manifestVersion": 1,
+            "name": "Mixed Pack",
+            "version": "1.0",
+            "author": "X",
+            "files": [],
+            "overrides": "overrides"
+        }"#;
+        let manifest = parse_cf_manifest(json).unwrap();
+        assert_eq!(manifest.loader.kind, "forge");
+        assert_eq!(manifest.loader.version.as_deref(), Some("47.2.0"));
+    }
+
+    #[test]
+    fn b1_malformed_json_returns_error() {
+        let result = parse_cf_manifest("{ not json }");
+        assert!(matches!(result, Err(ModpackError::MalformedManifest(_))));
+    }
+
+    #[test]
+    fn b1_missing_minecraft_field_returns_error() {
+        let json = r#"{
+            "manifestType": "minecraftModpack",
+            "manifestVersion": 1,
+            "name": "Bad Pack",
+            "version": "1.0",
+            "author": "X",
+            "files": [],
+            "overrides": "overrides"
+        }"#;
+        let result = parse_cf_manifest(json);
+        assert!(matches!(result, Err(ModpackError::MalformedManifest(_))));
+    }
+
+    #[test]
+    fn b1_loader_id_without_dash_returns_error() {
+        // A modLoaders[].id with no '-' separator can't be split into kind+version.
+        let json = r#"{
+            "minecraft": { "version": "1.20.1", "modLoaders": [{ "id": "forgeonly", "primary": true }] },
+            "manifestType": "minecraftModpack",
+            "manifestVersion": 1,
+            "name": "Bad Loader Pack",
+            "version": "1.0",
+            "author": "X",
+            "files": [],
+            "overrides": "overrides"
+        }"#;
+        let result = parse_cf_manifest(json);
         assert!(matches!(result, Err(ModpackError::MalformedManifest(_))));
     }
 

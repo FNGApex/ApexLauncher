@@ -1,0 +1,24 @@
+{
+  "minecraft": {
+    "version": "1.21.1",
+    "modLoaders": [
+      {
+        "id": "fabric-0.16.0",
+        "primary": true
+      }
+    ]
+  },
+  "manifestType": "minecraftModpack",
+  "manifestVersion": 1,
+  "name": "Test Fabric CF Pack",
+  "version": "2.1.0",
+  "author": "Another Author",
+  "files": [
+    {
+      "projectID": 306612,
+      "fileID": 5602264,
+      "required": true
+    }
+  ],
+  "overrides": "overrides"
+}
