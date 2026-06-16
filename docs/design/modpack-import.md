@@ -28,7 +28,7 @@ and update/re-resolve an installed pack to a newer version (slice D).
 | C | Browse packs (CF `classId=4471`, Modrinth `project_type:modpack`) + one-click install | Backend yes; UI no (GUI) |
 | D | Pack update / re-resolve (diff installed vs new index) | Yes — fixture diffs |
 
-This doc details **slice A**; B–D get their own spec sections when reached.
+This doc details **slices A and B**; C–D get their own sections when reached.
 
 ## `.mrpack` format (slice A ground truth)
 
@@ -91,6 +91,84 @@ flowchart TD
 
 Caption: slice-A `.mrpack` import — pure parse/plan feeds the executor that creates the
 instance, downloads files, and applies overrides.
+
+## CurseForge `.zip` format (slice B ground truth)
+
+A CF pack is a ZIP. Relevant entries:
+
+- `manifest.json` (root, required):
+  - `manifestType` (`"minecraftModpack"`), `manifestVersion` (int), `name`, `version`, `author`
+  - `minecraft`: `{ version: "<mc>", modLoaders: [ { id: "<loader>-<ver>", primary: bool }, … ] }`.
+    The primary entry's `id` encodes loader + version: `forge-47.2.0`, `neoforge-21.1.65`,
+    `fabric-0.15.11`, `quilt-…`. Loader kind = prefix before first `-`; loader version = rest.
+  - `files[]`: each `{ projectID, fileID, required }`. **No URL, no hash, no filename** — those
+    are resolved per file through the CF API.
+- `overrides/` (optional, name set by `overrides` key, default `"overrides"`): tree copied
+  verbatim into the instance's `mc/` directory. CF packs use one overrides dir (no client/server split).
+
+### Behavior rules (slice B)
+
+- **Loader mapping:** split `modLoaders[].id` (the `primary` one) on the first `-` → kind
+  (`forge`/`neoforge`/`fabric`/`quilt`) + version. No loader entry → `vanilla`.
+  `minecraft.version` is the MC version.
+- **Per-file resolution:** for each `files[]` entry, resolve `(projectID, fileID)` through the
+  CF API to a download URL + filename + hash + size. Unlike mrpack, the manifest carries none
+  of this — resolution is mandatory and is the slice's defining work.
+- **Distribution-disabled files (`allowModDistribution:false`):** CF returns `downloadUrl: null`
+  for these (already mapped to `url: None` in `curseforge.rs`). They cannot be auto-downloaded;
+  surface them as **manual** entries (project page link + filename) for the user to drop in —
+  reusing the manual-download concept from `mod_install.rs`. A manual file does NOT abort the
+  import; the rest installs and the user is told what to fetch.
+- **Hash pick:** CF file records expose hashes (`hashes[]` with algo 1=sha1, 2=md5) — prefer
+  sha1 → `ExpectedHash::Sha1`. If a resolved file has no usable hash, download unverified is
+  unacceptable for an arbitrary jar, so treat as manual (link the page) rather than fetch blind.
+- **Path safety:** files install under `mc/mods/<fileName>` (CF mods always go to `mods/`);
+  override entries validated the same zip-slip-safe way as slice A. No host allowlist needed —
+  download URLs come from the CF CDN via the authenticated API, not from the untrusted manifest.
+- **Mod entries:** each installed file → `ModEntry` (provider `"curseforge"`, `project_id` =
+  `projectID`, `version_id` = `fileID` — CF packs DO carry ids, so slice-D update can re-resolve).
+
+### File-resolution approaches (the slice's one real decision)
+
+| # | Approach | Sketch | Cost | Risk |
+|---|----------|--------|------|------|
+| A | Single-file GET per entry: add `get_file(projectID, fileID)` to CF provider using the existing GET seam | reuses `ProviderHttpClient::get`; N requests for N files; mirrors `get_versions` parsing | med | low — slow for big packs (~100 req), but pack import is one-shot |
+| B | Batch `POST /v1/mods/files` with `{fileIds:[…]}` | one request resolves all files | low latency | med — needs a POST method on the GET-only HTTP seam; new response shape |
+| C | Reuse `get_versions(projectID)` then filter to `fileID` | no new endpoint | low code | high — fetches every version of every mod, wasteful, still N requests |
+
+**Recommendation: Approach A.** Adds one focused method (`get_file`) on the existing GET seam,
+mock-testable exactly like `get_versions`, no trait/seam widening mid-slice. Pack import is a
+one-time operation where total latency matters far less than in interactive search; the N-request
+cost is acceptable. Batch resolution (B) is a clean slice-D optimization once the POST seam is
+justified by more than one caller. C is rejected — it pulls whole version histories to find one file.
+
+## Architecture (slice B)
+
+Same pure-core / thin-executor split as slice A. The new wrinkle: planning needs data that only
+the network has (resolved URLs), so resolution sits between parse and plan. Parse and plan stay
+pure and fixture-tested; the executor owns the CF API calls and feeds resolved files into the
+pure planner.
+
+```mermaid
+flowchart TD
+    A["CF .zip path"] --> B["open ZIP"]
+    B --> C["read manifest.json"]
+    C --> D["parse_cf_manifest → CfManifest (pure)"]
+    D --> E["map loader + mc → CreateInstanceReq"]
+    E --> F["instances::create → Instance"]
+    D --> R["resolve each (projectID,fileID)\nvia CF get_file (executor, network)"]
+    R --> G["build_cf_pack_plan(manifest, resolved, mc_dir)\n→ DownloadItems + ModEntries + manual (pure)"]
+    F --> H["execute_plan (download engine)"]
+    G --> H
+    B --> I["extract overrides/ (zip-slip safe, reused)"]
+    F --> I
+    H --> J["write ModEntries"]
+    I --> J
+    J --> K["CfImportResult { slug, name, installed, failed, manual }"]
+```
+
+Caption: slice-B CF `.zip` import — parse stays pure; the executor resolves each file's URL via
+the CF API, then the pure planner builds the download plan + manual list.
 
 ## Rejected approaches
 

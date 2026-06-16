@@ -1,4 +1,8 @@
-# Modpack import (Phase 6 slice A — Modrinth `.mrpack`)
+# Modpack import (Phase 6 — Modrinth `.mrpack` slice A · CurseForge `.zip` slice B)
+
+> Slice A (`.mrpack`) is **shipped** (commit `505670b`); its sections below are the shipped
+> contract. **Slice B (CurseForge `.zip`) is the active work** — see `## Slice B` near the end.
+
 
 ## Goal
 
@@ -10,7 +14,6 @@ direct URLs).
 
 ## Non-goals
 
-- CurseForge `.zip` import (per-file URL resolution, manual surfacing) — slice B.
 - Browse / one-click pack install from a provider — slice C.
 - Pack update / re-resolve against a newer index — slice D.
 - Provider-id-based update of mrpack-imported mods (mrpack carries no project/version ids).
@@ -91,13 +94,102 @@ against fixtures with no network. The executor reuses `instances::create` and
 | `instances::create` requires a valid loader build version that the pack pins but metadata can't resolve | low | Store the pack's pinned loader version directly in `Loader.version`; launch-time resolver already handles explicit versions |
 | Forge/NeoForge loader version format in mrpack differs from launch expectations | low | Slice A targets Fabric/Quilt packs first in manual verify; Forge pack e2e tracked as follow-up |
 
+## Slice B — CurseForge `.zip` import (active)
+
+### Goal
+
+Import a local CurseForge modpack `.zip` into a new instance: parse `manifest.json`, create the
+instance with the pack's MC version + loader, resolve each `(projectID, fileID)` to a download URL
+via the CF API, download the auto-distributable files (hash-verified) into `mc/mods/`, surface
+distribution-disabled files as a manual-download list, apply `overrides/` verbatim, and record
+each installed file as a `ModEntry` (provider `"curseforge"`, ids = projectID/fileID).
+
+### Non-goals (slice B)
+
+- Batch file resolution (`POST /v1/mods/files`) — single-file GET per entry for slice B;
+  batch is a slice-D optimization.
+- Auto-downloading distribution-disabled files — surfaced as manual only.
+- `client-overrides`/`server-overrides` split — CF packs use one `overrides/` dir.
+- Browse / one-click CF pack install — slice C.
+
+### Success criteria (slice B)
+
+- [ ] `parse_cf_manifest` parses `manifest.json` into a `CfManifest` (name, version, mc version,
+      loader kind+version, `files[]` of `{ project_id, file_id, required }`).
+- [ ] Loader id split: primary `modLoaders[].id` `forge-47.2.0`→(`forge`,`47.2.0`),
+      `neoforge-…`→neoforge, `fabric-…`→fabric, `quilt-…`→quilt; no loader entry → `vanilla`.
+      `minecraft.version` is the MC version. Malformed/missing manifest fields → error (not panic).
+- [ ] CF provider gains a single-file resolver (`get_file(project_id, file_id)`) that returns a
+      normalized file (url `Option`, filename, hash, size); `downloadUrl: null` → `url: None`.
+      Mock-HTTP tested via the existing `ProviderHttpClient` seam — no live network.
+- [ ] `build_cf_pack_plan(manifest, resolved_files, mc_dir)` (pure) produces `DownloadItem`s
+      (`dest` = `<mc>/mods/<fileName>`, hash + size) for files with a URL, `ModEntry`s for each
+      installed file (provider `"curseforge"`, project_id=projectID, version_id=fileID), and a
+      `manual` list for files whose resolved `url` is `None` or whose hash is unusable.
+- [ ] A manual file does not abort the import; counts surface in the result.
+- [ ] Any override entry or computed `mods/<fileName>` path containing `..`, absolute, or a
+      drive prefix is rejected (zip-slip guard) before any write — reuse slice-A path validation.
+- [ ] `extract_overrides` is reused unchanged for the CF `overrides/` dir.
+- [ ] `import_curseforge_zip` Tauri command wires end to end: open zip → parse manifest →
+      `instances::create` → resolve files (CF API) → `build_cf_pack_plan` → `execute_plan` →
+      extract overrides → write `ModEntry`s → return `CfImportResult { slug, name, installed,
+      failed, manual }`. Tested with a mock provider — no live network.
+- [ ] All parse/plan logic unit-tested against fixture JSON + a fixture CF `.zip`; resolution
+      tested via the mock provider seam. `cargo test` green (Windows toolchain); `npm run build` green.
+
+### Approaches (slice B) — file resolution
+
+Copied from `docs/design/modpack-import.md` (slice-B file-resolution decision):
+
+| # | Approach | Sketch | Cost | Risk |
+|---|----------|--------|------|------|
+| A | Single-file GET per entry (`get_file`) on the existing GET seam | reuses `ProviderHttpClient::get`; N requests; mirrors `get_versions` | med | low — slow for big packs, but import is one-shot |
+| B | Batch `POST /v1/mods/files` | one request resolves all | low latency | med — needs POST on a GET-only seam |
+| C | Reuse `get_versions(projectID)` + filter to fileID | no new endpoint | low code | high — pulls whole version histories |
+
+### Recommendation (slice B)
+
+**Approach A.** One focused `get_file` method on the existing GET seam, mock-testable exactly
+like `get_versions`, no seam widening mid-slice. Import latency is non-interactive; the N-request
+cost is acceptable. Batch (B) is a slice-D optimization once a second caller justifies the POST
+seam. Full rationale in the design doc.
+
+### Checkpoints (slice B)
+
+| # | Checkpoint | Files/areas | Agent | Est. files | Verifies |
+|---|------------|-------------|-------|------------|----------|
+| B1 | CF manifest model + parser: `CfManifest`, `CfManifestFile { project_id, file_id, required }`; `parse_cf_manifest(&str) -> Result<CfManifest, ModpackError>`; loader-id split + mc mapping | `src-tauri/src/core/modpack.rs`, fixture `manifest_*.json` | atomic-builder | ~2 | unit tests w/ JSON fixtures: full parse; each loader prefix→kind+version; no loader→vanilla; malformed/missing fields→error |
+| B2 | CF single-file resolver: `get_file(project_id, file_id)` on `CurseForgeProvider` returning a normalized file (url Option, filename, hash, size) via the GET seam | `src-tauri/src/core/curseforge.rs`, `core/providers.rs` (if a shared type is needed) | atomic-builder | ~2 | mock-HTTP unit tests: happy path maps fields; `downloadUrl: null`→`url: None`; api-key header carried; key-absent path |
+| B3 | CF pack planner (pure): `build_cf_pack_plan(&CfManifest, &[ResolvedFile], mc_dir) -> Result<CfPackPlan { items, mods, manual, skipped }, _>`; url None or no-hash → manual; `mods/<fileName>` dest; path-safety reuse; `ModEntry` with CF ids | `src-tauri/src/core/modpack.rs` | atomic-builder | ~1 | unit tests: dest under mc/mods; ModEntry ids = projectID/fileID; url None→manual; no-hash→manual; unsafe filename→err |
+| B4 | `import_curseforge_zip` command + `CfImportResult`: open zip → read `manifest.json` → parse → `instances::create` → resolve files (CF API) → `build_cf_pack_plan` → `execute_plan` → reuse `extract_overrides` → write `ModEntry`s | `src-tauri/src/lib.rs`, `src-tauri/src/core/modpack.rs` | atomic-builder | ~2 | test (mock provider, no live net): malformed zip→error; result counts (installed/failed/manual); wiring routes through pure plan |
+| B5 | Frontend: `importCurseforgeZip` ipc wrapper + `CfImportResult` type; extend Home import entry (file picker accepts `.zip`; route by archive kind or a second button); surface manual list (links) + navigate | `src/lib/ipc.ts`, `src/routes/Home.tsx` | atomic-builder | ~2 | `npm run build` green; ipc types mirror Rust (camelCase); manual files surfaced |
+
+### Risks (slice B)
+
+| Risk | Likelihood | Mitigation |
+|------|-----------|------------|
+| Large pack → ~100 sequential CF requests slow / rate-limited | med | Accept for slice B (one-shot import); bounded concurrency or batch endpoint is a slice-D follow-up; surface progress in UI |
+| CF file record lacks a usable hash → unverified jar | low | Treat hashless resolved file as manual (link page) rather than download blind |
+| `manifest.json` `overrides` key names a non-default dir | low | Read the `overrides` key; default `"overrides"` when absent |
+| Distribution-disabled file's manual page URL needs mod slug not in the file record | med | Surface projectID/fileID + filename with a `curseforge.com/projects/<projectID>` link; richer slug-based link is a follow-up |
+| Partial instance left on disk if resolution/download fails after `instances::create` | med | Same gap as slice A (follow-up `modpack-import-partial-cleanup`); not re-litigated in slice B |
+
 ## Change log
 
-<!-- Populated on first amendment after approval. -->
+### 2026-06-15 — Slice B (CurseForge `.zip` import) added
+
+**What changed:** Added the `## Slice B` contract (goal, success criteria, approaches,
+checkpoints B1–B5, risks). Retitled the spec to cover both slices and marked slice A shipped
+(commit `505670b`). Removed "CurseForge `.zip` import" from the top-level Non-goals — it is now
+in scope as slice B.
+
+**Why:** Slice A shipped; slice B is the next roadmap slice. Extends the proven slice-A
+pure-planner/thin-executor split to CF packs, whose files need per-(projectID,fileID) URL
+resolution through the CF API and manual surfacing for distribution-disabled files.
 
 ## Implementation log
 
-### built — 2026-06-15 (slice A, uncommitted)
+### built — 2026-06-15 (slice A, `.mrpack`; shipped `505670b`)
 
 Built across 5 checkpoints via subagent implement→review loop.
 
@@ -115,3 +207,27 @@ Verified: full Rust lib **405 tests pass** (Windows toolchain); `npm run build` 
 **Deferred (follow-up `modpack-import-partial-cleanup`):** no rollback if `build_pack_plan`/`execute_plan` fails after `instances::create` — a half-populated instance is left on disk. Acceptable for slice A; revisit in slice D.
 
 **Not done (needs GUI, not testable in WSL):** manual end-to-end import of a real `.mrpack` + launch. Backend + build verified; GUI run pending the WSLg/Windows-launch decision.
+
+### built — 2026-06-15 (slice B, CurseForge `.zip`)
+
+Built across 5 checkpoints (B1–B5) via the `/subagent-implementation` loop. Commits (chronological):
+
+- `cfbabf2` — B1 CF `manifest.json` parser (`CfManifest`/`CfManifestFile`, `parse_cf_manifest`; loader-id split; reuses `MalformedManifest` + `PackLoader`). 9 tests.
+- `4f6f966` — B2 `CurseForgeProvider::get_file` single-file resolver over the existing GET seam (`downloadUrl: null → url None`; sha1 preferred over md5). 9 mock-HTTP tests.
+- `dce8bda` — B3 pure `build_cf_pack_plan` → `CfPackPlan { items, mods, manual, skipped }`; url-None/no-sha1 → manual; ModEntry CF ids; reuses `validate_relative_path`. 6 tests. (Reviewer nit — unused `manifest` param — fixed in-iteration by atomic-surgeon.)
+- `fda2c8a` — B4 `import_curseforge_zip` command + `CfImportResult`; `resolve_and_build_cf_plan` seam (injectable client, mock-tested). **Round 2** after CHANGES_REQUESTED: error routing branched by kind — `KeyMissing` aborts; network/HTTP/JSON → `failed` (`CfResolveFailure`); only successful distribution-disabled → `manual`; `IndexNotFound` message generalized.
+- `f6a6556` — B5 `importCurseforgeZip` ipc wrapper + `CfImportResult`/`CfManualFile` TS types; `Home.tsx` CF `.zip` button + `CfImportResultToast` (manual list links). Caught + fixed missing `rename_all = "camelCase"` on `CfManualFile`.
+
+Verified by orchestrator: full Rust lib **436 tests pass** (Windows toolchain); `npm run build` green. No live network in any test (parse/plan pure; resolution via mock `ProviderHttpClient` seam).
+
+**Out-of-scope work performed during this build:**
+- Added `#[serde(rename_all = "camelCase")]` to `CfManualFile` (B5) — required for IPC wire-shape parity, not anticipated in the B4 checkpoint.
+
+**Unforeseens:**
+- B4 round-1 conflated all `get_file` errors into `manual`. Reviewer caught it; round-2 split KeyMissing (abort) / resolution-error (`failed`) / distribution-disabled (`manual`).
+
+**Deferred items still open:**
+- `modpack-import-cf-overrides-dir` (risk) — CF non-default `overrides` key dir name not honored (reuses slice-A `extract_overrides`).
+- `modpack-import-cf-manual-slug-link` (nit) — manual link uses numeric `projects/<id>`, not the exact file page.
+- `modpack-import-partial-cleanup` (shared with slice A) — no rollback of a half-populated instance on mid-import failure.
+- Batch CF file resolution (`POST /v1/mods/files`) — slice-D perf optimization; slice B resolves sequentially per file.
