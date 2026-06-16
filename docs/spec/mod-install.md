@@ -63,7 +63,7 @@ Full rationale + Mermaid flow in `docs/design/mod-install.md`.
 | 2 | Install executor + `add_mod` command: build `DownloadPlan` (dest `mc/mods/<fileName>`, hash from `VersionFile.hashes`), run `execute_plan`, append/merge `ModEntry` into manifest; `AddModResult { added, manual, unresolved, suggestions, warnings }` IPC type | `src-tauri/src/core/mod_install.rs`, `src-tauri/src/lib.rs` | atomic-builder | ~2 | tests: planned downloads → correct `DownloadItem` shape + dest path; manifest gains entries; `ExpectedHash` chosen from available hash algos (sha512/sha1) |
 | 3 | Mod state ops + commands: `set_mod_enabled` (rename ±`.disabled`, flip flag), `remove_mod` (delete file + drop entry); traversal-safe `file_name` validation | `src-tauri/src/core/instances.rs` (or `mod_install.rs`), `src-tauri/src/lib.rs` | atomic-builder | ~2 | tests: enable/disable renames + flips flag idempotently; remove deletes file + entry; invalid file_name rejected |
 | 4 | Update: `update_mod` command — resolve newest compatible for a tracked mod's project, download new file, delete old, update `ModEntry`; no-op when already newest | `src-tauri/src/core/mod_install.rs`, `src-tauri/src/lib.rs` | atomic-builder | ~2 | tests: newer version → swap (entry version/file/hash updated, old file gone); same version → no-op |
-| 5 | Frontend: ipc wrappers + InstanceDetail install UI (add from Browse version picker, enable/disable/remove/update controls, manual-download → open project page in browser) | `src/lib/ipc.ts`, `src/routes/InstanceDetail.tsx`, `src/routes/Browse.tsx` (add entry point) | atomic-builder | ~3 | `npm run build` green; ipc types mirror Rust structs (camelCase); manual entries open `page_url` via Tauri opener |
+| 5 | Frontend: ipc wrappers + InstanceDetail install UI (Manage-installs slide-over with mod search+add and enable/disable/remove/update controls; manual-download → open project page in browser) | `src/lib/ipc.ts`, `src/routes/InstanceDetail.tsx`, `src/components/SlideOver.tsx` | atomic-builder | ~3 | `npm run build` green; ipc types mirror Rust structs (camelCase); manual entries open `page_url` via Tauri opener |
 
 ## Risks
 
@@ -78,7 +78,23 @@ Full rationale + Mermaid flow in `docs/design/mod-install.md`.
 
 ## Change log
 
-<!-- Populated on first amendment after approval. -->
+### 2026-06-16 — Mod add/manage moves to per-instance slide-over (ui-modpack-rework CP5)
+
+**What changed:** The mod-add entry point moved from the global Browse page
+(`AddToInstanceModal` with an instance picker) into a "Manage installs" slide-over
+accessible from the instance page. The slide-over contains two tabs: **Installed**
+(enable/disable/update/remove — unchanged behavior) and **Add mod** (search + source
+toggle CF/Modrinth, version resolve for the current instance, `addMod`, result summary).
+A reusable `SlideOver` component (`src/components/SlideOver.tsx`) was introduced.
+
+**Why:** Browse was redesigned as a modpack discovery feed (ui-modpack-rework CP3) and
+no longer carries an add-to-instance flow. Consolidating all per-instance mod management
+into one slide-over improves discoverability and keeps Browse focused.
+
+**Superseded:** CP5 previously described the frontend as "add from Browse version picker
++ instance detail controls" with `Browse.tsx` as a delivery file. `Browse.tsx` is no
+longer part of the mod-install surface; the entry point is `InstanceDetail.tsx` +
+`SlideOver.tsx` only.
 
 ## Implementation log
 

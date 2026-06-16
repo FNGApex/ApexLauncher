@@ -1,29 +1,65 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ArrowLeft, FileBox, Loader2, Package, Play, RefreshCw, Square, Trash2, X } from "lucide-react";
 import {
+  AlertCircle,
+  ArrowLeft,
+  Download,
+  FileBox,
+  Key,
+  Loader2,
+  Package,
+  Play,
+  RefreshCw,
+  Search,
+  Settings2,
+  Square,
+  Trash2,
+  X,
+} from "lucide-react";
+import {
+  addMod,
   getInstance,
+  getModVersions,
   launchInstance,
   killInstance,
   removeMod,
+  searchMods,
   setModEnabled,
   updateMod,
+  type AddModResult,
   type FolderMod,
   type LaunchLogPayload,
   type LaunchExitPayload,
   type InstallLogPayload,
+  type ManualMod,
   type ModEntry,
+  type ProjectSummary,
+  type ProviderCommandError,
   type UpdateModResult,
   LAUNCH_LOG_EVENT,
   LAUNCH_EXIT_EVENT,
   INSTALL_LOG_EVENT,
 } from "@/lib/ipc";
+import { SlideOver } from "@/components/SlideOver";
+import { ProviderBadge } from "@/components/ProviderBadge";
 
 /** Max log lines kept in the console buffer before oldest are dropped. */
 const MAX_LOG_LINES = 500;
+
+const PAGE_LIMIT = 20;
+const DEBOUNCE_MS = 400;
+
+// ---------------------------------------------------------------------------
+// Root page component
+// ---------------------------------------------------------------------------
 
 export function InstanceDetail() {
   const { slug } = useParams();
@@ -38,6 +74,7 @@ export function InstanceDetail() {
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
   const [logLines, setLogLines] = useState<string[]>([]);
+  const [slideOverOpen, setSlideOverOpen] = useState(false);
   const consoleRef = useRef<HTMLPreElement>(null);
 
   // Subscribe to launch://log, launch://exit, and install://log for this instance's slug.
@@ -121,6 +158,10 @@ export function InstanceDetail() {
     } catch (err) {
       setLaunchError(String(err));
     }
+  }
+
+  function invalidate() {
+    qc.invalidateQueries({ queryKey: ["instance", slug] });
   }
 
   return (
@@ -220,37 +261,592 @@ export function InstanceDetail() {
             </section>
           )}
 
+          {/* Mods summary + Manage installs button */}
           <section>
-            <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-muted">
-              <Package className="size-4" />
-              Mods ({data.folderMods.length})
-            </h2>
-            {data.folderMods.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-border bg-surface/40 px-4 py-8 text-center text-sm text-muted">
-                No mods in this instance yet. Browse and add mods using the Browse tab.
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <h2 className="flex items-center gap-2 text-sm font-semibold text-muted">
+                  <Package className="size-4" />
+                  Mods
+                </h2>
+                <p className="mt-0.5 text-xs text-muted">
+                  {data.folderMods.length === 0
+                    ? "No mods installed"
+                    : `${data.folderMods.length} file${data.folderMods.length !== 1 ? "s" : ""}` +
+                      (data.instance.mods.length > 0
+                        ? ` · ${data.instance.mods.length} managed`
+                        : "")}
+                </p>
               </div>
-            ) : (
-              <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border">
-                {data.folderMods.map((m) => {
-                  const entry = data.instance.mods.find((e) => e.fileName === m.fileName);
-                  return (
-                    <ModRow
-                      key={m.fileName}
-                      mod={m}
-                      entry={entry}
-                      instanceSlug={slug!}
-                      onMutate={() => qc.invalidateQueries({ queryKey: ["instance", slug] })}
-                    />
-                  );
-                })}
-              </ul>
-            )}
+              <button
+                onClick={() => setSlideOverOpen(true)}
+                className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-4 py-2 text-sm font-medium text-foreground hover:bg-surface-2"
+              >
+                <Settings2 className="size-4" />
+                Manage installs
+              </button>
+            </div>
           </section>
+
+          {/* Slide-over: manage installs */}
+          <SlideOver
+            open={slideOverOpen}
+            onClose={() => setSlideOverOpen(false)}
+            title="Manage installs"
+            widthClass="w-full max-w-2xl"
+          >
+            <ManageInstallsPanel
+              instanceSlug={slug!}
+              minecraft={data.instance.minecraft}
+              loaderKind={data.instance.loader.kind}
+              folderMods={data.folderMods}
+              modEntries={data.instance.mods}
+              onMutate={invalidate}
+            />
+          </SlideOver>
         </>
       ) : null}
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Manage installs panel (slide-over body)
+// ---------------------------------------------------------------------------
+
+type ManageTab = "installed" | "add";
+
+interface ManageInstallsPanelProps {
+  instanceSlug: string;
+  minecraft: string;
+  loaderKind: string;
+  folderMods: FolderMod[];
+  modEntries: ModEntry[];
+  onMutate: () => void;
+}
+
+function ManageInstallsPanel({
+  instanceSlug,
+  minecraft,
+  loaderKind,
+  folderMods,
+  modEntries,
+  onMutate,
+}: ManageInstallsPanelProps) {
+  const [tab, setTab] = useState<ManageTab>("installed");
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* Tab switcher */}
+      <div className="flex gap-1 rounded-lg border border-border bg-surface p-1 self-start">
+        {(["installed", "add"] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={
+              "rounded-md px-4 py-1.5 text-sm font-medium transition-colors " +
+              (tab === t
+                ? "bg-surface-2 text-foreground"
+                : "text-muted hover:text-foreground")
+            }
+          >
+            {t === "installed" ? "Installed" : "Add mod"}
+          </button>
+        ))}
+      </div>
+
+      {tab === "installed" ? (
+        <InstalledModsTab
+          instanceSlug={instanceSlug}
+          folderMods={folderMods}
+          modEntries={modEntries}
+          onMutate={onMutate}
+        />
+      ) : (
+        <AddModTab
+          instanceSlug={instanceSlug}
+          minecraft={minecraft}
+          loaderKind={loaderKind}
+          onMutate={onMutate}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab 1: Installed mods
+// ---------------------------------------------------------------------------
+
+interface InstalledModsTabProps {
+  instanceSlug: string;
+  folderMods: FolderMod[];
+  modEntries: ModEntry[];
+  onMutate: () => void;
+}
+
+function InstalledModsTab({
+  instanceSlug,
+  folderMods,
+  modEntries,
+  onMutate,
+}: InstalledModsTabProps) {
+  if (folderMods.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed border-border bg-surface/40 px-4 py-8 text-center text-sm text-muted">
+        No mods installed. Switch to "Add mod" to browse and install.
+      </div>
+    );
+  }
+
+  return (
+    <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border">
+      {folderMods.map((m) => {
+        const entry = modEntries.find((e) => e.fileName === m.fileName);
+        return (
+          <ModRow
+            key={m.fileName}
+            mod={m}
+            entry={entry}
+            instanceSlug={instanceSlug}
+            onMutate={onMutate}
+          />
+        );
+      })}
+    </ul>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab 2: Add a mod (search + install)
+// ---------------------------------------------------------------------------
+
+type ModProvider = "modrinth" | "curseforge";
+
+interface AddModTabProps {
+  instanceSlug: string;
+  minecraft: string;
+  loaderKind: string;
+  onMutate: () => void;
+}
+
+function AddModTab({ instanceSlug, minecraft, loaderKind, onMutate }: AddModTabProps) {
+  const [provider, setProvider] = useState<ModProvider>("modrinth");
+  const [rawQuery, setRawQuery] = useState("");
+  const [query, setQuery] = useState("");
+  const [cfNoticeDismissed, setCfNoticeDismissed] = useState(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  // Debounce
+  useEffect(() => {
+    const id = setTimeout(() => setQuery(rawQuery.trim()), DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [rawQuery]);
+
+  // Reset CF notice when provider or query changes.
+  useEffect(() => {
+    setCfNoticeDismissed(false);
+  }, [provider, query]);
+
+  const {
+    data,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useInfiniteQuery({
+    queryKey: ["modSearch", instanceSlug, provider, query, minecraft, loaderKind],
+    queryFn: ({ pageParam }) =>
+      searchMods(provider, query, minecraft, loaderKind, pageParam, PAGE_LIMIT, "mod"),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => {
+      if (lastPage.hits.length === 0) return undefined;
+      const fetched = lastPage.offset + lastPage.hits.length;
+      return fetched < lastPage.total ? fetched : undefined;
+    },
+    staleTime: 30_000,
+  });
+
+  // Infinite scroll sentinel
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      },
+      { threshold: 0.1 },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  const cfKeyMissing =
+    provider === "curseforge" &&
+    isError &&
+    isProviderCommandError(error) &&
+    error.kind === "key_missing";
+
+  const hits: ProjectSummary[] = data?.pages.flatMap((p) => p.hits) ?? [];
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* Source toggle */}
+      <div className="flex items-center gap-3">
+        <span className="text-xs font-medium text-muted">Source:</span>
+        <div className="flex gap-1 rounded-lg border border-border bg-surface p-1">
+          {(["modrinth", "curseforge"] as const).map((p) => (
+            <button
+              key={p}
+              onClick={() => setProvider(p)}
+              className={
+                "rounded-md px-3 py-1 text-xs font-medium transition-colors " +
+                (provider === p
+                  ? "bg-surface-2 text-foreground"
+                  : "text-muted hover:text-foreground")
+              }
+            >
+              {p === "modrinth" ? "Modrinth" : "CurseForge"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Search bar */}
+      <div className="flex items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2">
+        <Search className="size-4 shrink-0 text-muted" />
+        <input
+          className="w-full bg-transparent text-sm outline-none placeholder:text-muted"
+          placeholder="Search mods…"
+          value={rawQuery}
+          onChange={(e) => setRawQuery(e.target.value)}
+        />
+        {rawQuery && (
+          <button
+            onClick={() => setRawQuery("")}
+            className="text-muted hover:text-foreground"
+          >
+            <X className="size-4" />
+          </button>
+        )}
+      </div>
+
+      {/* CF key-missing notice */}
+      {cfKeyMissing && !cfNoticeDismissed && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-surface/60 px-4 py-3 text-sm">
+          <div className="flex items-center gap-2 text-muted">
+            <Key className="size-4 shrink-0" />
+            <span>CurseForge API key required. Add it in Settings.</span>
+          </div>
+          <button
+            onClick={() => setCfNoticeDismissed(true)}
+            className="shrink-0 rounded-md p-0.5 text-muted hover:bg-surface-2 hover:text-foreground"
+            title="Dismiss"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+      )}
+
+      {/* General error (non-key-missing) */}
+      {isError && !cfKeyMissing && (
+        <div className="flex items-center gap-3 rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
+          <AlertCircle className="size-4 shrink-0" />
+          <span>
+            {isProviderCommandError(error) ? error.message : String(error)}
+          </span>
+          <button
+            onClick={() => refetch()}
+            className="ml-auto shrink-0 text-xs underline hover:no-underline"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Loading state */}
+      {isLoading && !cfKeyMissing && (
+        <div className="flex items-center gap-2 py-4 text-sm text-muted">
+          <Loader2 className="size-4 animate-spin" />
+          Searching…
+        </div>
+      )}
+
+      {/* Result list */}
+      {!isLoading && !cfKeyMissing && (
+        <div className="flex flex-col gap-2">
+          {hits.length === 0 && !isError && (
+            <div className="grid place-items-center rounded-xl border border-dashed border-border bg-surface/40 py-10 text-sm text-muted">
+              <Package className="mb-2 size-7" />
+              No mods found
+            </div>
+          )}
+
+          {hits.map((mod) => (
+            <ModSearchCard
+              key={`${mod.provider}:${mod.id}`}
+              mod={mod}
+              instanceSlug={instanceSlug}
+              minecraft={minecraft}
+              loaderKind={loaderKind}
+              onInstalled={onMutate}
+            />
+          ))}
+
+          {/* Scroll sentinel */}
+          <div ref={sentinelRef} className="h-4" />
+
+          {isFetchingNextPage && (
+            <div className="flex items-center justify-center gap-2 py-2 text-sm text-muted">
+              <Loader2 className="size-4 animate-spin" />
+              Loading more…
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Search result card for a single mod
+// ---------------------------------------------------------------------------
+
+interface ModSearchCardProps {
+  mod: ProjectSummary;
+  instanceSlug: string;
+  minecraft: string;
+  loaderKind: string;
+  onInstalled: () => void;
+}
+
+function ModSearchCard({
+  mod,
+  instanceSlug,
+  minecraft,
+  loaderKind,
+  onInstalled,
+}: ModSearchCardProps) {
+  const [installing, setInstalling] = useState(false);
+  const [result, setResult] = useState<AddModResult | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
+
+  // Resolve the provider routing string from the ProviderKind response value.
+  const providerRoute: "modrinth" | "curseforge" =
+    mod.provider === "modrinth" ? "modrinth" : "curseforge";
+
+  const versionsQuery = useQuery({
+    queryKey: [
+      "modVersions",
+      mod.provider,
+      mod.id,
+      minecraft,
+      loaderKind,
+    ],
+    queryFn: () =>
+      getModVersions(providerRoute, mod.id, minecraft, loaderKind),
+    staleTime: 30_000,
+    // Fetch eagerly — the user may click Install immediately.
+    enabled: true,
+  });
+
+  const primaryVersion = versionsQuery.data?.[0];
+
+  async function handleInstall() {
+    if (!primaryVersion) return;
+    setInstalling(true);
+    setInstallError(null);
+    setResult(null);
+    try {
+      const res = await addMod(
+        providerRoute,
+        mod.id,
+        primaryVersion.id,
+        instanceSlug,
+        minecraft,
+        loaderKind,
+      );
+      setResult(res);
+      if (res.added.length > 0) onInstalled();
+    } catch (err) {
+      setInstallError(String(err));
+    } finally {
+      setInstalling(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm">
+      <div className="flex items-center gap-3">
+        {/* Icon */}
+        {mod.iconUrl ? (
+          <img
+            src={mod.iconUrl}
+            alt=""
+            className="size-10 shrink-0 rounded-lg object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted">
+            <Package className="size-5" />
+          </div>
+        )}
+
+        {/* Text */}
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <p className="font-medium text-foreground">{mod.name}</p>
+            <ProviderBadge provider={mod.provider} />
+          </div>
+          <p className="mt-0.5 line-clamp-2 text-xs text-muted">{mod.summary}</p>
+        </div>
+
+        {/* Downloads */}
+        <div className="flex shrink-0 items-center gap-1 text-xs text-muted">
+          <Download className="size-3.5" />
+          {formatDownloads(mod.downloads)}
+        </div>
+
+        {/* Install button */}
+        {result ? null : (
+          <button
+            onClick={handleInstall}
+            disabled={installing || versionsQuery.isLoading || !primaryVersion}
+            title={
+              versionsQuery.isLoading
+                ? "Fetching compatible versions…"
+                : !primaryVersion
+                  ? "No compatible version found"
+                  : `Install ${primaryVersion.versionNumber}`
+            }
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/80 disabled:opacity-50"
+          >
+            {installing ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : versionsQuery.isLoading ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              "Install"
+            )}
+          </button>
+        )}
+      </div>
+
+      {/* Version fetch error */}
+      {versionsQuery.isError && (
+        <p className="text-xs text-danger">
+          Could not fetch compatible versions
+          {versionsQuery.error instanceof Error
+            ? `: ${versionsQuery.error.message}`
+            : "."}
+        </p>
+      )}
+
+      {/* Install error */}
+      {installError && (
+        <p className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger">
+          {installError}
+        </p>
+      )}
+
+      {/* Install result summary */}
+      {result && (
+        <AddResultSummary result={result} onDismiss={() => setResult(null)} />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Add-mod result summary
+// ---------------------------------------------------------------------------
+
+interface AddResultSummaryProps {
+  result: AddModResult;
+  onDismiss: () => void;
+}
+
+function AddResultSummary({ result, onDismiss }: AddResultSummaryProps) {
+  return (
+    <div className="rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-xs">
+      <div className="space-y-2">
+        {result.added.length > 0 && (
+          <p className="text-green-400">
+            Added {result.added.length} mod{result.added.length !== 1 ? "s" : ""} successfully.
+          </p>
+        )}
+
+        {result.manual.length > 0 && (
+          <div>
+            <p className="mb-1 font-medium text-muted">Requires manual download:</p>
+            <ul className="space-y-1">
+              {result.manual.map((m) => (
+                <ManualEntry key={`${m.projectId}:${m.versionId}`} entry={m} />
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {result.unresolved.length > 0 && (
+          <div>
+            <p className="mb-0.5 font-medium text-muted">Unresolved dependencies:</p>
+            <ul className="space-y-0.5 text-muted">
+              {result.unresolved.map((u) => (
+                <li key={u.projectId}>
+                  {u.projectId} — {u.reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {result.failed.length > 0 && (
+          <div>
+            <p className="mb-0.5 font-medium text-danger">Failed downloads:</p>
+            <ul className="space-y-0.5 text-danger">
+              {result.failed.map((f) => (
+                <li key={f.fileName}>
+                  {f.fileName}: {f.error}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      <button
+        onClick={onDismiss}
+        className="mt-2 flex items-center gap-1 text-muted hover:text-foreground"
+      >
+        <X className="size-3" />
+        Dismiss
+      </button>
+    </div>
+  );
+}
+
+function ManualEntry({ entry }: { entry: ManualMod }) {
+  return (
+    <li className="flex items-center justify-between gap-2 rounded-lg border border-border bg-surface px-3 py-1.5">
+      <span className="truncate text-muted">{entry.fileName}</span>
+      <button
+        onClick={() => openUrl(entry.pageUrl).catch(console.error)}
+        className="shrink-0 rounded px-2 py-0.5 text-xs font-medium text-primary hover:underline"
+      >
+        Open page
+      </button>
+    </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Installed mod row (relocated from inline page, behavior unchanged)
+// ---------------------------------------------------------------------------
 
 interface ModRowProps {
   mod: FolderMod;
@@ -389,7 +985,7 @@ function UpdateResultBadge({ result, onDismiss }: UpdateResultBadgeProps) {
       </span>
       {result.status === "manual" && result.pageUrl && (
         <button
-          onClick={() => openUrl(result.pageUrl!).catch(console.error)}
+          onClick={() => openUrl(result.pageUrl ?? "").catch(console.error)}
           className="font-medium text-primary hover:underline"
         >
           Open page
@@ -401,6 +997,10 @@ function UpdateResultBadge({ result, onDismiss }: UpdateResultBadgeProps) {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
@@ -424,6 +1024,20 @@ function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDownloads(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function isProviderCommandError(v: unknown): v is ProviderCommandError {
+  if (typeof v !== "object" || v === null) return false;
+  if (!("kind" in v) || !("message" in v)) return false;
+  // After the `in` checks, TypeScript narrows v to have `kind` and `message` properties.
+  // We index into the narrowed type directly — no cast needed.
+  return typeof v.kind === "string" && typeof v.message === "string";
 }
 
 /** Convert total seconds to a human-readable string. 0 → "0m". */
