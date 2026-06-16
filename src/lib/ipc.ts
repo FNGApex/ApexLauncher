@@ -737,3 +737,50 @@ export function importMrpack(
     nameOverride: nameOverride ?? null,
   });
 }
+
+// --- Phase 6 slice B: CurseForge .zip import. Mirrors CfImportResult in lib.rs. ---
+
+/**
+ * A CurseForge file the user must download manually (distribution-disabled,
+ * or resolved without a usable hash).
+ * Mirrors `CfManualFile` in `src-tauri/src/core/modpack.rs` (serde camelCase).
+ */
+export interface CfManualFile {
+  projectId: number;
+  fileId: number;
+  fileName: string;
+  pageUrl: string;
+}
+
+/**
+ * Result returned by the `import_curseforge_zip` command.
+ * Mirrors `CfImportResult` in `src-tauri/src/lib.rs` (serde camelCase).
+ */
+export interface CfImportResult {
+  /** Slug of the newly created instance. */
+  slug: string;
+  /** Display name from the pack manifest. */
+  name: string;
+  /** Number of mod files successfully downloaded. */
+  installed: number;
+  /** Number of mod files that failed (download or resolution failure). */
+  failed: number;
+  /** Files the user must download manually (distribution-disabled, or no usable hash). */
+  manual: CfManualFile[];
+}
+
+/**
+ * Import a local CurseForge modpack `.zip` into a new instance.
+ *
+ * `cfZipPath` is the absolute path to the `.zip` file on disk.
+ * `nameOverride` optionally overrides the pack's `name` field for the instance name.
+ */
+export function importCurseforgeZip(
+  cfZipPath: string,
+  nameOverride?: string,
+): Promise<CfImportResult> {
+  return invoke<CfImportResult>("import_curseforge_zip", {
+    cfZipPath,
+    nameOverride: nameOverride ?? null,
+  });
+}
