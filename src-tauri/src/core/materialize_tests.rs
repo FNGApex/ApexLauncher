@@ -7,11 +7,11 @@ use std::io;
 use tempfile::TempDir;
 
 // -----------------------------------------------------------------------
-// Hardlink path: dest created, links real content, nested rel dirs created.
+// Default copy path: dest created with real content, nested rel dirs created.
 // -----------------------------------------------------------------------
 
 #[test]
-fn hardlink_path_creates_dest_with_real_content() {
+fn default_copy_path_creates_dest_with_real_content() {
     let cache_tmp = TempDir::new().unwrap();
     let inst_tmp = TempDir::new().unwrap();
 
@@ -24,7 +24,7 @@ fn hardlink_path_creates_dest_with_real_content() {
     fs::create_dir_all(src.parent().unwrap()).unwrap();
     fs::write(&src, b"fake-jar-content").unwrap();
 
-    // Run with real hard_link.
+    // Run with the default (byte copy).
     materialize(cache_root, instance_dir, &[rel.clone()]).unwrap();
 
     let dst = instance_dir.join(&rel);
@@ -276,6 +276,66 @@ fn windows_cross_device_error_triggers_copy_fallback() {
     assert_eq!(
         content, b"mc-client-bytes",
         "copy fallback must produce byte-identical file"
+    );
+}
+
+// -----------------------------------------------------------------------
+// CP-5: Cross-instance independence — default materialize must produce
+// independent byte copies, not shared inodes. Materialize the same cache
+// artifact into TWO instance dirs, then mutate/remove instance-A's dest and
+// assert the cache source AND instance-B's copy stay byte-identical.
+//
+// Under the old hardlink default, A/B/cache shared one inode, so overwriting
+// A's file in place would mutate the cache source and B's copy → fail.
+// -----------------------------------------------------------------------
+
+#[test]
+fn default_materialize_isolates_instances() {
+    let cache_tmp = TempDir::new().unwrap();
+    let inst_a_tmp = TempDir::new().unwrap();
+    let inst_b_tmp = TempDir::new().unwrap();
+
+    let cache_root = cache_tmp.path();
+    let inst_a = inst_a_tmp.path();
+    let inst_b = inst_b_tmp.path();
+
+    let rel: PathBuf = PathBuf::from("libraries/com/example/iso/1.0/iso-1.0.jar");
+    let src = cache_root.join(&rel);
+    fs::create_dir_all(src.parent().unwrap()).unwrap();
+    let original: &[u8] = b"shared-cache-bytes";
+    fs::write(&src, original).unwrap();
+
+    // Default materialize (production path) into both instances from one cache.
+    materialize(cache_root, inst_a, &[rel.clone()]).unwrap();
+    materialize(cache_root, inst_b, &[rel.clone()]).unwrap();
+
+    let dst_a = inst_a.join(&rel);
+    let dst_b = inst_b.join(&rel);
+
+    // Overwrite instance-A's copy in place — must NOT touch the cache or B.
+    fs::write(&dst_a, b"instance-A-was-edited").unwrap();
+
+    assert_eq!(
+        fs::read(&src).unwrap(),
+        original,
+        "cache source must stay byte-identical after editing instance-A"
+    );
+    assert_eq!(
+        fs::read(&dst_b).unwrap(),
+        original,
+        "instance-B copy must stay byte-identical after editing instance-A"
+    );
+
+    // Removing instance-A's copy must leave the cache + B intact.
+    fs::remove_file(&dst_a).unwrap();
+    assert!(
+        src.exists(),
+        "cache source must survive removal of instance-A"
+    );
+    assert_eq!(
+        fs::read(&dst_b).unwrap(),
+        original,
+        "instance-B copy must survive removal of instance-A"
     );
 }
 
