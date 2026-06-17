@@ -1,5 +1,5 @@
 ---
-generated_at: 2026-06-17T07:50:56Z
+generated_at: 2026-06-17T07:58:44Z
 atomic_version: 3.1.1
 ---
 # Deterministic signals
@@ -27,7 +27,7 @@ atomic_version: 3.1.1
 │   │   ├── fabric-quilt-launch.md (7de6879, 111L, 9202ch, 9256B)
 │   │   ├── java-manager.md (7bd5211, 134L, 9816ch, 9875B)
 │   │   ├── mod-install.md (2b36033, 135L, 9814ch, 9877B)
-│   │   ├── modpack-import.md (a056e92, 603L, 51495ch, 52085B)
+│   │   ├── modpack-import.md (f0dcd4c, 606L, 51691ch, 52285B)
 │   │   ├── neoforge-forge-launch.md (ef134f7, 138L, 13317ch, 13377B)
 │   │   ├── providers-browse.md (cfbcbbd, 192L, 16133ch, 16194B)
 │   │   ├── storage-auth-reorg.md (5850201, 161L, 13115ch, 13218B)
@@ -36,7 +36,7 @@ atomic_version: 3.1.1
 │   │   └── vanilla-resolver.md (2615797, 129L, 9461ch, 9520B)
 │   ├── ARCHITECTURE.md (1db3727, 211L, 9810ch, 10515B)
 │   ├── PROVIDERS.md (52729c1, 78L, 4316ch, 4354B)
-│   └── ROADMAP.md (65a490f, 117L, 7609ch, 7749B)
+│   └── ROADMAP.md (dca9e11, 121L, 7987ch, 8139B)
 ├── scripts/ (2)
 │   ├── apex-build.bat (353bff4, 68L, 1967ch, 1967B)
 │   └── build.sh (5cc1281, 101L, 3702ch, 3708B)
@@ -135,7 +135,7 @@ atomic_version: 3.1.1
 │   └── tauri.conf.json (cc9a6fa, 38L, 783ch, 783B)
 ├── .gitignore (6f826d6, 34L, 494ch, 496B)
 ├── CLAUDE.md (cdb11d5, 158L, 7912ch, 8045B)
-├── README.md (56cbe5d, 51L, 2260ch, 2289B)
+├── README.md (476f4a1, 69L, 3147ch, 3155B)
 ├── index.html (b655c1c, 13L, 300ch, 300B)
 ├── package-lock.json (01fa163, 2903L, 94805ch, 94805B)
 ├── package.json (c770a2b, 35L, 856ch, 856B)
@@ -151,7 +151,7 @@ atomic_version: 3.1.1
 ## Languages
 
 - Rust: 23300 LOC (64%), 45 files (37%)
-- Markdown: 4390 LOC (12%), 28 files (23%)
+- Markdown: 4415 LOC (12%), 28 files (23%)
 - TypeScript: 4028 LOC (11%), 17 files (14%)
 - JSON: 3901 LOC (10%), 25 files (21%)
 - Shell: 101 LOC (0%), 1 file (0%)
