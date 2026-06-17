@@ -492,6 +492,13 @@ pub trait LaunchSink: Send + Sync + 'static {
     /// Called once when the child exits (natural or killed).
     /// `code` is `None` if the exit code could not be determined.
     fn exited(&self, instance_id: &str, code: Option<i32>);
+
+    /// Called on each run-status transition (Preparing / Running / terminal).
+    /// Implementations emit `run://update`; tests capture the transition.
+    ///
+    /// Default no-op so existing sinks that only care about logs/exit need not
+    /// implement it.
+    fn status(&self, _instance_id: &str, _status: RunStatus, _exit_code: Option<i32>) {}
 }
 
 
@@ -500,6 +507,7 @@ pub trait LaunchSink: Send + Sync + 'static {
 pub struct CapturingLaunchSink {
     pub lines: Mutex<Vec<(String, String, String)>>, // (instance_id, stream, line)
     pub exit_codes: Mutex<Vec<(String, Option<i32>)>>,
+    pub statuses: Mutex<Vec<(String, RunStatus, Option<i32>)>>, // (instance_id, status, exit_code)
 }
 
 #[cfg(test)]
@@ -508,6 +516,7 @@ impl CapturingLaunchSink {
         Self {
             lines: Mutex::new(Vec::new()),
             exit_codes: Mutex::new(Vec::new()),
+            statuses: Mutex::new(Vec::new()),
         }
     }
 }
@@ -526,35 +535,239 @@ impl LaunchSink for CapturingLaunchSink {
             .unwrap()
             .push((instance_id.to_owned(), code));
     }
+    fn status(&self, instance_id: &str, status: RunStatus, exit_code: Option<i32>) {
+        self.statuses
+            .lock()
+            .unwrap()
+            .push((instance_id.to_owned(), status, exit_code));
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Running registry
 // ---------------------------------------------------------------------------
 
-/// A handle stored per running instance in the registry.
-pub struct KillHandle {
+/// Maximum number of log lines retained per instance in the in-memory ring.
+/// Older lines are dropped once this cap is reached (FIFO eviction). Bounds the
+/// memory cost of buffering logs for many concurrent packs.
+pub const LOG_RING_CAP: usize = 1000;
+
+/// Lifecycle status of a tracked run.
+///
+/// Prep is serialized (only one `Preparing` at a time via the prep semaphore);
+/// `Running` is N-concurrent. The terminal trio — `Exited` / `Killed` / `Failed`
+/// — is **retained** in the registry so reads (`get_run_state` / `get_run_logs`)
+/// can recover a missed exit code and replay buffered logs after the child is gone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RunStatus {
+    /// Holding the prep permit: resolve → download → materialize → natives.
+    Preparing,
+    /// JVM spawned; prep permit released. N of these may coexist.
+    Running,
+    /// Child exited on its own. `exit_code` carries the code (if known).
+    Exited,
+    /// Child was killed via `kill_instance`.
+    Killed,
+    /// Prep failed before the JVM spawned.
+    Failed,
+}
+
+impl RunStatus {
+    /// True for the terminal trio (`Exited` / `Killed` / `Failed`). Terminal
+    /// entries are retained but excluded from `list_running`.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            RunStatus::Exited | RunStatus::Killed | RunStatus::Failed
+        )
+    }
+
+    /// Stable lowercase tag for IPC payloads (`run://update`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunStatus::Preparing => "preparing",
+            RunStatus::Running => "running",
+            RunStatus::Exited => "exited",
+            RunStatus::Killed => "killed",
+            RunStatus::Failed => "failed",
+        }
+    }
+}
+
+/// One buffered log line in a run's ring.
+#[derive(Clone, Debug)]
+pub struct LogLine {
+    /// `"stdout"` or `"stderr"`.
+    pub stream: String,
+    pub line: String,
+}
+
+/// Per-instance run state stored in the registry (grown from the old `KillHandle`).
+///
+/// Holds the kill channel, the lifecycle `status`, the buffered `exit_code`, a
+/// capped `log_ring` for replay, and the launch `started` instant for playtime /
+/// elapsed reporting. The monitor task writes `status` / `exit_code` / `log_ring`;
+/// reads clone the fields they need out of the lock and release it before any await.
+pub struct RunState {
     /// Fires once to signal the monitor task to kill the child.
     ///
     /// Wrapped in `Option` so `kill_instance` can `take` the sender (consuming it
     /// to send the signal) while **leaving the registry entry in place**. The
-    /// monitor task is the sole owner of registry removal — it removes the entry
-    /// once the child has actually exited, eliminating the TOCTOU window where a
-    /// concurrent `launch_instance` could re-spawn while the old child is still
-    /// terminating.
+    /// monitor task records the terminal status once the child has actually
+    /// exited, eliminating the TOCTOU window where a concurrent `launch_instance`
+    /// could re-spawn while the old child is still terminating.
+    ///
+    /// `None` while `Preparing` (no child yet) and after the kill signal fires.
     pub kill_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Current lifecycle status.
+    pub status: RunStatus,
+    /// Buffered process exit code; `None` until a terminal status is reached (or
+    /// if the code could not be determined).
+    pub exit_code: Option<i32>,
+    /// Capped ring of recent log lines (oldest dropped past [`LOG_RING_CAP`]).
+    pub log_ring: std::collections::VecDeque<LogLine>,
+    /// When the launch began (prep start). Used for playtime / elapsed reporting.
+    pub started: Instant,
+}
+
+impl RunState {
+    /// New `Preparing` state — no child yet, empty ring.
+    pub fn new_preparing() -> Self {
+        Self {
+            kill_tx: None,
+            status: RunStatus::Preparing,
+            exit_code: None,
+            log_ring: std::collections::VecDeque::new(),
+            started: Instant::now(),
+        }
+    }
+
+    /// Append a log line, evicting the oldest if at capacity.
+    pub fn push_log(&mut self, stream: &str, line: &str) {
+        if self.log_ring.len() >= LOG_RING_CAP {
+            self.log_ring.pop_front();
+        }
+        self.log_ring.push_back(LogLine {
+            stream: stream.to_owned(),
+            line: line.to_owned(),
+        });
+    }
+}
+
+/// A cloned, lock-free snapshot of one run's state for read commands.
+///
+/// Excludes the kill channel and log ring (queried separately via
+/// `get_run_logs`); carries just the queryable scalars plus elapsed time.
+#[derive(Clone, Debug)]
+pub struct RunInfo {
+    pub slug: String,
+    pub status: RunStatus,
+    pub exit_code: Option<i32>,
+    /// Milliseconds since the launch began.
+    pub elapsed_ms: u128,
 }
 
 /// In-process running-instance registry.
 ///
 /// Keyed by instance **slug** (the on-disk directory name), which is unique and
-/// stable. Managed as Tauri state.
+/// stable. Managed as Tauri state. Terminal entries are retained for recovery.
 /// **Never hold this lock across an `.await` point.**
-pub type RunningRegistry = Mutex<HashMap<String, KillHandle>>;
+pub type RunningRegistry = Mutex<HashMap<String, RunState>>;
 
 /// Construct an empty [`RunningRegistry`] for use with `.manage(...)`.
 pub fn new_running_registry() -> RunningRegistry {
     Mutex::new(HashMap::new())
+}
+
+/// Prep serialization semaphore — a single permit gates the blocking launch prep
+/// (resolve → download → materialize → natives). `launch_instance` holds the
+/// permit only across prep and drops it once the JVM spawns, so a second launch
+/// waits for prep but both packs then run concurrently. Managed as Tauri state.
+pub type PrepSemaphore = Arc<tokio::sync::Semaphore>;
+
+/// Construct a fresh single-permit [`PrepSemaphore`] for use with `.manage(...)`.
+pub fn new_prep_semaphore() -> PrepSemaphore {
+    Arc::new(tokio::sync::Semaphore::new(1))
+}
+
+/// Insert (or reset) a `Preparing` entry for `slug` and emit the status.
+///
+/// Called by `launch_instance` immediately after acquiring the prep permit, so
+/// the (serialized) prep phase has a live registry entry whose log ring collects
+/// prep-phase `install://log` lines (attributed to the sole preparing instance).
+/// The lock is released before the sink call (never hold across emit).
+pub fn mark_preparing<S: LaunchSink>(registry: &RunningRegistry, slug: &str, sink: &S) {
+    {
+        let mut guard = registry.lock().unwrap();
+        guard.insert(slug.to_owned(), RunState::new_preparing());
+    }
+    sink.status(slug, RunStatus::Preparing, None);
+}
+
+/// Mark `slug` as `Failed` (prep error before the JVM spawned) and emit the
+/// status. The entry is retained for recovery. Lock released before the emit.
+pub fn mark_failed<S: LaunchSink>(registry: &RunningRegistry, slug: &str, sink: &S) {
+    {
+        let mut guard = registry.lock().unwrap();
+        if let Some(state) = guard.get_mut(slug) {
+            state.status = RunStatus::Failed;
+            state.kill_tx = None;
+        }
+    }
+    sink.status(slug, RunStatus::Failed, None);
+}
+
+/// Append a prep-phase log line to the sole `Preparing` instance's ring.
+///
+/// Prep-phase `install://log` lines carry no correlation id, but prep is
+/// serialized (one `Preparing` at a time), so they attribute to whichever
+/// instance is currently preparing. No-op if none is preparing.
+pub fn record_prep_log(registry: &RunningRegistry, stream: &str, line: &str) {
+    let mut guard = registry.lock().unwrap();
+    if let Some((_, state)) = guard
+        .iter_mut()
+        .find(|(_, s)| s.status == RunStatus::Preparing)
+    {
+        state.push_log(stream, line);
+    }
+}
+
+/// Snapshot the non-terminal (Preparing / Running) instances.
+///
+/// Clones scalars out of the lock and releases it before returning — no await
+/// while held. Terminal entries are excluded (they are retained for recovery but
+/// are not "running").
+pub fn list_running(registry: &RunningRegistry) -> Vec<RunInfo> {
+    let guard = registry.lock().unwrap();
+    guard
+        .iter()
+        .filter(|(_, s)| !s.status.is_terminal())
+        .map(|(slug, s)| RunInfo {
+            slug: slug.clone(),
+            status: s.status,
+            exit_code: s.exit_code,
+            elapsed_ms: s.started.elapsed().as_millis(),
+        })
+        .collect()
+}
+
+/// Snapshot a single instance's state (any status, incl. terminal). `None` if
+/// the slug is not tracked.
+pub fn get_run_state(registry: &RunningRegistry, slug: &str) -> Option<RunInfo> {
+    let guard = registry.lock().unwrap();
+    guard.get(slug).map(|s| RunInfo {
+        slug: slug.to_owned(),
+        status: s.status,
+        exit_code: s.exit_code,
+        elapsed_ms: s.started.elapsed().as_millis(),
+    })
+}
+
+/// Replay an instance's buffered log lines (clones the ring out of the lock).
+/// `None` if the slug is not tracked. Works after exit (entry is retained).
+pub fn get_run_logs(registry: &RunningRegistry, slug: &str) -> Option<Vec<LogLine>> {
+    let guard = registry.lock().unwrap();
+    guard.get(slug).map(|s| s.log_ring.iter().cloned().collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -591,11 +804,16 @@ pub async fn spawn_instance<S: LaunchSink>(
 ) -> Result<(), String> {
     use tokio::process::Command;
 
-    // Reject if already running — acquire lock, check, release before any await.
+    // Reject only if an instance is already `Running` — acquire lock, check,
+    // release before any await. A `Preparing` entry (inserted by `mark_preparing`
+    // for this same launch) is the expected predecessor and is transitioned to
+    // `Running` below; terminal leftovers are overwritten by the fresh run.
     {
         let guard = registry.lock().unwrap();
-        if guard.contains_key(&slug) {
-            return Err(format!("instance '{slug}' is already running"));
+        if let Some(state) = guard.get(&slug) {
+            if state.status == RunStatus::Running {
+                return Err(format!("instance '{slug}' is already running"));
+            }
         }
     }
 
@@ -631,13 +849,32 @@ pub async fn spawn_instance<S: LaunchSink>(
         .take()
         .ok_or_else(|| "failed to capture stderr".to_string())?;
 
-    let started = Instant::now();
-
-    // Register before spawning the monitor task.
-    {
+    // Transition to `Running` before spawning the monitor task.
+    //
+    // If a `Preparing` entry exists (the normal launch path via `mark_preparing`)
+    // we keep its `started` instant and prep-phase log ring, flipping status to
+    // `Running` and installing the kill channel. Direct callers (tests) that
+    // skipped `mark_preparing` get a fresh `Running` state. Lock is released
+    // before the status emit (never hold across the sink call).
+    let started = {
         let mut guard = registry.lock().unwrap();
-        guard.insert(slug.clone(), KillHandle { kill_tx: Some(kill_tx) });
-    }
+        match guard.get_mut(&slug) {
+            Some(state) => {
+                state.status = RunStatus::Running;
+                state.kill_tx = Some(kill_tx);
+                state.started
+            }
+            None => {
+                let mut state = RunState::new_preparing();
+                let started = state.started;
+                state.status = RunStatus::Running;
+                state.kill_tx = Some(kill_tx);
+                guard.insert(slug.clone(), state);
+                started
+            }
+        }
+    };
+    sink.status(&slug, RunStatus::Running, None);
 
     // Spawn the monitor task.
     let registry_clone = Arc::clone(&registry);
@@ -662,12 +899,14 @@ pub async fn spawn_instance<S: LaunchSink>(
     Ok(())
 }
 
-/// Monitor a running child: stream stdout+stderr, handle natural exit or kill signal,
-/// record playtime on exit, deregister from the registry.
+/// Monitor a running child: stream stdout+stderr into the log ring + sink, handle
+/// natural exit or kill signal, record playtime, and record the terminal status.
 ///
 /// This function is `async` and runs under `tokio::spawn`. It owns the `Child`.
-/// It is the **sole owner of registry removal** — both the natural-exit and the
-/// kill paths call `registry.remove` here, after the child has actually exited.
+/// It is the **sole owner of the terminal transition** — both the natural-exit and
+/// the kill paths record `Exited` / `Killed` + the buffered exit code here, after
+/// the child has actually exited. The entry is **retained** (not removed) so reads
+/// can recover the exit code and replay logs after the child is gone.
 async fn monitor_child<S: LaunchSink>(
     slug: String,
     inst_dir: PathBuf,
@@ -722,12 +961,28 @@ async fn monitor_child<S: LaunchSink>(
     let mut stdout_open = true;
     let mut stderr_open = true;
 
+    // Push a log line into the instance's ring (synchronous; lock never held
+    // across an await) AND emit it on the sink. Keeps the buffered replay and the
+    // live `launch://log` stream in lock-step.
+    let push_and_emit = |stream: &str, line: &str| {
+        {
+            let mut guard = registry.lock().unwrap();
+            if let Some(state) = guard.get_mut(&slug) {
+                state.push_log(stream, line);
+            }
+        }
+        sink.log(&slug, stream, line);
+    };
+
+    // Did the terminal transition arrive via an explicit kill?
+    let mut was_killed = false;
+
     let exit_status = loop {
         tokio::select! {
             // Drain stdout lines — disabled once the channel is closed.
             line = stdout_rx.recv(), if stdout_open => {
                 match line {
-                    Some(l) => sink.log(&slug, "stdout", &l),
+                    Some(l) => push_and_emit("stdout", &l),
                     None => stdout_open = false,
                 }
             }
@@ -735,7 +990,7 @@ async fn monitor_child<S: LaunchSink>(
             // Drain stderr lines — disabled once the channel is closed.
             line = stderr_rx.recv(), if stderr_open => {
                 match line {
-                    Some(l) => sink.log(&slug, "stderr", &l),
+                    Some(l) => push_and_emit("stderr", &l),
                     None => stderr_open = false,
                 }
             }
@@ -749,6 +1004,7 @@ async fn monitor_child<S: LaunchSink>(
             // Kill signal from kill_instance command.
             // `&mut kill_rx` polls the pinned receiver without consuming it.
             _ = &mut kill_rx => {
+                was_killed = true;
                 // Signal the child to stop. start_kill() is non-blocking.
                 let _ = child.start_kill();
                 // Wait for the child to actually terminate.
@@ -760,10 +1016,10 @@ async fn monitor_child<S: LaunchSink>(
 
     // Drain any remaining lines in the channels after exit.
     while let Ok(line) = stdout_rx.try_recv() {
-        sink.log(&slug, "stdout", &line);
+        push_and_emit("stdout", &line);
     }
     while let Ok(line) = stderr_rx.try_recv() {
-        sink.log(&slug, "stderr", &line);
+        push_and_emit("stderr", &line);
     }
 
     // Record playtime.
@@ -774,13 +1030,25 @@ async fn monitor_child<S: LaunchSink>(
         log::warn!("launch: failed to record playtime for {slug}: {e}");
     }
 
-    // Deregister — monitor is the sole owner of this removal (both exit paths).
+    // Record the terminal status + exit code — monitor is the sole owner of this
+    // transition (both exit paths). The entry is RETAINED so reads can recover the
+    // exit code and replay logs after the child is gone. Lock released before emit.
+    let terminal = if was_killed {
+        RunStatus::Killed
+    } else {
+        RunStatus::Exited
+    };
     {
         let mut guard = registry.lock().unwrap();
-        guard.remove(&slug);
+        if let Some(state) = guard.get_mut(&slug) {
+            state.status = terminal;
+            state.exit_code = exit_status;
+            state.kill_tx = None;
+        }
     }
 
-    // Emit exit event.
+    // Emit terminal status + the exit event.
+    sink.status(&slug, terminal, exit_status);
     sink.exited(&slug, exit_status);
 }
 
@@ -848,9 +1116,10 @@ pub fn rewrite_classpath_for_instance(
 
 /// Send a kill signal to a running instance.
 ///
-/// Fires the kill oneshot without removing the registry entry. The monitor task
-/// is the sole owner of registry removal — it deregisters after the child has
-/// actually exited (eliminating the TOCTOU window).
+/// Fires the kill oneshot without changing the registry entry's status. The
+/// monitor task is the sole owner of the terminal transition — it records the
+/// `Killed` status + exit code after the child has actually exited (eliminating
+/// the TOCTOU window), and the entry is retained for recovery.
 ///
 /// Returns `Ok(())` if the signal was sent. Returns `Err` if the instance is not
 /// in the registry or if the kill signal was already sent.
