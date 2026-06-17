@@ -692,6 +692,9 @@ struct MultiMockServer {
     addr: std::net::SocketAddr,
     /// High-water mark: the maximum concurrent-in-flight connections seen.
     max_concurrent: Arc<std::sync::atomic::AtomicUsize>,
+    /// Total number of body-serving requests handled (200 responses).
+    /// Used by the CP-1 cancel test to prove no further downloads start.
+    served: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(test)]
@@ -712,8 +715,10 @@ impl MultiMockServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let max_concurrent = Arc::new(AtomicUsize::new(0));
+        let served = Arc::new(AtomicUsize::new(0));
         let current = Arc::new(AtomicUsize::new(0));
         let max_clone = Arc::clone(&max_concurrent);
+        let served_clone = Arc::clone(&served);
         let body = Arc::new(body);
 
         tokio::spawn(async move {
@@ -723,6 +728,7 @@ impl MultiMockServer {
                 };
                 let current = Arc::clone(&current);
                 let max_clone = Arc::clone(&max_clone);
+                let served = Arc::clone(&served_clone);
                 let body = Arc::clone(&body);
 
                 tokio::spawn(async move {
@@ -771,6 +777,7 @@ impl MultiMockServer {
                     let response = if is_bad {
                         b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
                     } else {
+                        served.fetch_add(1, Ordering::SeqCst);
                         let mut resp =
                             format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len())
                                 .into_bytes();
@@ -788,6 +795,7 @@ impl MultiMockServer {
         MultiMockServer {
             addr,
             max_concurrent,
+            served,
         }
     }
 
@@ -1233,6 +1241,115 @@ async fn f5_toctou_part_grows_triggers_clean_restart() {
         "final file must match full body after TOCTOU restart"
     );
     assert!(!part.exists(), ".part must be gone after success");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// -----------------------------------------------------------------------
+// CP-1 (rework) test: download cancel seam
+// -----------------------------------------------------------------------
+
+/// Cancel seam: once the token trips while a plan is in flight, no further
+/// item starts a download. Items that never acquired a permit yield
+/// `CancellableStatus::Cancelled`, and the result flags the run as cancelled so
+/// the caller can tell it apart from a completed run.
+///
+/// Determinism: `concurrency = 1` forces strictly serial item execution. The
+/// first item holds the only permit and the mock holds the connection open for
+/// `delay`; meanwhile a spawned task trips the token. By the time item 1
+/// releases its permit, the token is tripped, so items 2..N short-circuit
+/// before acquiring a permit — no second request reaches the server.
+#[tokio::test]
+async fn cp1_cancel_stops_further_downloads_and_is_distinguishable() {
+    let body = b"cancel seam content".to_vec();
+    let hash = sha1_hex(&body);
+    // 200 ms hold on the first (and only) in-flight connection — long enough
+    // for the cancel task to trip the token before item 1 releases its permit.
+    let server = MultiMockServer::start(body.clone(), 200).await;
+
+    let dir = test_tmp_dir("cp1_cancel");
+    let client = build_client().unwrap();
+
+    // 4 items; concurrency = 1 → strictly serial.
+    let items: Vec<DownloadItem> = (0..4)
+        .map(|i| DownloadItem {
+            url: server.url(&format!("cancel{i}")),
+            dest: dir.join(format!("cancel{i}.bin")),
+            expected_hash: Some(ExpectedHash::Sha1(hash.clone())),
+            size: None,
+        })
+        .collect();
+    let plan = DownloadPlan::new(items);
+
+    let cancel = CancelToken::new();
+    // Trip the token shortly after the run starts — well within item 1's 200 ms hold.
+    let cancel_trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel_trigger.cancel();
+    });
+
+    let sink = NoOpSink;
+    let result = execute_plan_cancellable(&client, &plan, &sink, 1, &cancel).await;
+
+    // The result distinguishes a cancelled run from a completed one.
+    assert!(result.cancelled, "result must report the run as cancelled");
+
+    // Exactly one body-serving request reached the server (item 0 only).
+    let served = server.served.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        served, 1,
+        "only the first item may download; got {served} served requests"
+    );
+
+    // One outcome per item; at least one Cancelled outcome present.
+    assert_eq!(result.outcomes.len(), 4);
+    let cancelled = result
+        .outcomes
+        .iter()
+        .filter(|o| matches!(o.status, CancellableStatus::Cancelled))
+        .count();
+    assert!(
+        cancelled >= 1,
+        "expected ≥1 Cancelled outcome, got {cancelled}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A plan run with a never-tripped token completes exactly as before:
+/// the result is not flagged cancelled and no Cancelled outcomes appear.
+#[tokio::test]
+async fn cp1_untripped_token_completes_normally() {
+    let body = b"untripped content".to_vec();
+    let hash = sha1_hex(&body);
+    let server = MultiMockServer::start(body.clone(), 0).await;
+
+    let dir = test_tmp_dir("cp1_untripped");
+    let client = build_client().unwrap();
+
+    let items: Vec<DownloadItem> = (0..3)
+        .map(|i| DownloadItem {
+            url: server.url(&format!("ok{i}")),
+            dest: dir.join(format!("ok{i}.bin")),
+            expected_hash: Some(ExpectedHash::Sha1(hash.clone())),
+            size: None,
+        })
+        .collect();
+    let plan = DownloadPlan::new(items);
+
+    let cancel = CancelToken::new();
+    let sink = NoOpSink;
+    let result = execute_plan_cancellable(&client, &plan, &sink, 4, &cancel).await;
+
+    assert!(!result.cancelled, "untripped run must not be cancelled");
+    assert_eq!(result.outcomes.len(), 3);
+    for outcome in &result.outcomes {
+        match &outcome.status {
+            CancellableStatus::Ran(ItemStatus::Ok) => {}
+            other => panic!("expected Ran(Ok), got {other:?} for {}", outcome.url),
+        }
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

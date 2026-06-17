@@ -75,10 +75,7 @@ pub enum DownloadError {
     /// Network or HTTP-level failure.
     Network(String),
     /// Received bytes did not match the expected hash.
-    HashMismatch {
-        expected: ExpectedHash,
-        got: String,
-    },
+    HashMismatch { expected: ExpectedHash, got: String },
     /// File-system I/O failure.
     Io(String),
 }
@@ -389,8 +386,8 @@ pub async fn download_item(
             }
         } else {
             // 200 or any non-206: restart from scratch; truncate .part.
-            let f = std::fs::File::create(&part_path)
-                .map_err(|e| DownloadError::Io(e.to_string()))?;
+            let f =
+                std::fs::File::create(&part_path).map_err(|e| DownloadError::Io(e.to_string()))?;
 
             let hasher = item
                 .expected_hash
@@ -525,6 +522,80 @@ pub struct PlanResult {
 }
 
 // ---------------------------------------------------------------------------
+// Cancellation
+// ---------------------------------------------------------------------------
+
+/// A cheap, cloneable cancel signal for an in-progress [`execute_plan`] run.
+///
+/// Cancellation is **cooperative and edge-driven**: each pending item checks
+/// the token *before acquiring a semaphore permit*. Once tripped, no new permit
+/// is acquired and no new item download starts. Items already holding a permit
+/// (in-flight) finish normally — that is acceptable; the higher layer discards
+/// staging on cancel, so a finished-but-cancelled item is harmless.
+///
+/// Clones share the same underlying flag, so a token handed to a worker can be
+/// tripped from anywhere (e.g. a `cancel_task` command).
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CancelToken {
+    /// Create a fresh, untripped token.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Trip the token. Idempotent.
+    pub fn cancel(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Returns `true` once [`cancel`](Self::cancel) has been called.
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Per-item status for a *cancellable* run.
+///
+/// Wraps the normal [`ItemStatus`] and adds a `Cancelled` case for items that
+/// the cancel token tripped before they acquired a permit (no network request
+/// made). Kept separate from `ItemStatus` so the non-cancellable
+/// [`execute_plan`] contract and its existing consumers are untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CancellableStatus {
+    /// The item ran to a terminal [`ItemStatus`] (`Ok` / `Skipped` / `Failed`).
+    Ran(ItemStatus),
+    /// The run was cancelled before this item acquired a permit; no network
+    /// request was made.
+    Cancelled,
+}
+
+/// Per-item outcome for a cancellable run (URL + [`CancellableStatus`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancellableOutcome {
+    pub url: String,
+    pub status: CancellableStatus,
+}
+
+/// Aggregated result of [`execute_plan_cancellable`].
+///
+/// Distinct from [`PlanResult`] so adding the cancel seam doesn't perturb the
+/// existing `execute_plan` consumers. `cancelled` lets the caller tell a
+/// cancelled run apart from a fully-completed one even when in-flight items
+/// happened to finish; `outcomes` holds one entry per plan item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancellablePlanResult {
+    pub outcomes: Vec<CancellableOutcome>,
+    /// `true` if the run's [`CancelToken`] was tripped before the plan finished.
+    pub cancelled: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Concurrent executor
 // ---------------------------------------------------------------------------
 
@@ -543,27 +614,68 @@ pub struct PlanResult {
 ///   inspects [`PlanResult::outcomes`] to handle partial failures.
 /// - Items whose dest already exists and matches the hash are marked
 ///   [`ItemStatus::Skipped`] without issuing a network request.
+///
+/// This is the uncancellable entry point — it runs the cancellable engine with
+/// a never-tripped token and maps the result down to a [`PlanResult`]. Existing
+/// callers keep the unchanged 4-arg signature and `PlanResult` return type. New
+/// callers that need to stop an in-progress plan use [`execute_plan_cancellable`].
 pub async fn execute_plan(
     client: &reqwest::Client,
     plan: &DownloadPlan,
     sink: &(impl ProgressSink + Sync),
     concurrency: usize,
 ) -> PlanResult {
+    let cancellable =
+        execute_plan_cancellable(client, plan, sink, concurrency, &CancelToken::new()).await;
+    // An untripped token never yields a `Cancelled` item, so every outcome is
+    // `Ran(_)` — unwrap to the flat `ItemStatus`.
+    let outcomes = cancellable
+        .outcomes
+        .into_iter()
+        .map(|o| ItemOutcome {
+            url: o.url,
+            status: match o.status {
+                CancellableStatus::Ran(status) => status,
+                CancellableStatus::Cancelled => {
+                    unreachable!("execute_plan passes an untripped token; no item can be cancelled")
+                }
+            },
+        })
+        .collect();
+    PlanResult { outcomes }
+}
+
+/// Cancellable variant of [`execute_plan`] — the cancel seam.
+///
+/// Same concurrent, hash-verified download behaviour as [`execute_plan`], plus:
+/// - **Cancellation:** each pending item checks `cancel` *before acquiring a
+///   permit*. Once the token is tripped, no further item starts a download;
+///   such items are reported as [`CancellableStatus::Cancelled`]. In-flight
+///   items (already holding a permit) finish normally.
+/// - [`CancellablePlanResult::cancelled`] is set when the token was tripped, so
+///   the caller can tell a cancelled run from a fully-completed one.
+pub async fn execute_plan_cancellable(
+    client: &reqwest::Client,
+    plan: &DownloadPlan,
+    sink: &(impl ProgressSink + Sync),
+    concurrency: usize,
+    cancel: &CancelToken,
+) -> CancellablePlanResult {
     use futures_util::stream::{FuturesUnordered, StreamExt as _};
     use std::sync::Arc;
     use tokio::sync::Semaphore;
 
     // Separate the plan items into those that need downloading vs those
     // that can be skipped immediately (dedupe short-circuit).
-    let mut outcomes: Vec<ItemOutcome> = Vec::with_capacity(plan.items.len());
+    let mut outcomes: Vec<CancellableOutcome> = Vec::with_capacity(plan.items.len());
     let download_items: Vec<&DownloadItem> = plan
         .items
         .iter()
         .filter(|item| {
             if !needs_download(&item.dest, &item.expected_hash) {
-                outcomes.push(ItemOutcome {
+                outcomes.push(CancellableOutcome {
                     url: item.url.clone(),
-                    status: ItemStatus::Skipped,
+                    status: CancellableStatus::Ran(ItemStatus::Skipped),
                 });
                 false // skip
             } else {
@@ -579,45 +691,65 @@ pub async fn execute_plan(
     );
 
     if download_items.is_empty() {
-        return PlanResult { outcomes };
+        return CancellablePlanResult {
+            outcomes,
+            cancelled: cancel.is_cancelled(),
+        };
     }
 
     // Semaphore limits the number of simultaneous in-flight downloads.
     let semaphore = Arc::new(Semaphore::new(concurrency));
 
     // Build a FuturesUnordered from all items that need downloading.
-    // Each future acquires a semaphore permit before issuing the request
-    // and releases it (by drop) when done. The permit is `OwnedSemaphorePermit`
-    // so it does not borrow the semaphore.
+    // Each future checks the cancel token, then acquires a semaphore permit
+    // before issuing the request, releasing it (by drop) when done. The permit
+    // is `OwnedSemaphorePermit` so it does not borrow the semaphore.
     let pending: FuturesUnordered<_> = download_items
         .into_iter()
         .map(|item| {
             let sem = Arc::clone(&semaphore);
             async move {
+                // Acquire a permit first (bounds concurrency), then re-check the
+                // cancel token *after winning the permit* — the decisive gate.
+                // `FuturesUnordered` polls every item future eagerly, so a check
+                // before `acquire` would race the trip; checking once the permit
+                // is held means a tripped run starts no further download. In-flight
+                // items (already past this gate) finish normally.
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
+                if cancel.is_cancelled() {
+                    return CancellableOutcome {
+                        url: item.url.clone(),
+                        status: CancellableStatus::Cancelled,
+                    };
+                }
                 let status = match download_item(client, item, sink).await {
                     Ok(()) => ItemStatus::Ok,
-                    Err(e) => ItemStatus::Failed { error: e.to_string() },
+                    Err(e) => ItemStatus::Failed {
+                        error: e.to_string(),
+                    },
                 };
                 // Permit dropped here → slot released.
-                ItemOutcome {
+                CancellableOutcome {
                     url: item.url.clone(),
-                    status,
+                    status: CancellableStatus::Ran(status),
                 }
             }
         })
         .collect();
 
     // Collect all outcomes, running up to `concurrency` at a time.
-    let mut downloaded: Vec<ItemOutcome> = pending.collect().await;
+    let mut downloaded: Vec<CancellableOutcome> = pending.collect().await;
     for outcome in &downloaded {
-        if let ItemStatus::Failed { error } = &outcome.status {
+        if let CancellableStatus::Ran(ItemStatus::Failed { error }) = &outcome.status {
             log::warn!("download: item failed — url={} error={error}", outcome.url);
         }
     }
     outcomes.append(&mut downloaded);
 
-    PlanResult { outcomes }
+    CancellablePlanResult {
+        outcomes,
+        cancelled: cancel.is_cancelled(),
+    }
 }
 
 // ---------------------------------------------------------------------------
