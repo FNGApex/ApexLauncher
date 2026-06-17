@@ -1,21 +1,25 @@
-//! Instance file-tree materialization — storage-auth-reorg, Slice C, CP1.
+//! Instance file-tree materialization — storage-auth-reorg, Slice C, CP1;
+//! copy isolation, download-runner-rework CP-5.
 //!
 //! Given a shared `cache/` root and a per-instance target directory, builds
-//! the same relative file tree under the instance directory by hardlinking
-//! each artifact. Falls back to a byte copy when hardlinking fails (e.g.
-//! cross-volume `EXDEV`). Idempotent: an already-present destination is
-//! silently skipped.
+//! the same relative file tree under the instance directory by writing an
+//! independent **byte copy** of each artifact (`std::fs::copy`). Each instance
+//! therefore owns its libs + version jars outright — editing or deleting one
+//! instance's file never affects another instance or the shared cache. Assets
+//! stay shared (immutable, content-addressed) and are not materialized here.
+//! Idempotent: an already-present destination is silently skipped.
 //!
 //! ## Injectable link seam
 //!
-//! The per-file hardlink operation is injectable via a `link_fn` closure so
-//! that unit tests can force a failure (cross-device error) and assert the
-//! copy fallback ran and produced a correct byte copy. The public wrapper
-//! [`materialize`] passes `std::fs::hard_link` as the default.
+//! The per-file copy operation is injectable via a `link_fn` closure so that
+//! unit tests can force a failure (cross-device error) and assert the copy
+//! fallback path runs. The public wrapper [`materialize`] passes
+//! `std::fs::copy` as the default; the cross-device fallback (also a byte copy)
+//! is now moot for the default path but kept for any injected linker that
+//! reports `EXDEV`.
 
 use std::{
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -69,10 +73,7 @@ where
 
         // Missing source → caller error.
         if !src.exists() {
-            return Err(format!(
-                "materialize: source not found: {}",
-                src.display()
-            ));
+            return Err(format!("materialize: source not found: {}", src.display()));
         }
 
         // Already present → idempotent skip.
@@ -123,20 +124,22 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Public wrapper (uses std::fs::hard_link)
+// Public wrapper (uses std::fs::copy for per-instance isolation)
 // ---------------------------------------------------------------------------
 
-/// Materialize `rel_paths` from `cache_root` into `instance_dir` using
-/// `std::fs::hard_link` with a copy fallback.
+/// Materialize `rel_paths` from `cache_root` into `instance_dir` as independent
+/// **byte copies** (`std::fs::copy`).
 ///
-/// See [`materialize_core`] for the full contract.
+/// Each instance owns its libs + version jars outright — no shared inode, so
+/// mutating or deleting one instance's file leaves the cache source and every
+/// other instance untouched. See [`materialize_core`] for the full contract.
 pub fn materialize(
     cache_root: &Path,
     instance_dir: &Path,
     rel_paths: &[PathBuf],
 ) -> Result<(), String> {
     materialize_core(cache_root, instance_dir, rel_paths, |src, dst| {
-        fs::hard_link(src, dst)
+        fs::copy(src, dst).map(|_| ())
     })
 }
 
