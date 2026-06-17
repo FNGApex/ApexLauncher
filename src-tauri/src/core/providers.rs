@@ -134,7 +134,6 @@ pub struct Dependency {
 /// - Modrinth: `project_type` facet (`"mod"` or `"modpack"`).
 /// - CurseForge: `classId` query param (`6` for mods, `4471` for modpacks).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
 pub enum ProjectType {
     /// Standard mods (default).
     #[default]

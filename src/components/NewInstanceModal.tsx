@@ -23,6 +23,10 @@ const LOADER_LABELS: Record<LoaderKind, string> = {
   forge: "Forge",
 };
 
+function isLoaderKind(v: string): v is LoaderKind {
+  return Object.keys(LOADER_LABELS).includes(v);
+}
+
 type Tab = "create" | "import";
 
 /** Create-instance dialog. MC version and loader builds are fetched live from
@@ -217,7 +221,7 @@ function CreateTab({ onClose }: { onClose: () => void }) {
         <Field label="Mod loader">
           <select
             value={loaderKind}
-            onChange={(e) => setLoaderKind(e.target.value as LoaderKind)}
+            onChange={(e) => { if (isLoaderKind(e.target.value)) setLoaderKind(e.target.value); }}
             disabled={loadersQuery.isFetching || !loaders}
             className="input"
           >

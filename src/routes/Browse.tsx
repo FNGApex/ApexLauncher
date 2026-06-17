@@ -321,8 +321,9 @@ function MergedFeed({
         <ModpackCard key={`${pack.provider}:${pack.id}`} pack={pack} />
       ))}
 
-      {/* Empty state — only when both providers yielded nothing (and no errors) */}
-      {merged.length === 0 && !modrinth.isLoading && !curseforge.isLoading && (
+      {/* Empty state — only when both providers yielded nothing (and not still loading).
+          CF key-missing counts as settled; exclude its loading flag in that case. */}
+      {merged.length === 0 && !modrinth.isLoading && (cfKeyMissing || !curseforge.isLoading) && (
         <div className="grid place-items-center rounded-xl border border-dashed border-border bg-surface/40 py-12 text-center text-sm text-muted">
           <Package className="mb-3 size-8" />
           No modpacks found

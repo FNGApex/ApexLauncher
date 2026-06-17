@@ -637,8 +637,13 @@ function ModSearchCard({
   const [installError, setInstallError] = useState<string | null>(null);
 
   // Resolve the provider routing string from the ProviderKind response value.
+  // ProviderKind serializes as "modrinth" | "curseForge" (camelCase from Rust).
   const providerRoute: "modrinth" | "curseforge" =
-    mod.provider === "modrinth" ? "modrinth" : "curseforge";
+    mod.provider === "modrinth"
+      ? "modrinth"
+      : mod.provider === "curseForge"
+        ? "curseforge"
+        : ((_: never) => "curseforge" as const)(mod.provider);
 
   const versionsQuery = useQuery({
     queryKey: [
@@ -869,7 +874,10 @@ function ModRow({ mod, entry, instanceSlug, onMutate }: ModRowProps) {
   });
 
   const updateMutation = useMutation({
-    mutationFn: () => updateMod(instanceSlug, entry!.projectId),
+    mutationFn: () => {
+      if (!entry) return Promise.reject(new Error("no mod entry"));
+      return updateMod(instanceSlug, entry.projectId);
+    },
     onSuccess: (res) => {
       setUpdateResult(res);
       if (res.status === "updated") onMutate();

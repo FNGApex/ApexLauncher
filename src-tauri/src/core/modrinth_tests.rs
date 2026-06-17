@@ -464,6 +464,9 @@ fn search_url_with_project_type_modpack_includes_modpack_facet() {
         decoded.contains("project_type:modpack"),
         "project_type:modpack facet missing: {decoded}"
     );
+    // The trailing `"` is intentional: `project_type:modpack` contains the
+    // substring `project_type:mod`, so we must match the closing quote to
+    // distinguish the two facet values.
     assert!(
         !decoded.contains("project_type:mod\""),
         "project_type:mod should not appear when modpack selected: {decoded}"
