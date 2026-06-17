@@ -1186,18 +1186,13 @@ pub struct MrpackImportResult {
 /// 7. Return [`MrpackImportResult`].
 ///
 /// All errors map to `String`.
-#[tauri::command]
-async fn import_mrpack(
+async fn import_mrpack_from_bytes(
     app: tauri::AppHandle,
-    mrpack_path: String,
+    bytes: Vec<u8>,
     name_override: Option<String>,
 ) -> Result<MrpackImportResult, String> {
     use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
     use core::modpack::extract_overrides;
-
-    // 1. Read file bytes.
-    let bytes = std::fs::read(&mrpack_path)
-        .map_err(|e| format!("could not read mrpack file '{mrpack_path}': {e}"))?;
 
     // 2. Parse manifest minimally to obtain name/mc/loader for instance creation.
     //    The full parse+plan goes through the tested `read_mrpack` seam below (step 4).
@@ -1287,6 +1282,17 @@ async fn import_mrpack(
     })
 }
 
+#[tauri::command]
+async fn import_mrpack(
+    app: tauri::AppHandle,
+    mrpack_path: String,
+    name_override: Option<String>,
+) -> Result<MrpackImportResult, String> {
+    let bytes = std::fs::read(&mrpack_path)
+        .map_err(|e| format!("could not read mrpack file '{mrpack_path}': {e}"))?;
+    import_mrpack_from_bytes(app, bytes, name_override).await
+}
+
 // ---------------------------------------------------------------------------
 // CP B4: CurseForge `.zip` modpack import
 // ---------------------------------------------------------------------------
@@ -1322,18 +1328,15 @@ pub struct CfImportResult {
 /// 7. Return [`CfImportResult`].
 ///
 /// All errors map to `String`.
-#[tauri::command]
-async fn import_curseforge_zip(
+async fn import_cf_zip_from_bytes(
     app: tauri::AppHandle,
-    cf_zip_path: String,
+    bytes: Vec<u8>,
     name_override: Option<String>,
 ) -> Result<CfImportResult, String> {
     use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
     use core::modpack::{extract_overrides, read_cf_manifest, resolve_and_build_cf_plan};
 
-    // 1. Read file bytes; parse manifest.json.
-    let bytes = std::fs::read(&cf_zip_path)
-        .map_err(|e| format!("could not read CurseForge zip '{cf_zip_path}': {e}"))?;
+    // 1. Parse manifest.json.
     let manifest = read_cf_manifest(&bytes).map_err(|e| e.to_string())?;
 
     // 2. Create the instance.
@@ -1410,6 +1413,17 @@ async fn import_curseforge_zip(
         failed,
         manual,
     })
+}
+
+#[tauri::command]
+async fn import_curseforge_zip(
+    app: tauri::AppHandle,
+    cf_zip_path: String,
+    name_override: Option<String>,
+) -> Result<CfImportResult, String> {
+    let bytes = std::fs::read(&cf_zip_path)
+        .map_err(|e| format!("could not read CurseForge zip '{cf_zip_path}': {e}"))?;
+    import_cf_zip_from_bytes(app, bytes, name_override).await
 }
 
 #[cfg(test)]
