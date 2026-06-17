@@ -30,3 +30,5 @@ src-tauri/gen/
 # Worktrees
 .worktrees/
 tmp/
+
+.worktrees/
