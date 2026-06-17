@@ -1,7 +1,8 @@
-# Modpack import (Phase 6 — Modrinth `.mrpack` slice A · CurseForge `.zip` slice B)
+# Modpack import (Phase 6 — Modrinth `.mrpack` slice A · CurseForge `.zip` slice B · Browse install slice C)
 
-> Slice A (`.mrpack`) is **shipped** (commit `505670b`); its sections below are the shipped
-> contract. **Slice B (CurseForge `.zip`) is the active work** — see `## Slice B` near the end.
+> Slices A (`.mrpack`) and B (CurseForge `.zip`) are **shipped** (`505670b`..`241294f`); their
+> sections below are the shipped contract. **Slice C (Browse → one-click install) is the active
+> work** — see `## Slice C` near the end.
 
 
 ## Goal
@@ -14,7 +15,6 @@ direct URLs).
 
 ## Non-goals
 
-- Browse / one-click pack install from a provider — slice C.
 - Pack update / re-resolve against a newer index — slice D.
 - Provider-id-based update of mrpack-imported mods (mrpack carries no project/version ids).
 - `server-overrides/` (we are a client launcher).
@@ -174,7 +174,117 @@ seam. Full rationale in the design doc.
 | Distribution-disabled file's manual page URL needs mod slug not in the file record | med | Surface projectID/fileID + filename with a `curseforge.com/projects/<projectID>` link; richer slug-based link is a follow-up |
 | Partial instance left on disk if resolution/download fails after `instances::create` | med | Same gap as slice A (follow-up `modpack-import-partial-cleanup`); not re-litigated in slice B |
 
+## Slice C — Browse → one-click install (active)
+
+### Goal (slice C)
+
+From the Browse modpack feed, install a pack in one click instead of opening its provider page.
+Given a `ProjectSummary` (provider + project id + `projectType: Modpack`), resolve the project's
+latest pack file, download the archive, and run it through the *same* import path slices A/B
+prove (`import_*_from_bytes`). Modrinth → `.mrpack` path; CurseForge → `.zip` path. A pack file
+that is not distributable (CF `url: None`) surfaces a manual-download outcome (open `page_url`),
+never a silent failure.
+
+### Non-goals (slice C)
+
+- Choosing a non-latest version (version dropdown) — folds into slice D.
+- Live per-file download progress — executors run `NoOpSink`; card shows pending + result toast.
+  Live progress is a follow-up.
+- Pack update / re-resolve of an already-installed pack — slice D.
+- Any change to the local-file import (NewInstanceModal Import tab) behavior.
+
+### Success criteria (slice C)
+
+- [ ] The mrpack and CF import executors are refactored so their byte-processing body is a
+      shared inner fn (`import_mrpack_from_bytes`, `import_cf_zip_from_bytes`); the existing
+      path-based commands call it. The refactor's correctness is verified by **the existing
+      slice A/B test suite passing unmodified** (no observable behavior change).
+- [ ] A backend resolver picks a modpack project's **latest** version + its **primary** file
+      (`primary == true`, else first file) via `get_versions`. "Latest" = the **first version
+      returned** — both providers return newest-first and the normalized `ProjectVersion` carries
+      no date field to sort on. Adding a date field for robust sorting is a deferred follow-up if
+      live testing shows the order is unreliable.
+- [ ] CurseForge pack whose primary file has `url: None` returns a manual outcome carrying
+      `page_url` — no instance is created, no blind download.
+- [ ] The pack archive is staged under `cache/installers/` before parsing (reuses
+      `cache_installers_dir`).
+- [ ] The command returns a tagged result distinguishing mrpack / CF (carrying `manual[]`) /
+      not-distributable, so the frontend renders the correct toast without re-deriving provider.
+- [ ] The pure resolve helper (latest-version + primary-file selection, both providers, CF
+      `url: None`→manual) is unit-tested headlessly via the mock `ProviderHttpClient` seam (no
+      live HTTP). The `install_modpack` command wiring is verified by `lib_tests.rs`-style
+      shape/plan-shape assertions, matching the established command-test pattern (commands can't
+      run unit-level without an `AppHandle`).
+- [ ] `ModpackCard` in `Browse.tsx` has an Install action (primary) beside the existing
+      open-page action (secondary); click runs the install mutation and surfaces a completion
+      toast reusing the existing import-result toast pattern.
+- [ ] `npm run build` green; `src/lib/ipc.ts` mirrors the new Rust command + result union
+      (camelCase).
+- [ ] Full Rust lib test suite green on the Windows cargo toolchain.
+
+### Approaches (slice C) — archive acquisition
+
+| # | Approach | Sketch | Cost | Risk |
+|---|----------|--------|------|------|
+| A | Backend command owns resolve+download+dispatch; reuse `*_from_bytes` seam | `install_modpack(provider, id)` → `get_versions` → primary file → stage to `cache/installers` → dispatch | low | version ordering assumption |
+| B | Frontend orchestrates: `getModVersions` in TS, then a generic download command, then `importMrpack(path)` | FE picks file + owns manual/provider routing | med | duplicates provider/manual logic in TS; loses backend-owns-archive guarantee |
+| C | New full parallel executor that streams provider file → parse | re-implements A/B body | high | duplicates proven logic; against the pure-planner split |
+
+### Recommendation (slice C)
+
+**A.** The executor bodies already operate on bytes after step 1 — extracting a `*_from_bytes`
+inner fn is a near-zero-risk refactor that lets the new command reuse the *exact* proven import
+path. Backend owning the whole archive (resolve → download → parse) preserves the slice-A/B
+security guarantees (host handling, path safety, manual surfacing) that the design doc's
+"backend owns the file end to end" rejected-approach demands. B leaks format/provider logic into
+TS; C duplicates code. One new command, one small refactor, one UI action.
+
+### Checkpoints (slice C)
+
+| # | Checkpoint | Files/areas | Agent | Est. files | Verifies |
+|---|------------|-------------|-------|------------|----------|
+| C1 | Refactor executors: extract `import_mrpack_from_bytes` / `import_cf_zip_from_bytes` inner fns (take bytes + the existing `name_override`); existing `import_mrpack` / `import_curseforge_zip` read file → call inner. No behavior change. **Commit + confirm A/B test-green before C2–C4.** | `src-tauri/src/lib.rs` | atomic-surgeon | ~1 | existing slice A/B modpack + lib tests pass unmodified |
+| C2 | Pack-file resolver (seam): given provider + project id + mock `ProviderHttpClient`, call `get_versions` → take first version (newest-first; no date field to sort) → primary file (`primary == true`, else first) → resolved `(url: Option, fileName)`; `url: None` signalled distinctly; empty version list → clear error | `src-tauri/src/core/modpack.rs` (or `providers.rs`) | atomic-builder | ~2 | mock-HTTP unit tests: first version picked; primary picked; no-primary→first file; `url:None`→manual signal; empty versions→err; both providers |
+| C3 | `install_modpack` command + tagged `ModpackInstallResult`: resolve (C2) → if no url, manual outcome w/ `page_url`; else stage archive to `cache/installers/<fileName>` (reqwest GET) → dispatch to C1 inner fn by provider, passing pack display name (from version metadata or `fileName`) as `name_override` | `src-tauri/src/lib.rs` | atomic-builder | ~2 | mock-provider shape tests (`lib_tests.rs`-style): modrinth→mrpack result; cf→cf result; cf url None→manual variant (no instance); routes through C1+C2 |
+| C4 | Frontend: `installModpack` ipc wrapper + `ModpackInstallResult` union type; `ModpackCard` Install action (primary) + open-page (secondary); install mutation + completion toast reusing existing pattern | `src/lib/ipc.ts`, `src/routes/Browse.tsx` | atomic-builder | ~2 | `npm run build` green; ipc mirrors Rust (camelCase); install + manual toasts surfaced |
+
+### Risks (slice C)
+
+| Risk | Likelihood | Mitigation |
+|------|-----------|------------|
+| `get_versions` first-returned is not newest → installs stale version | med | Take first returned (both providers return newest-first); `ProjectVersion` has no date field to sort on. If live testing shows wrong order, add a date field as a follow-up |
+| Modpack `get_versions` needs no mc/loader filter but providers expect them | low | Call with `None, None`; signature already takes `Option`s (slice-B/Phase-5 seam) |
+| CF pack-level distribution disabled (`url: None`) | low | Distinct manual variant opens `page_url`; no instance created |
+| Pack archive large → slow single GET with no progress | med | Accept for slice C (card pending state); live progress is a follow-up |
+| Partial instance on mid-import failure | med | Same pre-existing gap as A/B (`modpack-import-partial-cleanup`); not re-litigated here |
+| Refactor accidentally changes A/B behavior | low | C1 is byte-identical body extraction; A/B tests gate it before C2+ build on top |
+
 ## Change log
+
+### 2026-06-16 — Slice C: "latest version" = first returned (no date sort)
+
+**What changed:** C2's latest-version selection now takes the **first version returned** by
+`get_versions` rather than sorting by date. The normalized `ProjectVersion` type (`providers.rs`)
+carries no date field, so date-sorting is not possible without widening that type (and every
+version consumer). Updated success criterion 2, the C2 checkpoint, and the ordering risk row.
+
+**Why:** Discovered during C2 planning — `ProjectVersion` has no `date_published`/`fileDate`
+field. Both providers return versions newest-first from their APIs, so first-returned is correct
+in practice. Adding a date field is deferred to a follow-up if live testing shows the order is
+unreliable. **Superseded:** the prior C2 contract said "version ordering made deterministic
+(newest first; sort if not guaranteed)" — sorting was not feasible.
+
+### 2026-06-16 — Slice C (Browse → one-click install) added
+
+**What changed:** Added the `## Slice C` contract (goal, non-goals, success criteria,
+approaches, recommendation, checkpoints C1–C4, risks). Retitled the spec to cover three slices;
+marked slices A and B shipped. Removed "Browse / one-click pack install from a provider — slice
+C" from the top-level Non-goals — now in scope as slice C. Updated the header note to mark slice
+C active.
+
+**Why:** Slices A/B shipped; slice C is the next roadmap slice (the headline "one-click install"
+behavior). Reuses the proven A/B byte-processing path via a small `*_from_bytes` refactor plus a
+new provider-resolve+download front-end. No A/B behavior changes.
 
 ### 2026-06-16 — Import entry point moved to New Instance modal
 

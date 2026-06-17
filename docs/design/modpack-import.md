@@ -170,6 +170,67 @@ flowchart TD
 Caption: slice-B CF `.zip` import — parse stays pure; the executor resolves each file's URL via
 the CF API, then the pure planner builds the download plan + manual list.
 
+## Browse → one-click install (slice C ground truth)
+
+Slices A/B import a **local archive the user already picked**. Slice C starts from a
+`ProjectSummary` in the Browse feed (provider + project id + `projectType: Modpack`) and has
+no file on disk. The only new work is **acquiring the archive**: resolve the project's latest
+pack file, download it, then hand the bytes to the *exact same* parse/plan/extract path A/B
+already prove.
+
+### What a "modpack file" is per provider
+
+- **Modrinth:** a modpack project's latest version has a primary file that is the `.mrpack`
+  (`VersionFile.primary == true`, `url` always present — Modrinth distributes packs directly).
+  → feed bytes to the slice-A path (`read_mrpack` + overrides).
+- **CurseForge:** a modpack project (`classId=4471`) latest version has a primary file that is
+  the pack `.zip`. CF *pack* files are normally distributable, but `url` can be `None`
+  (`allowModDistribution:false`). No url → cannot auto-install → surface manual (open
+  `page_url`), same fallback shape as a distribution-disabled mod inside a CF pack.
+  → feed bytes to the slice-B path (`read_cf_manifest` + `resolve_and_build_cf_plan` + overrides).
+
+### The one real refactor
+
+Both executors today are `read file → bytes → [6-step body on bytes]`. The body never touches
+the path again after step 1. So extract the body into a bytes-taking inner function; the
+existing file-picker commands and the new provider command both call it. No logic duplicated,
+no behavior change to A/B.
+
+```
+import_mrpack(path)            → read file → import_mrpack_from_bytes(bytes, name?)
+import_curseforge_zip(path)    → read file → import_cf_zip_from_bytes(bytes, name?)
+install_modpack(provider, id)  → resolve latest pack file → download archive → dispatch:
+                                   modrinth  → import_mrpack_from_bytes
+                                   curseforge→ import_cf_zip_from_bytes
+```
+
+### Acquire-archive flow (the new code)
+
+1. `get_versions(client, project_id, None, None)` (no mc/loader filter — the pack *defines*
+   those). Pick the **latest** version (provider returns newest-first; if ordering is not
+   guaranteed, sort by date). Pick the primary file (`files.iter().find(|f| f.primary)`,
+   else first).
+2. If the file `url` is `None` → return a manual-download outcome carrying `page_url`. (CF only.)
+3. Download the archive to `cache/installers/<fileName>` (helper exists: `cache_installers_dir`).
+   Plain `reqwest` GET to bytes/file — single URL, no plan engine needed. Cache hit on
+   re-install of the same file is a free bonus, not a requirement.
+4. Read the staged bytes and dispatch to the matching `*_from_bytes` inner fn.
+
+### Result shape
+
+The two import paths already return distinct structs (`MrpackImportResult` vs `CfImportResult`
+— the latter carries `manual[]`). `install_modpack` returns a **tagged union** so the frontend
+renders the right toast without re-deriving the provider. A third variant covers the
+"pack file itself is not distributable" manual case.
+
+### UI
+
+`ModpackCard` in `Browse.tsx` gains an **Install** action (primary) alongside the existing
+"open page" (secondary). Click → `install_modpack` mutation (TanStack) → completion toast
+reusing the existing import-result toast pattern from `Home.tsx`. Live per-file progress is
+**out of scope** for slice C (executors already run with `NoOpSink`); the button shows a
+pending state and a result toast. Live progress is a follow-up.
+
 ## Rejected approaches
 
 - **Stream-download during parse (no plan).** Couples network to parsing; untestable without
@@ -188,3 +249,9 @@ the CF API, then the pure planner builds the download plan + manual list.
   packs commonly list fallback mirrors.
 - `overrides/` colliding with a downloaded file path: last-writer. Slice A applies overrides
   **after** downloads so author overrides win (matches Modrinth/Prism behavior).
+- (slice C) `get_versions` ordering: is the newest version guaranteed first for both
+  providers? If not, sort by a version date field before picking latest. Verify against a live
+  response; until then, sort defensively.
+- (slice C) Version selection: slice C installs the **latest** version only. User-chosen
+  version (a version dropdown on the card) is deferred — it folds naturally into slice D
+  (update/re-resolve), which already needs version-diffing.
