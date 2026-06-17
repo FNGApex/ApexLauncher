@@ -716,6 +716,7 @@ fn make_instance_dir(tmp: &tempfile::TempDir, initial_playtime: u64) -> std::pat
             memory_mb: 2048,
         },
         source: None,
+        pack_locked: false,
         mods: vec![],
         created: "2024-01-01T00:00:00+00:00".to_string(),
         last_played: None,

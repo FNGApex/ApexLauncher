@@ -1,10 +1,10 @@
 # Modpack import (Phase 6 — Modrinth `.mrpack` slice A · CurseForge `.zip` slice B · Browse install slice C · pack update slice D)
 
-> Slices A (`.mrpack`), B (CurseForge `.zip`), and C (Browse → one-click install) are all
-> **shipped**; their sections are the shipped contract. Slice C landed across
-> `2eac817`..`b1e21f3`. **Slice D (pack update + version picker + Pack Lock) is the active
-> contract** — see `## Slice D`. Design ground truth: `docs/design/modpack-import.md`
-> § "Pack update (slice D ground truth)".
+> Slices A (`.mrpack`), B (CurseForge `.zip`), C (Browse → one-click install), and D (pack
+> update + version picker + Pack Lock) are all **shipped**; their sections are the shipped
+> contract. Slice C landed across `2eac817`..`b1e21f3`; slice D across `d1156b9`..`646cd93`
+> (branch `modpack-slice-d`) — see `## Slice D` + the Implementation log. Design ground truth:
+> `docs/design/modpack-import.md` § "Pack update (slice D ground truth)".
 
 
 ## Goal
@@ -262,7 +262,7 @@ TS; C duplicates code. One new command, one small refactor, one UI action.
 | Partial instance on mid-import failure | med | Same pre-existing gap as A/B (`modpack-import-partial-cleanup`); not re-litigated here |
 | Refactor accidentally changes A/B behavior | low | C1 is byte-identical body extraction; A/B tests gate it before C2+ build on top |
 
-## Slice D — pack update + version picker + Pack Lock (active)
+## Slice D — pack update + version picker + Pack Lock (shipped)
 
 ### Goal (slice D)
 
@@ -534,3 +534,70 @@ Verified by orchestrator: full Rust lib **468 tests pass** (Windows toolchain vi
 - `modpack-import-c-toast-stacking` (nit) — per-card install toasts stack at the same fixed position.
 
 **Not done (needs GUI, not testable in WSL):** manual end-to-end one-click install + launch of a real Browse pack. Backend + frontend build verified; GUI run pending the WSLg/Windows-launch decision.
+
+### built — 2026-06-17 (slice D, pack update + version picker + Pack Lock)
+
+Built across checkpoints D1–D5 via the `/subagent-implementation` loop (worktree branch
+`modpack-slice-d`, off planning commit `7603e4c`). Commits (chronological):
+
+- `d1156b9` — D1 manifest schema + provenance: `ModEntry.from_pack` + `Instance.pack_locked`
+  (serde-default, no `SCHEMA_VERSION` bump); `from_pack=true` in the pack planners,
+  `false` in `planned_to_mod_entry`; `ResolvedPackFile` widened with `version_id`+`version_name`;
+  optional `Source` threaded through `import_*_from_bytes` (Browse → `Some`, local → `None`).
+  Side effect: `install_modpack` `name_override = Some(version_name)` (closed
+  `modpack-import-c-name-override`). 6 tests.
+- `dc7a507` — D2 version-targeted resolve: `resolve_pack_file(target_version_id: Option<&str>)`
+  (`None`→latest, `Some(id)`→that version, unknown→`ModpackError::VersionNotFound`);
+  `install_modpack` gains `versionId`. 6 mock-HTTP tests, both providers.
+- `28d05af` — D3 update: pure `plan_pack_update` (reconcile by `fileName`, pack wins, user mods
+  kept) + `update_modpack(slug, versionId?)` overlay command (load source→resolve→stage→reconcile
+  →delete vanished pack jars incl `.disabled`→`execute_plan`→`extract_overrides`→bump source→save)
+  + one-struct `PackUpdateResult { added, removed, kept, failed, manual }`. 8 tests.
+- `09b44f4` — D4 Pack Lock: `instances::set_pack_lock` + pure `ensure_not_locked` guard wired into
+  `add_mod`/`set_mod_enabled`/`remove_mod`/`update_mod` (rejects when locked); `update_modpack`
+  stays unguarded; `set_pack_lock` command registered. 8 tests.
+- `646cd93` — D5 frontend: ipc `updateModpack`/`setPackLock`/`installModpack versionId?` +
+  `PackUpdateResult`; Browse `ModpackCard` version dropdown (lazy on hover); `InstanceDetail`
+  `PackSourcePanel` (source line, version picker, Update + result badge) + Pack Lock toggle that
+  disables the Manage-installs mutation controls.
+
+Verified by orchestrator: full Rust lib **494 tests pass** (Windows toolchain via
+`scripts/build.sh`); `scripts/build.sh check` clean; `npm run build` green (1832 modules). No live
+network in any test.
+
+**Design constraint surfaced:** only Browse one-click installs are updatable — a local `.mrpack`
+carries no project id and a CF `manifest.json` no top-level pack id, so local imports leave
+`source: None` and show no Update action. Documented in the spec/design; honest by construction.
+
+**Out-of-scope work performed:** `install_modpack` `name_override` set to the pack version name
+during D1 (enabled by the new `version_name`), closing follow-up `modpack-import-c-name-override`.
+
+**Unforeseens:**
+- A builder ran repo-wide `cargo fmt`, polluting the D3 diff (23 files of reflow). Reverted the 19
+  format-only files + a cleanup pass restored a clean 4-file D3 diff. Standing rule now: no
+  repo-wide `cargo fmt`; surgical edits only.
+- Dispatched builders launched their own reviewers, colliding with the orchestrator's reviewer
+  (apparent "reviewer crashes"). Fixed: reviews are orchestrator-launched only, isolated (no
+  inter-agent messaging), with trimmed signals (the slow full Windows suite crashed long-running
+  reviewers; it runs once at finalize). Both rules saved to project memory.
+- D3 round-1 review caught a 🔴: `update_modpack` loaded the manifest twice, the second load
+  discarding the reconcile. Fixed (mutate the single loaded instance).
+
+**Deferred items (promoted to `.claude/project/followups/`):**
+- `modpack-import-d-f-1` (risk) — `d1_local_import_pack_source_is_none` tautology test.
+- `modpack-import-d-f-2` (nit) — `d1_source_built…` test duplicates production construction.
+- `modpack-import-d-f-4` (risk) — `update_modpack` archive GET has no timeout (fold with
+  `modpack-import-c-archive-timeout`).
+- `modpack-import-d-f-5` (risk) — `set_mod_enabled`/`remove_mod` load the manifest twice.
+- `modpack-import-d-f-6` (nit) — `d4_update_modpack_unguarded_contract` doesn't mechanically verify.
+
+**Dropped:** 4 cosmetic D5 reviewer nits — the isolated reviewer task was not retained, so the nit
+texts were not captured; build + types green and the two substantive round-1 risks (lock-error
+surfacing, lazy version fetch) were already fixed, so the cosmetics were not worth reconstructing.
+
+**Stale-override limitation (documented, not fixed):** override files dropped *between* pack
+versions linger — no per-file override provenance is tracked. Per-file ledger is a follow-up.
+
+**Not done (needs GUI, not testable in WSL):** manual e2e update of a Browse-installed pack
+(latest + chosen version), Pack Lock toggle behavior, and the version dropdowns in the running app.
+Backend + frontend build verified headlessly; GUI run pending the WSLg/Windows-launch decision.

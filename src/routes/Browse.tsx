@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Link } from "react-router-dom";
 import {
   getLoaders,
+  getModVersions,
   installModpack,
   listMinecraftVersions,
   searchMods,
@@ -358,10 +359,36 @@ function ModpackCard({ pack }: ModpackCardProps) {
   const qc = useQueryClient();
   const [installResult, setInstallResult] = useState<ModpackInstallResult | null>(null);
   const [installError, setInstallError] = useState<string | null>(null);
+  // "latest" sentinel means pass undefined → backend picks first version.
+  const [selectedVersionId, setSelectedVersionId] = useState<string>("latest");
+  // Versions are fetched lazily on first card hover to avoid N requests on Browse load.
+  const [versionsEnabled, setVersionsEnabled] = useState(false);
+
+  // Resolve the provider routing string (response casing → routing param).
+  const providerRoute: "modrinth" | "curseforge" =
+    pack.provider === "modrinth"
+      ? "modrinth"
+      : pack.provider === "curseForge"
+        ? "curseforge"
+        : ((_: never) => "curseforge" as const)(pack.provider);
+
+  // Fetch versions (no MC/loader filter — a pack defines its own).
+  // Only enabled after first hover so Browse load doesn't fire N simultaneous requests.
+  const versionsQuery = useQuery({
+    queryKey: ["packVersions", pack.provider, pack.id],
+    queryFn: () => getModVersions(providerRoute, pack.id, null, null),
+    staleTime: 30_000,
+    enabled: versionsEnabled,
+  });
 
   const install = useMutation({
     mutationFn: () =>
-      installModpack(pack.provider, pack.id, pack.pageUrl ?? undefined),
+      installModpack(
+        pack.provider,
+        pack.id,
+        pack.pageUrl ?? undefined,
+        selectedVersionId === "latest" ? undefined : selectedVersionId,
+      ),
     onSuccess: (result) => {
       if (result.kind === "manual") {
         // Distribution-disabled: open the page for manual download.
@@ -385,7 +412,10 @@ function ModpackCard({ pack }: ModpackCardProps) {
 
   return (
     <>
-      <div className="flex w-full items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 text-sm transition-colors hover:border-primary">
+      <div
+        className="flex w-full items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 text-sm transition-colors hover:border-primary"
+        onMouseEnter={() => setVersionsEnabled(true)}
+      >
         {/* Icon */}
         {pack.iconUrl ? (
           <img
@@ -417,6 +447,23 @@ function ModpackCard({ pack }: ModpackCardProps) {
 
         {/* Actions */}
         <div className="flex shrink-0 items-center gap-2">
+          {/* Version picker */}
+          {versionsQuery.data && versionsQuery.data.length > 0 && (
+            <select
+              value={selectedVersionId}
+              onChange={(e) => setSelectedVersionId(e.target.value)}
+              disabled={install.isPending}
+              className="input w-auto max-w-[140px] text-xs disabled:opacity-50"
+            >
+              <option value="latest">Latest</option>
+              {versionsQuery.data.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name || v.versionNumber}
+                </option>
+              ))}
+            </select>
+          )}
+
           {/* Primary: Install */}
           <button
             onClick={() => install.mutate()}

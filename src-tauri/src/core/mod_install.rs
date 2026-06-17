@@ -503,6 +503,7 @@ pub fn planned_to_mod_entry(p: &PlannedMod) -> ModEntry {
         hashes,
         enabled: true,
         side: p.side.clone(),
+        from_pack: false,
     }
 }
 

@@ -56,6 +56,11 @@ pub struct ModEntry {
     pub hashes: BTreeMap<String, String>,
     pub enabled: bool,
     pub side: String,
+    /// `true` when this entry was written by a pack importer (slice D provenance).
+    /// `false` (default) for user-added mods. Old manifests missing this field
+    /// deserialize as `false` — no schema bump required.
+    #[serde(default)]
+    pub from_pack: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -70,6 +75,11 @@ pub struct Instance {
     pub loader: Loader,
     pub java: JavaCfg,
     pub source: Option<Source>,
+    /// When `true`, mod-mutation commands (`add_mod`, `set_mod_enabled`,
+    /// `remove_mod`, `update_mod`) are blocked. Set by `set_pack_lock` (slice D4).
+    /// Old manifests missing this field deserialize as `false`.
+    #[serde(default)]
+    pub pack_locked: bool,
     pub mods: Vec<ModEntry>,
     pub created: String,
     pub last_played: Option<String>,
@@ -157,6 +167,7 @@ pub fn create(app: &AppHandle, req: CreateInstanceReq) -> Result<Instance, Strin
             memory_mb: default_memory_mb,
         },
         source: None,
+        pack_locked: false,
         mods: Vec::new(),
         created: chrono::Utc::now().to_rfc3339(),
         last_played: None,
@@ -379,6 +390,44 @@ pub fn validate_mod_file_name(name: &str) -> Result<String, String> {
         return Err(format!("mod file name must end in .jar: '{name}'"));
     }
     Ok(name.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Pack Lock operations (D4)
+// ---------------------------------------------------------------------------
+
+/// Pure guard: returns `Err` when `inst.pack_locked` is `true`.
+///
+/// Call this before any mod-mutation logic. Keeps the check pure
+/// (no I/O) so it can be unit-tested without an `AppHandle`.
+pub fn ensure_not_locked(inst: &Instance) -> Result<(), String> {
+    if inst.pack_locked {
+        Err(format!(
+            "instance '{}' is pack-locked; unlock it before modifying mods",
+            inst.slug
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Persist `pack_locked = locked` to the manifest at `manifest_path`.
+///
+/// Pure-path helper; call via [`set_pack_lock`] for normal use.
+pub fn set_pack_lock_on_disk(manifest_path: &Path, locked: bool) -> Result<(), String> {
+    let mut inst = read_manifest(manifest_path)?;
+    inst.pack_locked = locked;
+    write_manifest(manifest_path, &inst)
+}
+
+/// AppHandle-aware wrapper for [`set_pack_lock_on_disk`].
+pub fn set_pack_lock(app: &AppHandle, slug: &str, locked: bool) -> Result<(), String> {
+    let slug = validate_slug(slug)?;
+    let path = store::instances_dir(app)?.join(&slug).join("instance.json");
+    if !path.is_file() {
+        return Err(format!("Instance '{slug}' not found"));
+    }
+    set_pack_lock_on_disk(&path, locked)
 }
 
 // ---------------------------------------------------------------------------

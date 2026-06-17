@@ -72,6 +72,10 @@ pub enum ModpackError {
     #[error("the latest version for this project has no files")]
     NoFiles,
 
+    /// The requested version id was not found in the version list.
+    #[error("version '{0}' not found for this project")]
+    VersionNotFound(String),
+
     /// An I/O error occurred during overrides extraction.
     #[error("I/O error during overrides extraction: {0}")]
     Io(#[from] io::Error),
@@ -479,6 +483,7 @@ pub fn build_cf_pack_plan(
                     hashes: file.hashes.clone().into_iter().collect(),
                     enabled: true,
                     side: "both".to_string(),
+                    from_pack: true,
                 });
             }
             _ => {
@@ -599,13 +604,24 @@ pub struct ResolvedPackFile {
     pub file_name: String,
     /// Which provider supplied this result (useful for C3 dispatch).
     pub provider: crate::core::providers::ProviderKind,
+    /// Provider-specific version identifier (e.g. Modrinth base62 id or CF numeric file id).
+    /// Used to populate `Instance.source.file_id` on the Browse install path.
+    pub version_id: String,
+    /// Human-readable version display name (e.g. `"Pack v1.0"`).
+    /// Used to populate `Instance.source.pack_version` on the Browse install path.
+    pub version_name: String,
 }
 
-/// Resolve a modpack project to its latest version's primary (or first) file.
+/// Resolve a modpack project to a version's primary (or first) file.
 ///
 /// Calls `provider.get_versions(client, project_id, None, None)` — no mc/loader
-/// filter, because the pack itself defines those. "Latest" = the **first version
-/// returned**; both Modrinth and CurseForge return versions newest-first.
+/// filter, because the pack itself defines those.
+///
+/// Version selection:
+/// - `target_version_id = None` ⇒ latest = the **first version returned**; both
+///   Modrinth and CurseForge return versions newest-first (slice-C / D1 behavior).
+/// - `target_version_id = Some(id)` ⇒ the version whose `id` matches exactly.
+///   If no version matches, returns [`ModpackError::VersionNotFound`] naming the id.
 ///
 /// File selection: `files.iter().find(|f| f.primary)`, falling back to the first
 /// file if none is flagged primary.
@@ -615,32 +631,45 @@ pub struct ResolvedPackFile {
 ///
 /// # Errors
 /// - [`ModpackError::NoVersions`] — the provider returned an empty version list.
-/// - [`ModpackError::NoFiles`] — the latest version carries no files.
+/// - [`ModpackError::NoFiles`] — the selected version carries no files.
+/// - [`ModpackError::VersionNotFound`] — `target_version_id` was given but not found.
 /// - Any [`crate::core::providers::ProviderError`] wrapped in [`ModpackError::ResolverError`].
 pub async fn resolve_pack_file(
     provider: &dyn crate::core::providers::ModProvider,
     client: &dyn crate::core::providers::ProviderHttpClient,
     project_id: &str,
+    target_version_id: Option<&str>,
 ) -> Result<ResolvedPackFile, ModpackError> {
     let versions = provider
         .get_versions(client, project_id, None, None)
         .await
         .map_err(ModpackError::ResolverError)?;
 
-    let latest = versions.into_iter().next().ok_or(ModpackError::NoVersions)?;
+    let chosen = match target_version_id {
+        None => versions.into_iter().next().ok_or(ModpackError::NoVersions)?,
+        Some(id) => versions
+            .into_iter()
+            .find(|v| v.id == id)
+            .ok_or_else(|| ModpackError::VersionNotFound(id.to_string()))?,
+    };
 
-    let file = latest
+    let version_id = chosen.id.clone();
+    let version_name = chosen.name.clone();
+
+    let file = chosen
         .files
         .iter()
         .find(|f| f.primary)
-        .or_else(|| latest.files.first())
+        .or_else(|| chosen.files.first())
         .ok_or(ModpackError::NoFiles)?
         .clone();
 
     Ok(ResolvedPackFile {
         url: file.url,
         file_name: file.file_name,
-        provider: latest.provider,
+        provider: chosen.provider,
+        version_id,
+        version_name,
     })
 }
 
@@ -810,6 +839,7 @@ pub fn build_pack_plan(
                 hashes: file.hashes.clone(),
                 enabled: true,
                 side: file.side(),
+                from_pack: true,
             });
         }
     }
@@ -981,6 +1011,77 @@ fn is_safe_dest(dest: &Path, base: &Path) -> bool {
         }
     }
     resolved.starts_with(base)
+}
+
+// ── D3: Update-reconcile helper ──────────────────────────────────────────────
+
+/// The result of [`plan_pack_update`]: mods to delete from disk and the merged
+/// `mods[]` list to write back to the instance manifest.
+#[derive(Debug, Clone)]
+pub struct PackUpdatePlan {
+    /// Old pack `ModEntry`s whose `file_name` is absent from `new_pack_mods`.
+    /// The executor deletes their jar (and `.disabled` twin) from `mc/mods/`.
+    pub to_remove: Vec<crate::core::instances::ModEntry>,
+    /// The new `mods[]` to write to the manifest.
+    ///
+    /// Keyed by `file_name` (unique within `mods/`):
+    /// - `new_pack_mods` entries are always included (pack wins).
+    /// - User-added entries (`from_pack == false`) whose `file_name` is NOT in
+    ///   `new_pack_mods` are kept verbatim.
+    /// - A user entry whose `file_name` collides with a pack entry is replaced
+    ///   by the pack entry (one record, `from_pack = true`).
+    pub merged: Vec<crate::core::instances::ModEntry>,
+}
+
+/// Compute the mod-level delta between the current instance mods and the new pack plan.
+///
+/// - `current_mods` — the instance's existing `mods[]` (may include both pack and
+///   user-added entries).
+/// - `new_pack_mods` — the `mods[]` from the new pack plan; all must have
+///   `from_pack == true` (guaranteed by [`build_pack_plan`] / [`build_cf_pack_plan`]).
+///
+/// # Semantics
+///
+/// Key by `file_name` (unique within `mods/`):
+///
+/// - **to_remove**: `current_mods` entries with `from_pack == true` whose
+///   `file_name` is absent from `new_pack_mods`.  User mods are NEVER removed.
+/// - **kept user mods**: `current_mods` entries with `from_pack == false` whose
+///   `file_name` is NOT in `new_pack_mods` (user additions the new pack does not
+///   overwrite).
+/// - **merged**: `kept_user_mods ++ new_pack_mods`.  A pack entry replaces any
+///   same-`file_name` user or old-pack entry; result has one record per
+///   `file_name`, winner has `from_pack == true`.
+///
+/// Pure — no I/O.
+pub fn plan_pack_update(
+    current_mods: &[crate::core::instances::ModEntry],
+    new_pack_mods: &[crate::core::instances::ModEntry],
+) -> PackUpdatePlan {
+    use std::collections::HashSet;
+
+    // Set of file_names covered by the new plan.
+    let new_names: HashSet<&str> = new_pack_mods.iter().map(|m| m.file_name.as_str()).collect();
+
+    // Old pack mods that disappeared from the new plan → delete their jars.
+    let to_remove: Vec<crate::core::instances::ModEntry> = current_mods
+        .iter()
+        .filter(|m| m.from_pack && !new_names.contains(m.file_name.as_str()))
+        .cloned()
+        .collect();
+
+    // Kept user mods: from_pack=false, file_name not overridden by a pack entry.
+    let kept_user: Vec<crate::core::instances::ModEntry> = current_mods
+        .iter()
+        .filter(|m| !m.from_pack && !new_names.contains(m.file_name.as_str()))
+        .cloned()
+        .collect();
+
+    // merged = kept user mods ++ new pack mods
+    let mut merged = kept_user;
+    merged.extend(new_pack_mods.iter().cloned());
+
+    PackUpdatePlan { to_remove, merged }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

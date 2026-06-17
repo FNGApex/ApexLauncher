@@ -12,8 +12,10 @@ import {
   AlertCircle,
   ArrowLeft,
   Download,
+  ExternalLink,
   FileBox,
   Key,
+  Lock,
   Loader2,
   Package,
   Play,
@@ -22,6 +24,7 @@ import {
   Settings2,
   Square,
   Trash2,
+  Unlock,
   X,
 } from "lucide-react";
 import {
@@ -33,14 +36,18 @@ import {
   removeMod,
   searchMods,
   setModEnabled,
+  setPackLock,
   updateMod,
+  updateModpack,
   type AddModResult,
+  type CfManualFile,
   type FolderMod,
   type LaunchLogPayload,
   type LaunchExitPayload,
   type InstallLogPayload,
   type ManualMod,
   type ModEntry,
+  type PackUpdateResult,
   type ProjectSummary,
   type ProviderCommandError,
   type UpdateModResult,
@@ -261,6 +268,18 @@ export function InstanceDetail() {
             </section>
           )}
 
+          {/* Pack source + Update + Pack Lock (only when installed via Browse) */}
+          {data.instance.source && (
+            <PackSourcePanel
+              slug={slug!}
+              source={data.instance.source}
+              packLocked={data.instance.packLocked ?? false}
+              provider={data.instance.source.provider}
+              projectId={data.instance.source.projectId}
+              onMutate={invalidate}
+            />
+          )}
+
           {/* Mods summary + Manage installs button */}
           <section>
             <div className="flex items-center justify-between gap-4">
@@ -301,12 +320,226 @@ export function InstanceDetail() {
               loaderKind={data.instance.loader.kind}
               folderMods={data.folderMods}
               modEntries={data.instance.mods}
+              packLocked={data.instance.packLocked ?? false}
               onMutate={invalidate}
             />
           </SlideOver>
         </>
       ) : null}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pack source panel — shown when instance was installed via Browse
+// ---------------------------------------------------------------------------
+
+interface PackSourcePanelProps {
+  slug: string;
+  source: { provider: string; projectId: string; fileId: string; packVersion: string };
+  packLocked: boolean;
+  provider: string;
+  projectId: string;
+  onMutate: () => void;
+}
+
+function PackSourcePanel({
+  slug,
+  source,
+  packLocked,
+  provider,
+  projectId,
+  onMutate,
+}: PackSourcePanelProps) {
+  const qc = useQueryClient();
+  const [selectedVersionId, setSelectedVersionId] = useState<string>("latest");
+  const [updateResult, setUpdateResult] = useState<PackUpdateResult | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [lockError, setLockError] = useState<string | null>(null);
+
+  // Resolve the provider routing string (InstanceSource stores the wire value).
+  const providerRoute: "modrinth" | "curseforge" =
+    provider === "modrinth"
+      ? "modrinth"
+      : provider === "curseForge"
+        ? "curseforge"
+        : ((_: never) => "curseforge" as const)(provider as never);
+
+  // Fetch versions for the picker (no MC/loader filter).
+  const versionsQuery = useQuery({
+    queryKey: ["packVersions", provider, projectId],
+    queryFn: () => getModVersions(providerRoute, projectId, null, null),
+    staleTime: 30_000,
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: () =>
+      updateModpack(slug, selectedVersionId === "latest" ? undefined : selectedVersionId),
+    onSuccess: (res) => {
+      setUpdateResult(res);
+      setUpdateError(null);
+      qc.invalidateQueries({ queryKey: ["instance", slug] });
+      qc.invalidateQueries({ queryKey: ["instances"] });
+      onMutate();
+    },
+    onError: (err) => {
+      setUpdateError(err instanceof Error ? err.message : String(err));
+    },
+  });
+
+  const lockMutation = useMutation({
+    mutationFn: () => setPackLock(slug, !packLocked),
+    onSuccess: () => {
+      setLockError(null);
+      qc.invalidateQueries({ queryKey: ["instance", slug] });
+      onMutate();
+    },
+    onError: (err) => {
+      setLockError(err instanceof Error ? err.message : String(err));
+    },
+  });
+
+  return (
+    <section className="mb-8 rounded-lg border border-border bg-surface px-4 py-4">
+      <div className="mb-3 flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-semibold">Pack source</h2>
+          <p className="mt-0.5 text-xs text-muted">
+            <ProviderBadge provider={provider as "modrinth" | "curseForge"} />{" "}
+            <span className="ml-1">Current version: {source.packVersion}</span>
+          </p>
+        </div>
+
+        {/* Pack Lock toggle */}
+        <button
+          onClick={() => lockMutation.mutate()}
+          disabled={lockMutation.isPending}
+          title={packLocked ? "Unlock pack (allow mod changes)" : "Lock pack (freeze mod list)"}
+          className={
+            "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 " +
+            (packLocked
+              ? "border-amber-500/40 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20"
+              : "border-border bg-surface text-muted hover:bg-surface-2 hover:text-foreground")
+          }
+        >
+          {lockMutation.isPending ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : packLocked ? (
+            <Lock className="size-3.5" />
+          ) : (
+            <Unlock className="size-3.5" />
+          )}
+          {packLocked ? "Locked" : "Lock pack"}
+        </button>
+      </div>
+
+      {/* Lock error */}
+      {lockError && (
+        <p className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger">
+          {lockError}
+        </p>
+      )}
+
+      {/* Update row */}
+      <div className="flex flex-wrap items-center gap-2">
+        {versionsQuery.data && versionsQuery.data.length > 0 && (
+          <select
+            value={selectedVersionId}
+            onChange={(e) => setSelectedVersionId(e.target.value)}
+            disabled={updateMutation.isPending}
+            className="input w-auto max-w-[180px] text-xs disabled:opacity-50"
+          >
+            <option value="latest">Latest</option>
+            {versionsQuery.data.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.name || v.versionNumber}
+              </option>
+            ))}
+          </select>
+        )}
+
+        <button
+          onClick={() => updateMutation.mutate()}
+          disabled={updateMutation.isPending || versionsQuery.isLoading}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-60"
+        >
+          {updateMutation.isPending ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="size-3.5" />
+          )}
+          {updateMutation.isPending ? "Updating…" : "Update"}
+        </button>
+      </div>
+
+      {/* Update error */}
+      {updateError && (
+        <p className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger">
+          {updateError}
+        </p>
+      )}
+
+      {/* Update result */}
+      {updateResult && (
+        <PackUpdateResultBadge result={updateResult} onDismiss={() => setUpdateResult(null)} />
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pack update result badge
+// ---------------------------------------------------------------------------
+
+interface PackUpdateResultBadgeProps {
+  result: PackUpdateResult;
+  onDismiss: () => void;
+}
+
+function PackUpdateResultBadge({ result, onDismiss }: PackUpdateResultBadgeProps) {
+  return (
+    <div className="mt-3 rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-xs">
+      <div className="flex items-start justify-between gap-2">
+        <div className="space-y-1">
+          <p className="font-medium text-foreground">Update complete</p>
+          <p className="text-muted">
+            {result.added} added · {result.removed} removed · {result.kept} kept
+            {result.failed > 0 && (
+              <span className="text-danger"> · {result.failed} failed</span>
+            )}
+          </p>
+
+          {result.manual.length > 0 && (
+            <div className="mt-2">
+              <p className="mb-1 font-medium text-muted">Requires manual download:</p>
+              <ul className="space-y-1">
+                {result.manual.map((m) => (
+                  <CfManualFileEntry key={`${m.projectId}:${m.fileId}`} file={m} />
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+        <button onClick={onDismiss} className="shrink-0 text-muted hover:text-foreground">
+          <X className="size-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CfManualFileEntry({ file }: { file: CfManualFile }) {
+  return (
+    <li className="flex items-center justify-between gap-2 rounded-lg border border-border bg-surface px-3 py-1.5">
+      <span className="truncate text-muted">{file.fileName}</span>
+      <button
+        onClick={() => openUrl(file.pageUrl).catch(console.error)}
+        className="flex shrink-0 items-center gap-1 rounded px-2 py-0.5 text-xs font-medium text-primary hover:underline"
+      >
+        <ExternalLink className="size-3" />
+        Open page
+      </button>
+    </li>
   );
 }
 
@@ -322,6 +555,7 @@ interface ManageInstallsPanelProps {
   loaderKind: string;
   folderMods: FolderMod[];
   modEntries: ModEntry[];
+  packLocked: boolean;
   onMutate: () => void;
 }
 
@@ -331,12 +565,21 @@ function ManageInstallsPanel({
   loaderKind,
   folderMods,
   modEntries,
+  packLocked,
   onMutate,
 }: ManageInstallsPanelProps) {
   const [tab, setTab] = useState<ManageTab>("installed");
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Pack-locked notice */}
+      {packLocked && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-400">
+          <Lock className="size-3.5 shrink-0" />
+          <span>Pack is locked — mod changes are disabled. Unlock the pack to make changes.</span>
+        </div>
+      )}
+
       {/* Tab switcher */}
       <div className="flex gap-1 rounded-lg border border-border bg-surface p-1 self-start">
         {(["installed", "add"] as const).map((t) => (
@@ -360,6 +603,7 @@ function ManageInstallsPanel({
           instanceSlug={instanceSlug}
           folderMods={folderMods}
           modEntries={modEntries}
+          packLocked={packLocked}
           onMutate={onMutate}
         />
       ) : (
@@ -367,6 +611,7 @@ function ManageInstallsPanel({
           instanceSlug={instanceSlug}
           minecraft={minecraft}
           loaderKind={loaderKind}
+          packLocked={packLocked}
           onMutate={onMutate}
         />
       )}
@@ -382,6 +627,7 @@ interface InstalledModsTabProps {
   instanceSlug: string;
   folderMods: FolderMod[];
   modEntries: ModEntry[];
+  packLocked: boolean;
   onMutate: () => void;
 }
 
@@ -389,6 +635,7 @@ function InstalledModsTab({
   instanceSlug,
   folderMods,
   modEntries,
+  packLocked,
   onMutate,
 }: InstalledModsTabProps) {
   if (folderMods.length === 0) {
@@ -409,6 +656,7 @@ function InstalledModsTab({
             mod={m}
             entry={entry}
             instanceSlug={instanceSlug}
+            packLocked={packLocked}
             onMutate={onMutate}
           />
         );
@@ -427,10 +675,11 @@ interface AddModTabProps {
   instanceSlug: string;
   minecraft: string;
   loaderKind: string;
+  packLocked: boolean;
   onMutate: () => void;
 }
 
-function AddModTab({ instanceSlug, minecraft, loaderKind, onMutate }: AddModTabProps) {
+function AddModTab({ instanceSlug, minecraft, loaderKind, packLocked, onMutate }: AddModTabProps) {
   const [provider, setProvider] = useState<ModProvider>("modrinth");
   const [rawQuery, setRawQuery] = useState("");
   const [query, setQuery] = useState("");
@@ -594,6 +843,7 @@ function AddModTab({ instanceSlug, minecraft, loaderKind, onMutate }: AddModTabP
               instanceSlug={instanceSlug}
               minecraft={minecraft}
               loaderKind={loaderKind}
+              packLocked={packLocked}
               onInstalled={onMutate}
             />
           ))}
@@ -622,6 +872,7 @@ interface ModSearchCardProps {
   instanceSlug: string;
   minecraft: string;
   loaderKind: string;
+  packLocked: boolean;
   onInstalled: () => void;
 }
 
@@ -630,6 +881,7 @@ function ModSearchCard({
   instanceSlug,
   minecraft,
   loaderKind,
+  packLocked,
   onInstalled,
 }: ModSearchCardProps) {
   const [installing, setInstalling] = useState(false);
@@ -721,13 +973,15 @@ function ModSearchCard({
         {result ? null : (
           <button
             onClick={handleInstall}
-            disabled={installing || versionsQuery.isLoading || !primaryVersion}
+            disabled={installing || versionsQuery.isLoading || !primaryVersion || packLocked}
             title={
-              versionsQuery.isLoading
-                ? "Fetching compatible versions…"
-                : !primaryVersion
-                  ? "No compatible version found"
-                  : `Install ${primaryVersion.versionNumber}`
+              packLocked
+                ? "Pack is locked — unlock to add mods"
+                : versionsQuery.isLoading
+                  ? "Fetching compatible versions…"
+                  : !primaryVersion
+                    ? "No compatible version found"
+                    : `Install ${primaryVersion.versionNumber}`
             }
             className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/80 disabled:opacity-50"
           >
@@ -857,10 +1111,11 @@ interface ModRowProps {
   mod: FolderMod;
   entry: ModEntry | undefined;
   instanceSlug: string;
+  packLocked: boolean;
   onMutate: () => void;
 }
 
-function ModRow({ mod, entry, instanceSlug, onMutate }: ModRowProps) {
+function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps) {
   const [updateResult, setUpdateResult] = useState<UpdateModResult | null>(null);
 
   const toggleMutation = useMutation({
@@ -886,6 +1141,7 @@ function ModRow({ mod, entry, instanceSlug, onMutate }: ModRowProps) {
 
   const isBusy =
     toggleMutation.isPending || removeMutation.isPending || updateMutation.isPending;
+  const isDisabled = isBusy || packLocked;
 
   return (
     <li className="flex flex-col gap-1.5 bg-surface px-4 py-2.5 text-sm">
@@ -906,8 +1162,8 @@ function ModRow({ mod, entry, instanceSlug, onMutate }: ModRowProps) {
             {/* Enable / disable toggle */}
             <button
               onClick={() => toggleMutation.mutate()}
-              disabled={isBusy}
-              title={mod.disabled ? "Enable mod" : "Disable mod"}
+              disabled={isDisabled}
+              title={packLocked ? "Pack is locked" : mod.disabled ? "Enable mod" : "Disable mod"}
               className={
                 "rounded px-2 py-0.5 text-xs font-medium transition-colors disabled:opacity-50 " +
                 (mod.disabled
@@ -927,8 +1183,8 @@ function ModRow({ mod, entry, instanceSlug, onMutate }: ModRowProps) {
             {/* Update */}
             <button
               onClick={() => updateMutation.mutate()}
-              disabled={isBusy}
-              title="Check for update"
+              disabled={isDisabled}
+              title={packLocked ? "Pack is locked" : "Check for update"}
               className="rounded p-1 text-muted transition-colors hover:bg-surface-2 hover:text-foreground disabled:opacity-50"
             >
               {updateMutation.isPending ? (
@@ -941,8 +1197,8 @@ function ModRow({ mod, entry, instanceSlug, onMutate }: ModRowProps) {
             {/* Remove */}
             <button
               onClick={() => removeMutation.mutate()}
-              disabled={isBusy}
-              title="Remove mod"
+              disabled={isDisabled}
+              title={packLocked ? "Pack is locked" : "Remove mod"}
               className="rounded p-1 text-muted transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-50"
             >
               {removeMutation.isPending ? (
