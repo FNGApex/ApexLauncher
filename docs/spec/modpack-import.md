@@ -1,8 +1,8 @@
 # Modpack import (Phase 6 — Modrinth `.mrpack` slice A · CurseForge `.zip` slice B · Browse install slice C)
 
-> Slices A (`.mrpack`) and B (CurseForge `.zip`) are **shipped** (`505670b`..`241294f`); their
-> sections below are the shipped contract. **Slice C (Browse → one-click install) is the active
-> work** — see `## Slice C` near the end.
+> Slices A (`.mrpack`), B (CurseForge `.zip`), and C (Browse → one-click install) are all
+> **shipped**; the sections below are the shipped contract. Slice C landed across
+> `2eac817`..`b1e21f3` — see `## Slice C` and the Implementation log near the end.
 
 
 ## Goal
@@ -175,7 +175,7 @@ seam. Full rationale in the design doc.
 | Distribution-disabled file's manual page URL needs mod slug not in the file record | med | Surface projectID/fileID + filename with a `curseforge.com/projects/<projectID>` link; richer slug-based link is a follow-up |
 | Partial instance left on disk if resolution/download fails after `instances::create` | med | Same gap as slice A (follow-up `modpack-import-partial-cleanup`); not re-litigated in slice B |
 
-## Slice C — Browse → one-click install (active)
+## Slice C — Browse → one-click install (shipped)
 
 ### Goal (slice C)
 
@@ -368,3 +368,31 @@ Verified by orchestrator: full Rust lib **436 tests pass** (Windows toolchain); 
 - `modpack-import-cf-manual-slug-link` (nit) — manual link uses numeric `projects/<id>`, not the exact file page.
 - `modpack-import-partial-cleanup` (shared with slice A) — no rollback of a half-populated instance on mid-import failure.
 - Batch CF file resolution (`POST /v1/mods/files`) — slice-D perf optimization; slice B resolves sequentially per file.
+
+### built — 2026-06-16 (slice C, Browse → one-click install)
+
+Built across checkpoints C1–C4 via the `/subagent-implementation` loop (C1–C2 in a
+prior session, C3–C4 + a polish pass this session) plus one finalization polish pass.
+Commits (chronological):
+
+- `2eac817` — C1 extract `import_mrpack_from_bytes` / `import_cf_zip_from_bytes` inner fns; path commands read file → call inner. Byte-identical refactor (atomic-surgeon; A/B suite green unchanged).
+- `946954f` — C2 pure `resolve_pack_file` + `ResolvedPackFile { url, file_name, provider }`; latest = first version returned (no date field); `NoVersions`/`NoFiles` errors; 7 mock-HTTP tests both providers.
+- `4ccd7f7` — C3 `install_modpack` command + tagged `ModpackInstallResult` (Mrpack/Curseforge/Manual, `serde tag="kind"`, camelCase); resolve → CF `url:None` ⇒ Manual{page_url,file_name} (no instance) → else stage archive to `cache/installers/` via GET → dispatch to C1 `*_from_bytes` by `ProviderKind`; registered in handler; 5 wire-contract shape tests.
+- `90afcad` — C4 `installModpack` ipc wrapper + `ModpackInstallResult` TS union; `ModpackCard` primary Install + secondary open-page; mutation `onSuccess` discriminates `kind` (manual→open page; mrpack/cf→invalidate `["instances"]` + completion toast); `ImportResultToast`/`CfImportResultToast` exported from `Home.tsx` and reused.
+- `b1e21f3` — polish (F-3/F-5): strengthen the kind-tag collision test to serialize all three variants + assert distinct tags; document accepted `provider` wire values on `install_modpack`.
+
+Verified by orchestrator: full Rust lib **468 tests pass** (Windows toolchain via `scripts/build.sh`); `npm run build` green (1832 modules). No live network in any test.
+
+**Out-of-scope work performed during this build:**
+- Build-system rework landed first this session (`b0776f7`): `scripts/build.sh` + `scripts/apex-build.bat` — on WSL, mirror source to the native Windows FS and build there (native NTFS → incremental compilation) instead of building over the `\\wsl.localhost` UNC path. Separate concern from slice C; the spec build note was repointed to it.
+
+**Unforeseens:**
+- `ResolvedPackFile` carries no `page_url`, so the Manual variant's `page_url` is passed in by the caller (frontend `ProjectSummary.page_url`) rather than derived in the backend.
+
+**Deferred items still open (slice D — promoted to `.claude/project/followups/`):**
+- `modpack-import-c-name-override` (risk) — `name_override=None`; pack version-API name unused (needs C2 widening).
+- `modpack-import-c-empty-pageurl` (risk) — Manual with empty `pageUrl` + misleading toast when caller omits `page_url` (F-2+F-7).
+- `modpack-import-c-archive-timeout` (risk) — archive GET uses a bare reqwest client with no timeout.
+- `modpack-import-c-toast-stacking` (nit) — per-card install toasts stack at the same fixed position.
+
+**Not done (needs GUI, not testable in WSL):** manual end-to-end one-click install + launch of a real Browse pack. Backend + frontend build verified; GUI run pending the WSLg/Windows-launch decision.
