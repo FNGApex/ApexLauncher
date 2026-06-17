@@ -799,3 +799,38 @@ export function importCurseforgeZip(
     nameOverride: nameOverride ?? null,
   });
 }
+
+// --- Phase 6 slice C: Browse → one-click install. Mirrors ModpackInstallResult in lib.rs. ---
+
+/**
+ * Tagged result returned by `install_modpack`.
+ * Mirrors `ModpackInstallResult` in `src-tauri/src/lib.rs`
+ * (`#[serde(tag = "kind", rename_all = "camelCase")]`).
+ *
+ * - `"mrpack"` — Modrinth pack installed; fields from `MrpackImportResult`.
+ * - `"curseforge"` — CurseForge pack installed; fields from `CfImportResult` (may carry `manual[]`).
+ * - `"manual"` — pack file is not distributable; open `pageUrl` in browser, no instance created.
+ */
+export type ModpackInstallResult =
+  | ({ kind: "mrpack" } & MrpackImportResult)
+  | ({ kind: "curseforge" } & CfImportResult)
+  | { kind: "manual"; pageUrl: string; fileName: string };
+
+/**
+ * Install a modpack from a Browse `ProjectSummary` in one click.
+ *
+ * `provider` is the wire value from `ProjectSummary.provider` (e.g. `"modrinth"`, `"curseforge"`).
+ * `projectId` is the provider's project id.
+ * `pageUrl` is the project's page URL, echoed back in the `"manual"` variant.
+ */
+export function installModpack(
+  provider: string,
+  projectId: string,
+  pageUrl?: string,
+): Promise<ModpackInstallResult> {
+  return invoke<ModpackInstallResult>("install_modpack", {
+    provider,
+    projectId,
+    pageUrl: pageUrl ?? null,
+  });
+}

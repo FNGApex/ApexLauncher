@@ -1,17 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { AlertCircle, Download, Loader2, Package, Search, X } from "lucide-react";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertCircle, Download, ExternalLink, Loader2, Package, Search, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Link } from "react-router-dom";
 import {
   getLoaders,
+  installModpack,
   listMinecraftVersions,
   searchMods,
+  type ModpackInstallResult,
   type ProjectSummary,
   type ProviderCommandError,
 } from "@/lib/ipc";
 import { META_STALE_TIME } from "@/lib/query";
 import { ProviderBadge } from "@/components/ProviderBadge";
+import { CfImportResultToast, ImportResultToast } from "@/routes/Home";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -344,7 +347,7 @@ function MergedFeed({
 }
 
 // ---------------------------------------------------------------------------
-// Modpack result card — click opens provider page
+// Modpack result card — Install (primary) + open page (secondary)
 // ---------------------------------------------------------------------------
 
 interface ModpackCardProps {
@@ -352,46 +355,133 @@ interface ModpackCardProps {
 }
 
 function ModpackCard({ pack }: ModpackCardProps) {
-  function handleClick() {
+  const qc = useQueryClient();
+  const [installResult, setInstallResult] = useState<ModpackInstallResult | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
+
+  const install = useMutation({
+    mutationFn: () =>
+      installModpack(pack.provider, pack.id, pack.pageUrl ?? undefined),
+    onSuccess: (result) => {
+      if (result.kind === "manual") {
+        // Distribution-disabled: open the page for manual download.
+        if (result.pageUrl) {
+          openUrl(result.pageUrl).catch(console.error);
+        }
+      } else {
+        qc.invalidateQueries({ queryKey: ["instances"] });
+      }
+      setInstallResult(result);
+    },
+    onError: (err) => {
+      setInstallError(err instanceof Error ? err.message : String(err));
+    },
+  });
+
+  function handleOpenPage() {
     if (pack.pageUrl == null) return;
     openUrl(pack.pageUrl).catch(console.error);
   }
 
   return (
-    <button
-      onClick={handleClick}
-      disabled={pack.pageUrl == null}
-      className="flex w-full items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 text-left text-sm transition-colors hover:border-primary disabled:cursor-default disabled:opacity-70"
-    >
-      {/* Icon */}
-      {pack.iconUrl ? (
-        <img
-          src={pack.iconUrl}
-          alt=""
-          className="size-10 shrink-0 rounded-lg object-cover"
-          loading="lazy"
-        />
-      ) : (
-        <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted">
-          <Package className="size-5" />
+    <>
+      <div className="flex w-full items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 text-sm transition-colors hover:border-primary">
+        {/* Icon */}
+        {pack.iconUrl ? (
+          <img
+            src={pack.iconUrl}
+            alt=""
+            className="size-10 shrink-0 rounded-lg object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted">
+            <Package className="size-5" />
+          </div>
+        )}
+
+        {/* Text */}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <p className="truncate font-medium text-foreground">{pack.name}</p>
+            <ProviderBadge provider={pack.provider} />
+          </div>
+          <p className="mt-0.5 line-clamp-2 text-xs text-muted">{pack.summary}</p>
+        </div>
+
+        {/* Downloads */}
+        <div className="flex shrink-0 items-center gap-1 text-muted">
+          <Download className="size-3.5" />
+          <span>{formatDownloads(pack.downloads)}</span>
+        </div>
+
+        {/* Actions */}
+        <div className="flex shrink-0 items-center gap-2">
+          {/* Primary: Install */}
+          <button
+            onClick={() => install.mutate()}
+            disabled={install.isPending}
+            className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-60"
+          >
+            {install.isPending ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Download className="size-3.5" />
+            )}
+            {install.isPending ? "Installing…" : "Install"}
+          </button>
+
+          {/* Secondary: open provider page */}
+          {pack.pageUrl != null && (
+            <button
+              onClick={handleOpenPage}
+              title="Open project page"
+              className="rounded-lg p-1.5 text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+            >
+              <ExternalLink className="size-4" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Inline error (mutation failure) */}
+      {installError != null && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger/10 px-4 py-2 text-xs text-danger">
+          <span className="truncate">{installError}</span>
+          <button
+            onClick={() => setInstallError(null)}
+            className="shrink-0 rounded-md p-0.5 hover:bg-danger/20"
+          >
+            <X className="size-3.5" />
+          </button>
         </div>
       )}
 
-      {/* Text */}
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <p className="truncate font-medium text-foreground">{pack.name}</p>
-          <ProviderBadge provider={pack.provider} />
+      {/* Completion toasts — fixed, bottom-right */}
+      {installResult?.kind === "mrpack" && (
+        <ImportResultToast result={installResult} onClose={() => setInstallResult(null)} />
+      )}
+      {installResult?.kind === "curseforge" && (
+        <CfImportResultToast result={installResult} onClose={() => setInstallResult(null)} />
+      )}
+      {installResult?.kind === "manual" && (
+        <div className="fixed bottom-6 right-6 z-50 w-80 rounded-xl border border-border bg-surface p-4 shadow-xl">
+          <div className="mb-2 flex items-start justify-between gap-2">
+            <p className="font-medium text-sm">Manual download required</p>
+            <button
+              onClick={() => setInstallResult(null)}
+              className="shrink-0 rounded-md p-1 text-muted hover:bg-background hover:text-foreground"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+          <p className="text-xs text-muted">
+            {installResult.fileName} is not auto-installable — the project page has been opened for
+            manual download.
+          </p>
         </div>
-        <p className="mt-0.5 line-clamp-2 text-xs text-muted">{pack.summary}</p>
-      </div>
-
-      {/* Downloads */}
-      <div className="flex shrink-0 items-center gap-1 text-muted">
-        <Download className="size-3.5" />
-        <span>{formatDownloads(pack.downloads)}</span>
-      </div>
-    </button>
+      )}
+    </>
   );
 }
 

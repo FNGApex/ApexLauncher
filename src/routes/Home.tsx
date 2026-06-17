@@ -75,7 +75,7 @@ export function Home() {
   );
 }
 
-function ImportResultToast({
+export function ImportResultToast({
   result,
   onClose,
 }: {
@@ -109,7 +109,7 @@ function ImportResultToast({
   );
 }
 
-function CfImportResultToast({
+export function CfImportResultToast({
   result,
   onClose,
 }: {
