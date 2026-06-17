@@ -1,51 +1,76 @@
-# Modloader
+# ApexLauncher
 
-A lightweight, multiplatform Minecraft mod launcher with a modern UI — pull modpacks
-from both **CurseForge** and **Modrinth**, manage instances, and launch the game.
+A lightweight, cross-platform Minecraft mod launcher with a modern UI. Browse and import
+modpacks from both **CurseForge** and **Modrinth**, manage instances, install mods, and
+launch the game.
 
-> Status: 🏗️ early scaffolding. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the plan.
+> Status: pre-alpha (0.1.0). Active development, no released builds yet. See
+> [`docs/ROADMAP.md`](docs/ROADMAP.md) for the plan.
 
-## Stack
+## Features
 
-| Layer       | Choice                                                        |
-|-------------|---------------------------------------------------------------|
-| Shell       | [Tauri 2](https://tauri.app) (native webview, ~8MB bundles)   |
-| Frontend    | React + TypeScript + Vite + Tailwind + shadcn/ui              |
-| State/data  | Zustand (UI state) + TanStack Query (server cache)            |
-| Backend     | Rust (downloads, instance mgmt, Java mgmt, launch, auth)      |
-| Targets     | Windows, macOS, Linux                                         |
+- **One feed for both providers.** Browse modpacks from CurseForge and Modrinth in a single
+  unified list, sorted by popularity.
+- **Import any pack.** Drop in a `.mrpack` (Modrinth) or `.zip` (CurseForge) modpack, or
+  install straight from the browse feed in one click.
+- **Every loader.** Vanilla, Fabric, Quilt, Forge, and NeoForge instances.
+- **Mod management.** Add, enable, disable, update, and remove mods per instance, with
+  dependency resolution.
+- **Hands-off Java.** Detects a system JRE or fetches the right Temurin build automatically.
+- **Fast, safe downloads.** Concurrent, hash-verified downloads with resume support and a
+  shared cache that deduplicates files across instances.
+- **Sign in once.** Microsoft account login (device-code OAuth), stored securely in your
+  OS keyring.
+- **Play.** Launch with live log output, stop, and playtime tracking.
 
 ## Why Tauri
 
-The brief is "lightweight + modern UI." Tauri uses the OS webview instead of bundling
-Chromium, so we get a React/Tailwind UI (modern, fast to build) with a Rust backend and
-single-digit-MB installers — far lighter than Electron, while keeping a real systems
-language for the heavy lifting (concurrent hash-verified downloads, process management,
-Microsoft auth).
+The goal is a lightweight launcher with a modern UI. ApexLauncher is built on
+[Tauri 2](https://tauri.app), which uses the operating system's native webview instead of
+bundling Chromium. That keeps installers in the single-digit-MB range, far smaller than an
+Electron app, while a Rust backend handles the heavy lifting: concurrent downloads, process
+management, and authentication.
 
-## Prerequisites (dev)
+| Layer    | Choice                                                       |
+|----------|--------------------------------------------------------------|
+| Shell    | Tauri 2 (native webview, small bundles)                      |
+| Frontend | React 19 + TypeScript + Vite + Tailwind                      |
+| Backend  | Rust                                                         |
+| Targets  | Windows, macOS, Linux                                        |
 
-- **Node ≥ 20** (you have v26 ✓)
-- **Rust** (stable) via [rustup](https://rustup.rs) — *not yet installed*
-- Platform deps: macOS needs Xcode CLT ✓; Linux needs `webkit2gtk` + `libsoup`;
-  Windows needs WebView2 + MSVC build tools.
-- A **CurseForge API key** (free, from the [CF console](https://console.curseforge.com))
-  — CurseForge browse and pack import need one; Modrinth needs no key. The build
-  bakes a key from a gitignored `src-tauri/.env` (`MODLOADER_CF_API_KEY=...`) at
-  compile time, so distributed builds work out of the box. For a clean source
-  build, add your own key to `src-tauri/.env`, or enter it at runtime under
-  Settings → Advanced → API Keys.
+## Where your data lives
 
-## Quick start (once Rust is installed)
+Instances and caches live under a single folder so nothing is scattered across your system:
+
+- macOS: `~/Library/Application Support/ApexLauncher/`
+- Windows: `%APPDATA%\ApexLauncher\`
+- Linux: `~/.local/share/ApexLauncher/`
+
+Downloaded assets, libraries, and Java runtimes are shared across instances to save disk
+space.
+
+## CurseForge API key
+
+Browsing and importing CurseForge content requires a free API key from the
+[CurseForge console](https://console.curseforge.com). Modrinth needs no key. Released builds
+ship with a key baked in. If you build from source, add your own key to `src-tauri/.env`
+(`MODLOADER_CF_API_KEY=...`) or enter it at runtime under Settings → Advanced → API Keys.
+
+## Building from source
+
+You will need [Node.js](https://nodejs.org) (≥ 20) and a stable
+[Rust](https://rustup.rs) toolchain, plus the platform webview dependencies: Xcode Command
+Line Tools on macOS, `webkit2gtk` and `libsoup` on Linux, and WebView2 with the MSVC build
+tools on Windows.
 
 ```bash
-npm install
-npm run tauri dev
+scripts/build.sh dev      # run a dev window with hot reload
+scripts/build.sh build    # produce an installable bundle
+scripts/build.sh test     # run the test suite
 ```
 
-## Docs
+## Documentation
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system design, subsystems, data model
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — phased build plan
-- [`docs/PROVIDERS.md`](docs/PROVIDERS.md) — CurseForge & Modrinth API notes and gotchas
-# ApexLauncher
+- [`docs/PROVIDERS.md`](docs/PROVIDERS.md) — CurseForge and Modrinth API notes
