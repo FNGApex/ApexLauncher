@@ -1474,6 +1474,9 @@ pub enum ModpackInstallResult {
 /// The pack display name is the `name` field of the latest version; if that is
 /// empty, `file_name` is used as `name_override`.
 ///
+/// `provider` accepts the `ProviderKind` wire values: `"modrinth"` or `"curseForge"`
+/// (lowercase `"curseforge"` is also accepted as a defensive fallback).
+///
 /// All errors map to `String`.
 #[tauri::command]
 async fn install_modpack(

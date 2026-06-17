@@ -128,11 +128,30 @@ fn modpack_install_result_manual_kind_tag() {
 fn modpack_install_result_manual_no_kind_collision() {
     // The three kind values must be distinct — a frontend switch/match on
     // `kind` would silently break if two variants share the same tag.
-    let kinds: Vec<&str> = vec!["mrpack", "curseforge", "manual"];
-    let mut seen = std::collections::HashSet::new();
-    for k in &kinds {
-        assert!(seen.insert(*k), "duplicate kind tag: {k}");
-    }
+    // Constructs all three real variants and reads the serialised `kind` field
+    // so a serde-tag rename (e.g. Mrpack → kind="mrpack2") is caught here.
+    let mrpack = ModpackInstallResult::Mrpack(mrpack_result_fixture());
+    let curseforge = ModpackInstallResult::Curseforge(cf_result_fixture());
+    let manual = ModpackInstallResult::Manual {
+        page_url: "https://www.curseforge.com/minecraft/modpacks/example".to_string(),
+        file_name: "example-1.0.zip".to_string(),
+    };
+    let kinds: Vec<String> = [mrpack, curseforge, manual]
+        .iter()
+        .map(|v| {
+            serde_json::to_value(v)
+                .expect("serialize")["kind"]
+                .as_str()
+                .expect("kind must be a string")
+                .to_string()
+        })
+        .collect();
+    let unique: std::collections::HashSet<&str> = kinds.iter().map(String::as_str).collect();
+    assert_eq!(
+        unique.len(),
+        3,
+        "all three ModpackInstallResult variants must have distinct kind tags; got: {kinds:?}"
+    );
 }
 
 #[test]
