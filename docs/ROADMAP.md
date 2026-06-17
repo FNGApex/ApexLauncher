@@ -73,20 +73,24 @@ Done early so the create-instance flow picks real versions/builds:
   key.
 - Modrinth + CurseForge clients behind the `ModProvider` trait. ✔ (slice A —
   `docs/spec/providers-browse.md`)
-- Unified Browse page (search, provider filter, MC/loader facets, infinite scroll). ✔ code-complete;
-  manual UI verify + live CF run (needs the API key) pending
+- Unified Browse page (search, MC/loader facets, infinite scroll). ✔ code-complete;
+  manual UI verify + live CF run (needs the API key) pending. **Reworked** (`docs/spec/ui-modpack-rework.md`):
+  Browse is now a single ordered **modpack** discovery feed across both providers (platform-badged,
+  click opens the provider page — discovery-only, no in-app install). Mod search/add moved per-instance.
 - Add a mod to an instance with dependency resolution; enable/disable/update; surface
   CF "download disabled" → open-in-browser fallback. ✔ (slice B —
   `docs/spec/mod-install.md`). Modrinth path complete (no key); CF rides the same code path,
   gated only by the pending key. Backend commands: `add_mod`, `set_mod_enabled`, `remove_mod`,
-  `update_mod`. UI: Browse add-to-instance modal + InstanceDetail per-mod controls.
+  `update_mod`. UI: per-instance **Manage installs** slide-over (search + add with a CF/Modrinth
+  source toggle, plus enable/disable/update/remove) on `InstanceDetail` — `docs/spec/ui-modpack-rework.md`.
 - **Done when:** you can search, add Sodium (Modrinth) + a CF mod, and launch. Modrinth
   add-and-launch ready for manual verification; CF add pending the API key.
 
 ## Phase 6 — Modpack import (the headline feature)
 - `.mrpack` import (Modrinth) — direct downloads + overrides. ✔ (slice A — `505670b`).
 - CF zip import — per-file URL resolution + manual-download surfacing. ✔ (slice B — `cfbabf2`..`f6a6556`; backend + UI, headless-verified, GUI import pending).
-- Browse & one-click install modpacks from both providers. (slice C)
+- Browse modpacks from both providers. ✔ discovery (unified feed, opens provider page —
+  `docs/spec/ui-modpack-rework.md`). One-click in-app install from Browse still deferred (slice C).
 - Pack update / re-resolve.
 - **Done when:** you install a real CF and a real Modrinth modpack end to end.
 
