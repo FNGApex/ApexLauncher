@@ -58,3 +58,24 @@ Ship the launcher with a working CurseForge API key baked in at build time (sour
 ## Change log
 
 <!-- Populated on first amendment after approval. -->
+
+## Implementation log
+
+### shipped — 2026-06-16
+
+Built across 3 iterations of /subagent-implementation on branch `curseforge-api-key` (worktree). Commits (chronological):
+
+- `ac81514` — CP-1 baked key tier: `build.rs` bakes `MODLOADER_CF_API_KEY` from gitignored `.env` via `cargo:rustc-env` (+ `rerun-if-changed`/`rerun-if-env-changed`); `cf_api_key_from` gains a third baked arg (env > settings > baked > None, blanks skipped); 5 `lib.rs` call sites + `curseforge_live.rs` updated; 5 new precedence tests (fake keys only).
+- `8f1de51` — CP-2 Settings: relocated the existing CurseForge API key field under an **Advanced → API Keys** grouping; reworded as an optional override (key ships by default); no duplicate field; `ipc.ts` unchanged.
+- `440d267` — polish: `build.rs` strips one leading + one trailing quote independently (mismatched-quote fix, F-1); dropped invisible `space-y-1` on the single-row API Keys group (F-3).
+
+**Out-of-scope work performed during this build:**
+- `src-tauri/tests/curseforge_live.rs:58` call-site arity updated to the 3-arg `cf_api_key_from` (necessary to keep the test crate compiling).
+
+**Unforeseens — surprises that emerged during implementation:**
+- CP-2 was a relocate/regroup, not a net-new field — the CF key input already existed in the flat Settings list. Implemented Advanced/API-Keys as section headings (`h2`/`h3`); no tab framework exists in the app, so introducing one was out of scope.
+- `build.rs` parse logic is not reachable by `cargo test` (build script, not lib-compiled); the F-1 fix was verified by orchestrator reasoning over the strip logic rather than a unit test.
+- IDE diagnostics during CP-1 showed a stale mid-edit arity-mismatch snapshot; a fresh `cargo test --no-run` confirmed a clean compile.
+
+**Deferred items still open:**
+- F-2 (🔵 `curseforge_live.rs` no longer mirrors full 3-tier precedence — passes `None` for the baked slot) — **dropped** per user: the live test is `#[ignore]`d and the `.env` read still covers the key; cosmetic mirror only.

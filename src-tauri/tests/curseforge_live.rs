@@ -55,7 +55,7 @@ fn resolved_key() -> String {
     // takes the settings slot. The caller pre-fetches both, exactly as the
     // command layer in `lib.rs` does.
     let env_val = std::env::var(modloader_lib::core::providers::CF_API_KEY_ENV).ok();
-    cf_api_key_from(env_val, key_from_dotenv()).unwrap_or_else(|| {
+    cf_api_key_from(env_val, key_from_dotenv(), None).unwrap_or_else(|| {
         panic!(
             "MODLOADER_CF_API_KEY not found in env or .env — add it to the gitignored \
              .env file (MODLOADER_CF_API_KEY=...) before running the live CurseForge tests"

@@ -91,21 +91,6 @@ export function Settings() {
         </SettingRow>
 
         <SettingRow
-          title="CurseForge API key"
-          desc="Required for CurseForge browsing & pack import (Phase 5/6)."
-        >
-          <input
-            type="password"
-            value={form.curseforgeApiKey ?? ""}
-            onChange={(e) =>
-              setForm({ ...form, curseforgeApiKey: e.target.value || null })
-            }
-            placeholder="Not set"
-            className="input w-72 font-mono text-xs"
-          />
-        </SettingRow>
-
-        <SettingRow
           title="Java"
           desc="Per-instance JREs are downloaded automatically (Phase 2)."
         >
@@ -125,6 +110,31 @@ export function Settings() {
             </span>
           </SettingRow>
         )}
+      </div>
+
+      <div className="mt-8 space-y-4">
+        <div>
+          <h2 className="text-base font-semibold">Advanced</h2>
+          <p className="text-xs text-muted">API keys and other advanced options.</p>
+        </div>
+
+        <div>
+          <h3 className="text-xs font-medium uppercase tracking-wide text-muted">API Keys</h3>
+          <SettingRow
+            title="CurseForge API key"
+            desc="Optional override. A key is bundled by default — enter your own to use it instead."
+          >
+            <input
+              type="password"
+              value={form.curseforgeApiKey ?? ""}
+              onChange={(e) =>
+                setForm({ ...form, curseforgeApiKey: e.target.value || null })
+              }
+              placeholder="Leave blank to use bundled key"
+              className="input w-72 font-mono text-xs"
+            />
+          </SettingRow>
+        </div>
       </div>
 
       {save.isError && (

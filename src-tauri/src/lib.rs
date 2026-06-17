@@ -758,6 +758,7 @@ async fn search_mods(
             let key = cf_api_key_from(
                 std::env::var(providers::CF_API_KEY_ENV).ok(),
                 settings.curseforge_api_key,
+                option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
             );
             let p = CurseForgeProvider::new(key);
             p.search(&http, &params).await.map_err(ProviderCommandError::from)
@@ -791,6 +792,7 @@ async fn get_mod_versions(
             let key = cf_api_key_from(
                 std::env::var(providers::CF_API_KEY_ENV).ok(),
                 settings.curseforge_api_key,
+                option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
             );
             let p = CurseForgeProvider::new(key);
             p.get_versions(&http, &project_id, mc_version.as_deref(), loader.as_deref())
@@ -835,6 +837,7 @@ async fn add_mod(
     let cf_key = cf_api_key_from(
         std::env::var(providers::CF_API_KEY_ENV).ok(),
         settings.curseforge_api_key,
+        option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
     );
 
     // Resolve the root version by fetching all compatible versions and picking
@@ -1001,6 +1004,7 @@ async fn update_mod(
     let cf_key = cf_api_key_from(
         std::env::var(providers::CF_API_KEY_ENV).ok(),
         settings.curseforge_api_key,
+        option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
     );
 
     let provider_str = instance.mods[entry_idx].provider.clone();
@@ -1357,6 +1361,7 @@ async fn import_curseforge_zip(
     let cf_key = cf_api_key_from(
         std::env::var(providers::CF_API_KEY_ENV).ok(),
         settings.curseforge_api_key,
+        option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
     );
     let provider = CurseForgeProvider::new(cf_key);
     let http = ReqwestProviderClient(reqwest::Client::new());

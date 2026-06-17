@@ -60,7 +60,11 @@ Authoritative design lives in `docs/`:
 - `docs/PROVIDERS.md` — CurseForge & Modrinth API specifics and gotchas
 
 **Key external constraints** (don't relearn these the hard way):
-- CurseForge API needs a free `x-api-key` header; Modrinth needs no key.
+- CurseForge API needs a free `x-api-key` header; Modrinth needs no key. The key
+  resolves env (`MODLOADER_CF_API_KEY`) → `settings.curseforge_api_key` → baked →
+  `None`. `build.rs` bakes the baked tier from a gitignored `src-tauri/.env` via
+  `cargo:rustc-env` (missing `.env` compiles fine, bakes nothing); users override
+  under Settings → Advanced → API Keys. Never commit the key (repo is public).
 - Some CF mods set `allowModDistribution:false` → cannot be auto-downloaded; the UI must
   open the project page for a manual drop-in. This shapes the pack resolver.
 

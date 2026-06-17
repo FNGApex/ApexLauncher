@@ -18,17 +18,24 @@ pub const CF_API_KEY_ENV: &str = "MODLOADER_CF_API_KEY";
 
 /// Resolve the effective CurseForge API key.
 ///
-/// Priority: `MODLOADER_CF_API_KEY` env var (if set and non-blank), then
-/// `settings_key` (if `Some` and non-blank), then `None`.
+/// Priority (highest → lowest):
+///   1. `env_val` — runtime `MODLOADER_CF_API_KEY` env var (dev/CI override).
+///   2. `settings_val` — user-entered value from `settings.curseforge_api_key`.
+///   3. `baked_val` — compile-time default via `option_env!("MODLOADER_CF_API_KEY")`.
+///   4. `None` — CF key-missing state.
+///
+/// Blank (whitespace-only) values are skipped at every tier.
 ///
 /// Separated from env access so tests need no global env mutation.
 /// Pure resolution logic used by both the live path and tests.
 ///
 /// `env_val`: value of `MODLOADER_CF_API_KEY` (pre-fetched by the caller).
 /// `settings_val`: value of `settings.curseforge_api_key` (pre-fetched by the caller).
+/// `baked_val`: compile-time baked value via `option_env!` (lowest-priority default).
 pub fn cf_api_key_from(
     env_val: Option<String>,
     settings_val: Option<String>,
+    baked_val: Option<String>,
 ) -> Option<String> {
     if let Some(v) = env_val {
         if !v.trim().is_empty() {
@@ -36,6 +43,11 @@ pub fn cf_api_key_from(
         }
     }
     if let Some(v) = settings_val {
+        if !v.trim().is_empty() {
+            return Some(v);
+        }
+    }
+    if let Some(v) = baked_val {
         if !v.trim().is_empty() {
             return Some(v);
         }

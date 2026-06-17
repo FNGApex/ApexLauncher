@@ -75,37 +75,86 @@ fn cf_key_from_env_takes_priority_over_settings() {
     let result = cf_api_key_from(
         Some("env-key".to_string()),
         Some("settings-key".to_string()),
+        None,
     );
     assert_eq!(result, Some("env-key".to_string()));
 }
 
 #[test]
 fn cf_key_falls_back_to_settings_when_env_blank() {
-    let result = cf_api_key_from(Some("  ".to_string()), Some("settings-key".to_string()));
+    let result = cf_api_key_from(
+        Some("  ".to_string()),
+        Some("settings-key".to_string()),
+        None,
+    );
     assert_eq!(result, Some("settings-key".to_string()));
 }
 
 #[test]
 fn cf_key_falls_back_to_settings_when_env_absent() {
-    let result = cf_api_key_from(None, Some("settings-key".to_string()));
+    let result = cf_api_key_from(None, Some("settings-key".to_string()), None);
     assert_eq!(result, Some("settings-key".to_string()));
 }
 
 #[test]
 fn cf_key_returns_none_when_both_absent() {
-    let result = cf_api_key_from(None, None);
+    let result = cf_api_key_from(None, None, None);
     assert!(result.is_none());
 }
 
 #[test]
 fn cf_key_returns_none_when_both_blank() {
-    let result = cf_api_key_from(Some("".to_string()), Some("  ".to_string()));
+    let result = cf_api_key_from(Some("".to_string()), Some("  ".to_string()), None);
     assert!(result.is_none());
 }
 
 #[test]
 fn cf_key_returns_none_when_only_blank_env() {
-    let result = cf_api_key_from(Some("  \t  ".to_string()), None);
+    let result = cf_api_key_from(Some("  \t  ".to_string()), None, None);
+    assert!(result.is_none());
+}
+
+// ── Baked-tier precedence tests ───────────────────────────────────────────
+
+#[test]
+fn cf_key_env_wins_over_settings_and_baked() {
+    let result = cf_api_key_from(
+        Some("fake-env-key".to_string()),
+        Some("fake-settings-key".to_string()),
+        Some("fake-baked-key".to_string()),
+    );
+    assert_eq!(result, Some("fake-env-key".to_string()));
+}
+
+#[test]
+fn cf_key_settings_wins_over_baked() {
+    let result = cf_api_key_from(
+        None,
+        Some("fake-settings-key".to_string()),
+        Some("fake-baked-key".to_string()),
+    );
+    assert_eq!(result, Some("fake-settings-key".to_string()));
+}
+
+#[test]
+fn cf_key_baked_wins_when_env_and_settings_absent() {
+    let result = cf_api_key_from(None, None, Some("fake-baked-key".to_string()));
+    assert_eq!(result, Some("fake-baked-key".to_string()));
+}
+
+#[test]
+fn cf_key_baked_skipped_when_blank() {
+    let result = cf_api_key_from(None, None, Some("   ".to_string()));
+    assert!(result.is_none());
+}
+
+#[test]
+fn cf_key_baked_skipped_falls_through_to_none() {
+    let result = cf_api_key_from(
+        Some("  ".to_string()),
+        Some("  ".to_string()),
+        Some("  ".to_string()),
+    );
     assert!(result.is_none());
 }
 

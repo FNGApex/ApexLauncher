@@ -30,7 +30,11 @@ Microsoft auth).
 - Platform deps: macOS needs Xcode CLT ✓; Linux needs `webkit2gtk` + `libsoup`;
   Windows needs WebView2 + MSVC build tools.
 - A **CurseForge API key** (free, from the [CF console](https://console.curseforge.com))
-  — required by their API. Modrinth needs no key.
+  — CurseForge browse and pack import need one; Modrinth needs no key. The build
+  bakes a key from a gitignored `src-tauri/.env` (`MODLOADER_CF_API_KEY=...`) at
+  compile time, so distributed builds work out of the box. For a clean source
+  build, add your own key to `src-tauri/.env`, or enter it at runtime under
+  Settings → Advanced → API Keys.
 
 ## Quick start (once Rust is installed)
 
