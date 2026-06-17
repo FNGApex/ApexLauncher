@@ -58,3 +58,27 @@ Browse becomes a unified, ordered **modpack** discovery feed (both providers, pl
 ## Change log
 
 <!-- Populated on first amendment after approval. -->
+
+## Implementation log
+
+### shipped — 2026-06-16
+
+Built across 5 checkpoints + 1 polish pass via /subagent-implementation (work-in-place on `main`). Commits (chronological):
+
+- `4582849` — planning: design + spec
+- `87ca91f` — CP1 providers: ProjectType (mod|modpack) selector + `page_url` on `ProjectSummary`
+- `595e623` — CP2 window: open maximized + min-size floor
+- `b7f7b80` — CP3 browse: unified ordered modpack discovery feed (badged, click→page); add-flow removed
+- `1c69ac5` — CP4 instances: modpack import moved into the New Instance modal; Home buttons stripped
+- `805be94` — CP5 instances: per-instance "Manage installs" slide-over (add + manage); reusable `SlideOver`
+- `4e78c67` — polish: cleared all 6 harvested follow-ups (no behavior change)
+
+**Out-of-scope work performed during this build:**
+- `npm install` to install the already-declared `@tauri-apps/plugin-dialog` (node_modules was empty; the frontend build was broken pre-existing). Not committed (node_modules gitignored).
+
+**Unforeseens — surprises that emerged during implementation:**
+- CP3 rewrite dropped the IntersectionObserver dependency array (regression caught + fixed in review).
+- A harvested test nit (F-2) was wrong: the trailing `"` in the modrinth facet assertion is load-bearing (disambiguates `mod` from `modpack`). Kept + documented instead of "fixing".
+
+**Deferred items still open:**
+- None. All 6 follow-ups (F-1..F-6) fixed in the polish pass per user disposition.
