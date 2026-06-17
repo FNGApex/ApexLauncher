@@ -828,22 +828,35 @@ async fn spawn_monitor_smoke_process_exits_playtime_recorded_registry_cleared() 
         "registry must have entry after spawn"
     );
 
-    // Wait for the process to exit — poll with a timeout.
+    // Wait for the monitor to mark the entry terminal — poll with a timeout.
+    // CP6: the entry is RETAINED post-exit (terminal status), not removed, so
+    // get_run_state / get_run_logs can recover state after the process is gone.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        if !registry.lock().unwrap().contains_key(&slug) {
+        let terminal = registry
+            .lock()
+            .unwrap()
+            .get(&slug)
+            .map(|s| s.status.is_terminal())
+            .unwrap_or(false);
+        if terminal {
             break;
         }
         if std::time::Instant::now() > deadline {
-            panic!("process did not exit within 10s");
+            panic!("process did not reach terminal status within 10s");
         }
     }
 
-    // Registry cleared.
+    // Entry retained with a terminal status (not removed).
     assert!(
-        !registry.lock().unwrap().contains_key(&slug),
-        "registry must be cleared after process exits"
+        registry
+            .lock()
+            .unwrap()
+            .get(&slug)
+            .map(|s| s.status == RunStatus::Exited)
+            .unwrap_or(false),
+        "registry entry must be retained with Exited status after process exits"
     );
 
     // Sink received at least one line containing "hello".
@@ -932,31 +945,47 @@ async fn kill_leaves_entry_until_monitor_removes_it() {
         "registry must have entry after spawn"
     );
 
-    // Fire the kill signal — must NOT remove the entry immediately.
+    // Fire the kill signal — must NOT mark terminal immediately.
     kill_instance(&registry, &slug).expect("kill must succeed while running");
 
-    // Entry must STILL be present right after kill (monitor hasn't exited yet).
+    // Entry must STILL be non-terminal right after kill (monitor hasn't exited yet).
     assert!(
-        registry.lock().unwrap().contains_key(&slug),
-        "registry entry must persist immediately after kill (monitor owns removal)"
+        registry
+            .lock()
+            .unwrap()
+            .get(&slug)
+            .map(|s| !s.status.is_terminal())
+            .unwrap_or(false),
+        "registry entry must persist non-terminal immediately after kill"
     );
 
-    // Wait for the monitor to remove the entry (child terminates after kill).
+    // Wait for the monitor to mark the entry terminal (child terminates after kill).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        if !registry.lock().unwrap().contains_key(&slug) {
+        let terminal = registry
+            .lock()
+            .unwrap()
+            .get(&slug)
+            .map(|s| s.status.is_terminal())
+            .unwrap_or(false);
+        if terminal {
             break;
         }
         if std::time::Instant::now() > deadline {
-            panic!("registry entry was not removed within 10s after kill");
+            panic!("registry entry was not marked terminal within 10s after kill");
         }
     }
 
-    // Entry gone — monitor removed it after child exited.
+    // Entry retained with terminal Killed status — monitor recorded the exit.
     assert!(
-        !registry.lock().unwrap().contains_key(&slug),
-        "registry must be cleared after monitor confirms exit"
+        registry
+            .lock()
+            .unwrap()
+            .get(&slug)
+            .map(|s| s.status == RunStatus::Killed)
+            .unwrap_or(false),
+        "registry entry must be retained with Killed status after monitor confirms exit"
     );
 
     // Playtime must have been recorded on the kill path.
@@ -1538,4 +1567,331 @@ fn returned_rel_paths_are_correct_relative_paths() {
     // Verify exact values.
     assert!(rel_paths.contains(&PathBuf::from("libraries/a/b/c.jar")));
     assert!(rel_paths.contains(&PathBuf::from("versions/1.20/1.20.jar")));
+}
+
+// -----------------------------------------------------------------------
+// CP6 — runner extension: RunState, prep serialization, log ring, recovery
+// -----------------------------------------------------------------------
+
+/// Cross-platform trivial process: prints `hello` and exits 0.
+#[cfg(windows)]
+fn echo_proc() -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("cmd.exe"),
+        vec!["/c".to_string(), "echo hello".to_string()],
+    )
+}
+#[cfg(not(windows))]
+fn echo_proc() -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("sh"),
+        vec!["-c".to_string(), "echo hello".to_string()],
+    )
+}
+
+/// Cross-platform long-running process (~30s) so a kill can fire mid-run.
+#[cfg(windows)]
+fn sleep_proc() -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("cmd.exe"),
+        vec!["/c".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()],
+    )
+}
+#[cfg(not(windows))]
+fn sleep_proc() -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("sh"),
+        vec!["-c".to_string(), "sleep 30".to_string()],
+    )
+}
+
+/// Poll until `pred(&map)` is true or `secs` elapse (then panic with `what`).
+async fn wait_until<F>(registry: &Arc<RunningRegistry>, secs: u64, what: &str, pred: F)
+where
+    F: Fn(&std::collections::HashMap<String, RunState>) -> bool,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if pred(&registry.lock().unwrap()) {
+            return;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("timed out after {secs}s waiting for: {what}");
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// Prep serialization: two launches share one `Semaphore(1)`. While each holds
+/// the permit it marks its instance `Preparing`; the snapshot must NEVER show
+/// two `Preparing` at once, yet BOTH must reach `Running`.
+#[tokio::test]
+async fn cp6_prep_is_serialized_never_two_preparing_both_run() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let game_dir = tmp.path().join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+    let prep = new_prep_semaphore();
+
+    // Each "launch" flow: acquire the prep permit, mark Preparing, do a short
+    // prep delay, then spawn the JVM (releasing the permit only after spawn).
+    let run_one = |slug: String| {
+        let registry = Arc::clone(&registry);
+        let sink = Arc::clone(&sink);
+        let prep = Arc::clone(&prep);
+        let inst_dir = make_instance_dir_named(&tmp, &slug);
+        let game_dir = game_dir.clone();
+        async move {
+            let permit = prep.acquire_owned().await.unwrap();
+            mark_preparing(&registry, &slug, &*sink);
+            tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+            let (java, argv) = sleep_proc();
+            spawn_instance(
+                slug.clone(),
+                inst_dir,
+                game_dir,
+                java,
+                argv,
+                Arc::clone(&registry),
+                Arc::clone(&sink),
+            )
+            .await
+            .expect("spawn must succeed");
+            drop(permit); // release prep permit only after the JVM spawned
+        }
+    };
+
+    let a = tokio::spawn(run_one("pack-a".to_string()));
+    let b = tokio::spawn(run_one("pack-b".to_string()));
+
+    // While both flows are in flight, repeatedly snapshot: at most one Preparing.
+    let watcher = {
+        let registry = Arc::clone(&registry);
+        tokio::spawn(async move {
+            for _ in 0..200 {
+                let preparing = {
+                    let g = registry.lock().unwrap();
+                    g.values()
+                        .filter(|s| s.status == RunStatus::Preparing)
+                        .count()
+                };
+                assert!(
+                    preparing <= 1,
+                    "snapshot showed {preparing} Preparing instances at once"
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+            }
+        })
+    };
+
+    a.await.unwrap();
+    b.await.unwrap();
+    watcher.await.unwrap();
+
+    // Both reached Running.
+    wait_until(&registry, 10, "both packs Running", |g| {
+        g.values()
+            .filter(|s| s.status == RunStatus::Running)
+            .count()
+            == 2
+    })
+    .await;
+
+    // Clean up the long-running children.
+    let _ = kill_instance(&registry, "pack-a");
+    let _ = kill_instance(&registry, "pack-b");
+}
+
+/// `list_running` enumerates only the non-terminal (Preparing/Running) entries.
+#[tokio::test]
+async fn cp6_list_running_enumerates_active_instances() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let game_dir = tmp.path().join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+
+    assert!(list_running(&registry).is_empty(), "empty registry");
+
+    let inst_dir = make_instance_dir_named(&tmp, "enum-1");
+    let (java, argv) = sleep_proc();
+    spawn_instance(
+        "enum-1".to_string(),
+        inst_dir,
+        game_dir,
+        java,
+        argv,
+        Arc::clone(&registry),
+        Arc::clone(&sink),
+    )
+    .await
+    .expect("spawn must succeed");
+
+    let running = list_running(&registry);
+    assert_eq!(running.len(), 1, "one running instance");
+    assert_eq!(running[0].slug, "enum-1");
+    assert_eq!(running[0].status, RunStatus::Running);
+
+    let _ = kill_instance(&registry, "enum-1");
+}
+
+/// Exit recovery: after the child exits the entry is RETAINED with a terminal
+/// status + buffered exit code, and `get_run_logs` replays buffered lines even
+/// though the exit happened earlier.
+#[tokio::test]
+async fn cp6_exit_recovery_state_and_logs_replayable() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inst_dir = make_instance_dir_named(&tmp, "recover-1");
+    let game_dir = tmp.path().join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+
+    let (java, argv) = echo_proc();
+    spawn_instance(
+        "recover-1".to_string(),
+        inst_dir,
+        game_dir,
+        java,
+        argv,
+        Arc::clone(&registry),
+        Arc::clone(&sink),
+    )
+    .await
+    .expect("spawn must succeed");
+
+    // Wait for the monitor to record a terminal status (entry retained).
+    wait_until(&registry, 10, "instance reaches terminal status", |g| {
+        g.get("recover-1")
+            .map(|s| s.status.is_terminal())
+            .unwrap_or(false)
+    })
+    .await;
+
+    // get_run_state reflects terminal status + exit code 0 — well after exit.
+    let state = get_run_state(&registry, "recover-1").expect("state retained after exit");
+    assert_eq!(state.status, RunStatus::Exited);
+    assert_eq!(state.exit_code, Some(0));
+
+    // Logs replay the buffered "hello" line even though exit already happened.
+    let logs = get_run_logs(&registry, "recover-1").expect("logs retained after exit");
+    assert!(
+        logs.iter().any(|l| l.line.to_lowercase().contains("hello")),
+        "replayed logs must contain 'hello': {logs:?}"
+    );
+
+    // Terminal instances are not "running".
+    assert!(
+        list_running(&registry).is_empty(),
+        "terminal instance must not be listed as running"
+    );
+}
+
+/// kill_instance records the exit: terminal status `Killed`.
+#[tokio::test]
+async fn cp6_kill_records_terminal_killed_status() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inst_dir = make_instance_dir_named(&tmp, "kill-rec");
+    let game_dir = tmp.path().join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+
+    let (java, argv) = sleep_proc();
+    spawn_instance(
+        "kill-rec".to_string(),
+        inst_dir,
+        game_dir,
+        java,
+        argv,
+        Arc::clone(&registry),
+        Arc::clone(&sink),
+    )
+    .await
+    .expect("spawn must succeed");
+
+    kill_instance(&registry, "kill-rec").expect("kill must succeed");
+
+    wait_until(&registry, 10, "instance reaches terminal after kill", |g| {
+        g.get("kill-rec")
+            .map(|s| s.status.is_terminal())
+            .unwrap_or(false)
+    })
+    .await;
+
+    let state = get_run_state(&registry, "kill-rec").expect("state retained after kill");
+    assert_eq!(state.status, RunStatus::Killed, "kill → terminal Killed");
+}
+
+/// Log ring caps at the configured maximum, dropping the oldest lines.
+#[test]
+fn cp6_log_ring_caps_and_drops_oldest() {
+    let mut state = RunState::new_preparing();
+    let total = LOG_RING_CAP + 50;
+    for i in 0..total {
+        state.push_log("stdout", &format!("line-{i}"));
+    }
+    assert_eq!(
+        state.log_ring.len(),
+        LOG_RING_CAP,
+        "ring must cap at LOG_RING_CAP"
+    );
+    // Oldest 50 dropped; the first retained line is `line-50`.
+    assert_eq!(state.log_ring.front().unwrap().line, "line-50");
+    assert_eq!(
+        state.log_ring.back().unwrap().line,
+        format!("line-{}", total - 1)
+    );
+}
+
+/// Helper: write an instance manifest under `<tmp>/<slug>/instance.json` and
+/// return that per-instance dir. Distinct slugs let several instances coexist
+/// under one temp root in the concurrency tests.
+fn make_instance_dir_named(tmp: &tempfile::TempDir, slug: &str) -> std::path::PathBuf {
+    use crate::core::instances::{Instance, JavaCfg, Loader, SCHEMA_VERSION};
+    use std::io::Write as _;
+
+    let inst = Instance {
+        schema: SCHEMA_VERSION,
+        id: format!("id-{slug}"),
+        name: slug.to_string(),
+        slug: slug.to_string(),
+        icon: None,
+        minecraft: "1.21.1".to_string(),
+        loader: Loader {
+            kind: "vanilla".to_string(),
+            version: None,
+        },
+        java: JavaCfg {
+            major: None,
+            args_override: None,
+            memory_mb: 2048,
+        },
+        source: None,
+        pack_locked: false,
+        mods: vec![],
+        created: "2024-01-01T00:00:00+00:00".to_string(),
+        last_played: None,
+        total_playtime_sec: 0,
+    };
+
+    let dir = tmp.path().join(slug);
+    fs::create_dir_all(&dir).unwrap();
+    let json = serde_json::to_string_pretty(&inst).unwrap();
+    let mut f = fs::File::create(dir.join("instance.json")).unwrap();
+    f.write_all(json.as_bytes()).unwrap();
+    dir
 }

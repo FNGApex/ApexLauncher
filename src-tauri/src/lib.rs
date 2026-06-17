@@ -416,8 +416,24 @@ struct LaunchExitPayload {
     code: Option<i32>,
 }
 
-/// A [`LaunchSink`] that emits `launch://log` and `launch://exit` events on the
-/// Tauri event channel.
+/// Payload emitted on the `run://update` Tauri event channel.
+///
+/// Fired on each run-status transition (`preparing` → `running` → terminal).
+/// Mirrors [`launch::RunInfo`]'s queryable scalars so the frontend runs slice can
+/// patch its state without a follow-up `get_run_state` round-trip.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunUpdatePayload {
+    /// Instance slug (registry key).
+    slug: String,
+    /// Lowercase status tag: `preparing` / `running` / `exited` / `killed` / `failed`.
+    status: String,
+    /// Process exit code on a terminal status; `null` otherwise / if unknown.
+    exit_code: Option<i32>,
+}
+
+/// A [`LaunchSink`] that emits `launch://log`, `launch://exit`, and `run://update`
+/// events on the Tauri event channel.
 struct TauriLaunchSink {
     app: tauri::AppHandle,
 }
@@ -441,6 +457,61 @@ impl LaunchSink for TauriLaunchSink {
         };
         let _ = self.app.emit("launch://exit", payload);
     }
+
+    fn status(&self, instance_id: &str, status: launch::RunStatus, exit_code: Option<i32>) {
+        use tauri::Emitter as _;
+        let payload = RunUpdatePayload {
+            slug: instance_id.to_owned(),
+            status: status.as_str().to_owned(),
+            exit_code,
+        };
+        let _ = self.app.emit("run://update", payload);
+    }
+}
+
+/// Run-state read payload returned by `list_running` / `get_run_state`.
+///
+/// Mirrors [`launch::RunInfo`] with serde camelCase for the TypeScript side.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunInfoPayload {
+    slug: String,
+    /// Lowercase status tag.
+    status: String,
+    exit_code: Option<i32>,
+    /// Milliseconds since the launch began.
+    elapsed_ms: u128,
+}
+
+impl From<launch::RunInfo> for RunInfoPayload {
+    fn from(info: launch::RunInfo) -> Self {
+        Self {
+            slug: info.slug,
+            status: info.status.as_str().to_owned(),
+            exit_code: info.exit_code,
+            elapsed_ms: info.elapsed_ms,
+        }
+    }
+}
+
+/// One replayed log line returned by `get_run_logs`.
+///
+/// Mirrors [`launch::LogLine`] with serde camelCase.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunLogPayload {
+    /// `"stdout"` or `"stderr"`.
+    stream: String,
+    line: String,
+}
+
+impl From<launch::LogLine> for RunLogPayload {
+    fn from(l: launch::LogLine) -> Self {
+        Self {
+            stream: l.stream,
+            line: l.line,
+        }
+    }
 }
 
 /// Payload emitted on the `install://log` Tauri event channel.
@@ -455,14 +526,22 @@ struct InstallLogPayload {
     line: String,
 }
 
-/// An [`InstallSink`] that emits `install://log` events on the Tauri event channel.
+/// An [`InstallSink`] that emits `install://log` events on the Tauri event channel
+/// and (when `registry` is set) records each line into the sole `Preparing`
+/// instance's ring for replay — prep-phase log attribution.
 struct TauriInstallSink {
     app: tauri::AppHandle,
+    /// When present, install lines are also buffered into the preparing instance's
+    /// log ring. `None` outside the launch prep path (e.g. modpack import).
+    registry: Option<Arc<RunningRegistry>>,
 }
 
 impl InstallSink for TauriInstallSink {
     fn log(&self, stream: &str, line: &str) {
         use tauri::Emitter as _;
+        if let Some(registry) = &self.registry {
+            launch::record_prep_log(registry, stream, line);
+        }
         let payload = InstallLogPayload {
             stream: stream.to_owned(),
             line: line.to_owned(),
@@ -486,6 +565,7 @@ impl InstallSink for TauriInstallSink {
 async fn launch_instance(
     app: tauri::AppHandle,
     registry_state: tauri::State<'_, Arc<RunningRegistry>>,
+    prep_state: tauri::State<'_, launch::PrepSemaphore>,
     store_state: tauri::State<'_, SharedAccountStore>,
     slug: String,
 ) -> Result<(), String> {
@@ -499,13 +579,44 @@ async fn launch_instance(
     })?;
     let inst = inst_detail.instance;
 
-    // --- 2. Reject if already running (keyed by slug; check before any async work). ---
+    // --- 2. Reject if already active (keyed by slug; only a Running/Preparing
+    //        entry blocks — terminal leftovers are reusable. Check before async). ---
     {
         let guard = registry_state.lock().unwrap();
-        if guard.contains_key(&inst.slug) {
-            return Err(format!("instance '{}' is already running", inst.slug));
+        if let Some(state) = guard.get(&inst.slug) {
+            if state.status == launch::RunStatus::Running
+                || state.status == launch::RunStatus::Preparing
+            {
+                return Err(format!("instance '{}' is already running", inst.slug));
+            }
         }
     }
+
+    // --- 2b. Acquire the prep permit, serializing the blocking prep phase
+    //         (resolve → download → materialize → natives) across launches. The
+    //         permit is held until the JVM spawns (step 9), then dropped — so a
+    //         second launch waits for prep but both packs then run concurrently.
+    //         Never block on a pack's *exit*. ---
+    let prep_sem: launch::PrepSemaphore = Arc::clone(&*prep_state);
+    let prep_permit = prep_sem
+        .acquire_owned()
+        .await
+        .map_err(|_| "prep semaphore closed".to_string())?;
+
+    // Insert a `Preparing` registry entry so prep-phase install logs attribute to
+    // this (now sole) preparing instance and the run is visible from any page.
+    let sink = Arc::new(TauriLaunchSink { app: app.clone() });
+    launch::mark_preparing(&registry_state, &inst.slug, &*sink);
+
+    // RAII guard: on ANY early return from the prep body below (a `?` error), mark
+    // the run `Failed` (and the permit drops on scope exit). Disarmed once spawn
+    // succeeds. Avoids threading failure handling through every prep step.
+    let mut prep_guard = PrepFailGuard {
+        registry: Arc::clone(&*registry_state),
+        slug: inst.slug.clone(),
+        sink: Arc::clone(&sink),
+        armed: true,
+    };
 
     // --- 3. Resolve: manifest → DownloadPlan + LaunchMeta. ---
     let spec = resolver::fetch_version_spec(&app, &inst.minecraft).await?;
@@ -548,7 +659,14 @@ async fn launch_instance(
         let java_for_install = core::java::ensure_java(&app, launch_meta.java_major).await?;
         java_inst_opt = Some(java_for_install.clone());
 
-        let install_sink = TauriInstallSink { app: app.clone() };
+        // The install sink emits `install://log` AND records each line into the
+        // sole `Preparing` instance's ring (prep-phase log attribution: install
+        // lines carry no correlation id, but prep is serialized so they belong to
+        // the one preparing instance).
+        let install_sink = TauriInstallSink {
+            app: app.clone(),
+            registry: Some(Arc::clone(&*registry_state)),
+        };
         let version_json_path = forge_installer::run_installer(
             installer_kind,
             loader_version,
@@ -630,28 +748,58 @@ async fn launch_instance(
     let argv = launch::build_argv(&launch_meta, &paths, &identity)
         .map_err(|e| format!("argv assembly failed: {e}"))?;
 
-    // --- 9. Spawn (registry keyed by slug). ---
+    // --- 9. Spawn — transition `Preparing` → `Running`. The prep permit is held
+    //        until spawn returns, then dropped so the next launch's prep can begin
+    //        while this pack runs. Never wait on the pack's exit. ---
     let game_dir = paths.game_directory.clone();
     let java_path = java_inst.path.clone();
 
     // Clone the Arc so the monitor task owns its own reference.
     // State<Arc<…>> auto-derefs to Arc<…>, so &*registry_state is &Arc<…>.
     let registry_arc = Arc::clone(&*registry_state);
-    let sink = Arc::new(TauriLaunchSink { app: app.clone() });
 
-    launch::spawn_instance(
+    let spawn_res = launch::spawn_instance(
         inst.slug.clone(),
         inst_dir,
         game_dir,
         java_path,
         argv,
         registry_arc,
-        sink,
+        Arc::clone(&sink),
     )
-    .await?;
+    .await;
+
+    // Release the prep permit now the JVM has spawned (or failed to). On error the
+    // `prep_guard` (still armed) marks the run `Failed` when it drops.
+    drop(prep_permit);
+    spawn_res?;
+
+    // Spawn succeeded — disarm the guard so it does NOT mark the live run `Failed`.
+    prep_guard.armed = false;
 
     log::info!("launch: launch_instance '{slug}' — spawn succeeded");
     Ok(())
+}
+
+/// RAII guard that marks a launch's run `Failed` if it drops while still armed.
+///
+/// Installed once a `Preparing` entry exists; disarmed only after `spawn_instance`
+/// succeeds. Any `?`-driven early return from the prep body drops the guard armed,
+/// flipping the stale `Preparing` entry to `Failed` (and the prep permit drops on
+/// the same scope exit) so a future launch is not blocked by a phantom entry.
+struct PrepFailGuard {
+    registry: Arc<RunningRegistry>,
+    slug: String,
+    sink: Arc<TauriLaunchSink>,
+    armed: bool,
+}
+
+impl Drop for PrepFailGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            launch::mark_failed(&self.registry, &self.slug, &*self.sink);
+        }
+    }
 }
 
 /// Stop (kill) a running Minecraft instance.
@@ -667,6 +815,39 @@ fn kill_instance(
 ) -> Result<(), String> {
     // registry_state is State<Arc<Mutex<…>>>; deref State then Arc to get &Mutex<…>.
     launch::kill_instance(&**registry_state, &slug)
+}
+
+/// Enumerate the currently non-terminal (preparing / running) instances.
+///
+/// Lets any page hydrate the running-indicator state regardless of when it
+/// mounted. Terminal entries (exited / killed / failed) are excluded.
+#[tauri::command]
+fn list_running(registry_state: tauri::State<'_, Arc<RunningRegistry>>) -> Vec<RunInfoPayload> {
+    launch::list_running(&**registry_state)
+        .into_iter()
+        .map(RunInfoPayload::from)
+        .collect()
+}
+
+/// Read a single instance's run state (any status, incl. terminal). `None` if the
+/// slug is not tracked — lets `InstanceDetail` recover status + a missed exit code.
+#[tauri::command]
+fn get_run_state(
+    registry_state: tauri::State<'_, Arc<RunningRegistry>>,
+    slug: String,
+) -> Option<RunInfoPayload> {
+    launch::get_run_state(&**registry_state, &slug).map(RunInfoPayload::from)
+}
+
+/// Replay an instance's buffered log lines (works after exit; entry is retained).
+/// `None` if the slug is not tracked.
+#[tauri::command]
+fn get_run_logs(
+    registry_state: tauri::State<'_, Arc<RunningRegistry>>,
+    slug: String,
+) -> Option<Vec<RunLogPayload>> {
+    launch::get_run_logs(&**registry_state, &slug)
+        .map(|lines| lines.into_iter().map(RunLogPayload::from).collect())
 }
 
 // --- Version & loader metadata (Mojang / Forge / Fabric / Quilt / NeoForge). ---
@@ -1921,6 +2102,9 @@ pub fn run() {
     // the Arc and still access the shared map after the command returns.
     let registry: Arc<RunningRegistry> = Arc::new(launch::new_running_registry());
 
+    // Single-permit semaphore serializing the blocking launch prep across runs.
+    let prep_semaphore: launch::PrepSemaphore = launch::new_prep_semaphore();
+
     // Cancel token for in-flight begin_login.
     let cancel_token: CancelToken = std::sync::Mutex::new(None);
 
@@ -1948,6 +2132,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(registry)
+        .manage(prep_semaphore)
         .manage(cancel_token)
         .setup(|app| {
             // Initialize the account store now that the AppHandle is available,
@@ -1986,6 +2171,9 @@ pub fn run() {
             ensure_java,
             launch_instance,
             kill_instance,
+            list_running,
+            get_run_state,
+            get_run_logs,
             begin_login,
             cancel_login,
             get_account,
