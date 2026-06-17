@@ -24,6 +24,7 @@ use core::providers::{
     SearchParams, SearchResult, ProjectVersion,
 };
 use core::settings::{self, Settings};
+use core::task_manager::{Task, TaskManager, TaskObserver, TaskProgress};
 use core::versions::{self, McVersion};
 
 // --- Phase 3: authentication ---
@@ -512,6 +513,80 @@ impl From<launch::LogLine> for RunLogPayload {
             line: l.line,
         }
     }
+}
+
+// --- Download Manager (task queue) payloads + observer (CP-2). ---
+
+/// Payload emitted on the `task://progress` Tauri event channel.
+///
+/// Mirrors [`task_manager::TaskProgress`] with serde camelCase. Fires per child
+/// transition while a task downloads. The frontend mirror lands in CP-7.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskProgressPayload {
+    task_id: u64,
+    /// Label of the child currently in flight; `null` between children.
+    current_child: Option<String>,
+    done: u32,
+    total: u32,
+    /// Bytes received so far for the current child (best-effort).
+    bytes: u64,
+}
+
+/// Payload emitted on the `task://update` Tauri event channel — one full task
+/// snapshot per lifecycle/status transition.
+///
+/// Mirrors [`task_manager::Task`] with serde camelCase. The status tag and
+/// child-item shapes already serialize camelCase from the core types. The
+/// frontend mirror lands in CP-7.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskUpdatePayload {
+    #[serde(flatten)]
+    task: Task,
+}
+
+/// A [`TaskObserver`] that emits `task://progress` / `task://update` on the
+/// Tauri event channel. The single Download-Manager worker calls this from its
+/// task; emission is best-effort (ignored if the webview is gone).
+struct TauriTaskObserver {
+    app: tauri::AppHandle,
+}
+
+impl TaskObserver for TauriTaskObserver {
+    fn progress(&self, update: TaskProgress) {
+        use tauri::Emitter as _;
+        let payload = TaskProgressPayload {
+            task_id: update.task_id,
+            current_child: update.current_child,
+            done: update.done,
+            total: update.total,
+            bytes: update.bytes,
+        };
+        let _ = self.app.emit("task://progress", payload);
+    }
+
+    fn status_changed(&self, task: &Task) {
+        use tauri::Emitter as _;
+        let payload = TaskUpdatePayload { task: task.clone() };
+        let _ = self.app.emit("task://update", payload);
+    }
+}
+
+/// Read the current Download-Manager task snapshot. Survives navigation —
+/// any page can hydrate from this regardless of when it mounted.
+#[tauri::command]
+async fn list_tasks(manager: tauri::State<'_, TaskManager>) -> Result<Vec<Task>, String> {
+    Ok(manager.list().await)
+}
+
+/// Cancel a task by id. Trips the task's cancel token (a running download stops
+/// acquiring new permits) and short-circuits a still-queued task to `Cancelled`.
+/// Idempotent; a no-op for unknown or already-terminal ids.
+#[tauri::command]
+async fn cancel_task(manager: tauri::State<'_, TaskManager>, id: u64) -> Result<(), String> {
+    manager.cancel(id).await;
+    Ok(())
 }
 
 /// Payload emitted on the `install://log` Tauri event channel.
@@ -2153,6 +2228,15 @@ pub fn run() {
                 });
             let shared: SharedAccountStore = Arc::new(tokio::sync::Mutex::new(store));
             app.manage(shared);
+
+            // Download Manager: serial FIFO task queue. Constructed here (not in
+            // run()) because its observer needs the AppHandle to emit task://*
+            // events. `new` spawns the single worker task on the Tauri runtime.
+            let task_observer = Arc::new(TauriTaskObserver {
+                app: app.handle().clone(),
+            });
+            let task_manager = TaskManager::new(task_observer);
+            app.manage(task_manager);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2174,6 +2258,8 @@ pub fn run() {
             list_running,
             get_run_state,
             get_run_logs,
+            list_tasks,
+            cancel_task,
             begin_login,
             cancel_login,
             get_account,

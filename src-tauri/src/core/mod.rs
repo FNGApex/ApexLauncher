@@ -37,4 +37,5 @@ pub mod providers;
 pub mod resolver;
 pub mod settings;
 pub mod store;
+pub mod task_manager;
 pub mod versions;
