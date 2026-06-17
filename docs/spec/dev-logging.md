@@ -102,3 +102,5 @@ CP1 landed before the loop. CP2 built across 2 iterations of /subagent-implement
 - Unrelated runtime bug surfaced during the GUI run: **downloads broken** (engine path fails). Filed as project follow-up `download-broken-runtime` for a future session — the new CP2 logging should make the failing item visible. Not a logging defect.
 
 **Squashed to 6db6fb7 — 2026-06-17.** Per-iteration SHAs above are historical (unreachable from any branch).
+
+**Merged into main as 9e75da7 — 2026-06-17.**
