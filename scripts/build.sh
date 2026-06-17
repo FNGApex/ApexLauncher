@@ -79,7 +79,7 @@ run_native() {
       npx tsc --noEmit
       ;;
     test)
-      cargo test --manifest-path src-tauri/Cargo.toml "${EXTRA[@]}"
+      cargo test --manifest-path src-tauri/Cargo.toml ${EXTRA[@]+"${EXTRA[@]}"}
       ;;
     build)
       ensure_node

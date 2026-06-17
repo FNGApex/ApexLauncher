@@ -117,6 +117,7 @@ async fn begin_login(
     use tauri::Emitter as _;
     use tokio::time::{sleep, Duration};
 
+    log::info!("auth: begin_login — starting device-code flow");
     let http = auth::ReqwestAuthClient(reqwest::Client::new());
 
     // Request device code.
@@ -195,6 +196,7 @@ async fn begin_login(
         .set_account(meta.clone(), &ms_refresh_token)
         .map_err(AuthCommandError::from)?;
 
+    log::info!("auth: begin_login — signed in as '{}'", meta.username);
     Ok(meta)
 }
 
@@ -489,6 +491,8 @@ async fn launch_instance(
 ) -> Result<(), String> {
     use core::download::NoOpSink;
 
+    log::info!("launch: launch_instance '{slug}'");
+
     // --- 1. Load instance manifest. ---
     let inst_detail = instances::get(&app, &slug).map_err(|e| {
         format!("failed to load instance '{slug}': {e}")
@@ -646,6 +650,7 @@ async fn launch_instance(
     )
     .await?;
 
+    log::info!("launch: launch_instance '{slug}' — spawn succeeded");
     Ok(())
 }
 
@@ -830,6 +835,8 @@ async fn add_mod(
     use core::mod_install::{attribute_outcomes, build_download_items, merge_mod_entries, partition_by_file_name, resolve_install};
     use std::collections::HashSet;
 
+    log::info!("mod: add_mod project_id={project_id} version={version_id} instance={slug}");
+
     // 1. Build provider + HTTP client.
     let http = ReqwestProviderClient(reqwest::Client::new());
     let settings = settings::load(&app).unwrap_or_default();
@@ -929,6 +936,12 @@ async fn add_mod(
     merge_mod_entries(&mut instance.mods, result.added.clone());
     instances::save_manifest(&app, &slug, &instance)?;
 
+    log::info!(
+        "mod: add_mod done — added={}, failed={}, manual={}",
+        result.added.len(),
+        result.failed.len(),
+        result.manual.len()
+    );
     Ok(result)
 }
 
@@ -1008,6 +1021,8 @@ async fn update_mod(
     use core::download::{self as dl, DownloadItem, DownloadPlan, ExpectedHash, NoOpSink};
     use core::mod_install::{apply_swap, decide_update, fetch_newest_compatible, page_url_for, UpdateAction};
 
+    log::info!("mod: update_mod project_id={project_id} instance={slug}");
+
     // 1. Load manifest; guard against pack-lock; find the entry.
     let mut instance = instances::load_manifest(&app, &slug)?;
     instances::ensure_not_locked(&instance)?;
@@ -1048,18 +1063,24 @@ async fn update_mod(
     let action = decide_update(&instance.mods[entry_idx], newest.as_ref());
 
     match action {
-        UpdateAction::UpToDate => Ok(UpdateModResult {
-            status: "upToDate".to_string(),
-            entry: None,
-            page_url: None,
-            error: None,
-        }),
-        UpdateAction::Unresolved => Ok(UpdateModResult {
-            status: "unresolved".to_string(),
-            entry: None,
-            page_url: None,
-            error: None,
-        }),
+        UpdateAction::UpToDate => {
+            log::info!("mod-update: project_id={project_id} already up to date");
+            Ok(UpdateModResult {
+                status: "upToDate".to_string(),
+                entry: None,
+                page_url: None,
+                error: None,
+            })
+        }
+        UpdateAction::Unresolved => {
+            log::info!("mod-update: project_id={project_id} no matching version / unresolved");
+            Ok(UpdateModResult {
+                status: "unresolved".to_string(),
+                entry: None,
+                page_url: None,
+                error: None,
+            })
+        }
         UpdateAction::Manual { page_url: _, file_name: _ } => {
             // page_url from decide_update is empty placeholder; build the real one here.
             let newest_version = newest.as_ref().unwrap(); // safe: Manual arm means newest is Some
@@ -1070,6 +1091,10 @@ async fn update_mod(
                 .or_else(|| newest_version.files.first())
                 .unwrap(); // safe: Manual arm means files is non-empty
             let real_page_url = page_url_for(newest_version.provider, &project_id);
+            log::warn!(
+                "mod-update: project_id={project_id} distribution disabled — download '{}' manually from {real_page_url}",
+                new_file.file_name
+            );
             Ok(UpdateModResult {
                 status: "manual".to_string(),
                 entry: None,
@@ -1146,6 +1171,7 @@ async fn update_mod(
                         _ => None,
                     })
                     .unwrap_or_else(|| "download failed: no outcome recorded".to_string());
+                log::warn!("mod-update: project_id={project_id} download failed — {err}");
                 return Ok(UpdateModResult {
                     status: "failed".to_string(),
                     entry: None,
@@ -1163,6 +1189,9 @@ async fn update_mod(
             // Save manifest.
             instances::save_manifest(&app, &slug, &instance)?;
 
+            log::info!(
+                "mod: update_mod done — project_id={project_id} updated to version {new_version_id}"
+            );
             Ok(UpdateModResult {
                 status: "updated".to_string(),
                 entry: Some(instance.mods[entry_idx].clone()),
@@ -1216,6 +1245,8 @@ async fn import_mrpack_from_bytes(
 ) -> Result<MrpackImportResult, String> {
     use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
     use core::modpack::extract_overrides;
+
+    log::info!("modpack: import_mrpack starting");
 
     // 2. Parse manifest minimally to obtain name/mc/loader for instance creation.
     //    The full parse+plan goes through the tested `read_mrpack` seam below (step 4).
@@ -1298,6 +1329,12 @@ async fn import_mrpack_from_bytes(
     }
     instances::save_manifest(&app, &inst.slug, &instance)?;
 
+    log::info!(
+        "modpack: import_mrpack done — installed={installed} failed={failed} skipped={skipped_count}"
+    );
+    if failed > 0 {
+        log::warn!("modpack: import_mrpack — {failed} file(s) failed to download");
+    }
     Ok(MrpackImportResult {
         slug: inst.slug,
         name: inst.name,
@@ -1362,6 +1399,8 @@ async fn import_cf_zip_from_bytes(
 ) -> Result<CfImportResult, String> {
     use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
     use core::modpack::{extract_overrides, read_cf_manifest, resolve_and_build_cf_plan};
+
+    log::info!("modpack: import_curseforge_zip starting");
 
     // 1. Parse manifest.json.
     let manifest = read_cf_manifest(&bytes).map_err(|e| e.to_string())?;
@@ -1436,6 +1475,19 @@ async fn import_cf_zip_from_bytes(
     }
     instances::save_manifest(&app, &inst.slug, &instance)?;
 
+    log::info!(
+        "modpack: import_curseforge_zip done — installed={installed} failed={failed} manual={}",
+        manual.len()
+    );
+    if failed > 0 {
+        log::warn!("modpack: import_curseforge_zip — {failed} file(s) failed (download or resolve)");
+    }
+    if !manual.is_empty() {
+        log::warn!(
+            "modpack: import_curseforge_zip — {} file(s) require manual download",
+            manual.len()
+        );
+    }
     Ok(CfImportResult {
         slug: inst.slug,
         name: inst.name,
@@ -1519,6 +1571,8 @@ async fn install_modpack(
     use core::modpack::resolve_pack_file;
     use core::providers::ProviderKind;
 
+    log::info!("modpack: install_modpack provider={provider} project_id={project_id}");
+
     // 1. Construct the provider.
     let settings = settings::load(&app).unwrap_or_default();
     let target_ver = version_id.as_deref();
@@ -1551,6 +1605,10 @@ async fn install_modpack(
     let url = match resolved.url {
         Some(u) => u,
         None => {
+            log::warn!(
+                "modpack: install_modpack — pack file '{}' is not distributable; routing to manual",
+                resolved.file_name
+            );
             return Ok(ModpackInstallResult::Manual {
                 page_url: page_url.unwrap_or_else(|| String::new()),
                 file_name: resolved.file_name,
@@ -1605,11 +1663,13 @@ async fn install_modpack(
         ProviderKind::Modrinth => {
             let result =
                 import_mrpack_from_bytes(app, bytes, name_override, Some(source)).await?;
+            log::info!("modpack: install_modpack done — mrpack slug='{}'", result.slug);
             Ok(ModpackInstallResult::Mrpack(result))
         }
         ProviderKind::CurseForge => {
             let result =
                 import_cf_zip_from_bytes(app, bytes, name_override, Some(source)).await?;
+            log::info!("modpack: install_modpack done — curseforge slug='{}'", result.slug);
             Ok(ModpackInstallResult::Curseforge(result))
         }
     }
@@ -1672,6 +1732,8 @@ async fn update_modpack(
     use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
     use core::modpack::{extract_overrides, plan_pack_update, resolve_pack_file};
     use core::providers::ProviderKind;
+
+    log::info!("modpack: update_modpack instance={slug}");
 
     // 1. Load instance + require source.
     let mut instance = instances::load_manifest(&app, &slug)?;
@@ -1770,6 +1832,11 @@ async fn update_modpack(
 
     // 5. Reconcile mods.
     let reconcile = plan_pack_update(&instance.mods, &new_mod_entries);
+    log::info!(
+        "modpack: update_modpack reconcile — to_remove={} merged={}",
+        reconcile.to_remove.len(),
+        reconcile.merged.len()
+    );
 
     // Compute counts before consuming reconcile.
     let removed_count = reconcile.to_remove.len() as u32;
@@ -1828,6 +1895,12 @@ async fn update_modpack(
     }
     instances::save_manifest(&app, &slug, &instance)?;
 
+    log::info!(
+        "modpack: update_modpack done — added={added_count} removed={removed_count} kept={kept_count} failed={download_failed}"
+    );
+    if download_failed > 0 {
+        log::warn!("modpack: update_modpack — {download_failed} file(s) failed (download or resolve)");
+    }
     Ok(PackUpdateResult {
         added: added_count,
         removed: removed_count,
@@ -1852,6 +1925,26 @@ pub fn run() {
     let cancel_token: CancelToken = std::sync::Mutex::new(None);
 
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("apex".to_string()),
+                    }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
+                ])
+                .level(log::LevelFilter::Info)
+                .format(|out, message, record| {
+                    out.finish(format_args!(
+                        "[{} {}] {}",
+                        record.level(),
+                        record.target(),
+                        message
+                    ))
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(registry)
@@ -1870,7 +1963,7 @@ pub fn run() {
                     // in-memory store so the app boots without panicking. The path is
                     // kept so future writes (on next successful login) go to the right
                     // location.
-                    eprintln!("auth: could not load account.json ({e}); starting with empty store");
+                    log::warn!("auth: could not load account.json ({e}); starting with empty store");
                     AccountStore::new_empty(account_path, Box::new(auth::SystemKeyringBackend))
                 });
             let shared: SharedAccountStore = Arc::new(tokio::sync::Mutex::new(store));

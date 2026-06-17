@@ -572,6 +572,12 @@ pub async fn execute_plan(
         })
         .collect();
 
+    log::info!(
+        "download: starting plan — {} item(s) to download, {} already present",
+        download_items.len(),
+        outcomes.len()
+    );
+
     if download_items.is_empty() {
         return PlanResult { outcomes };
     }
@@ -604,6 +610,11 @@ pub async fn execute_plan(
 
     // Collect all outcomes, running up to `concurrency` at a time.
     let mut downloaded: Vec<ItemOutcome> = pending.collect().await;
+    for outcome in &downloaded {
+        if let ItemStatus::Failed { error } = &outcome.status {
+            log::warn!("download: item failed — url={} error={error}", outcome.url);
+        }
+    }
     outcomes.append(&mut downloaded);
 
     PlanResult { outcomes }

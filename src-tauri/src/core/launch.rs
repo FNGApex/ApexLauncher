@@ -613,7 +613,13 @@ pub async fn spawn_instance<S: LaunchSink>(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("failed to spawn java: {e}"))?;
+        .map_err(|e| {
+            log::error!("launch: failed to spawn java for '{slug}': {e}");
+            format!("failed to spawn java: {e}")
+        })?;
+
+    let pid = child.id().unwrap_or(0);
+    log::info!("launch: spawned '{slug}' (pid {pid})");
 
     // Take stdout/stderr pipes before moving `child` into the task.
     let stdout = child
@@ -765,7 +771,7 @@ async fn monitor_child<S: LaunchSink>(
     let now = chrono::Utc::now();
     if let Err(e) = crate::core::instances::record_playtime(&inst_dir, elapsed_secs, now) {
         // Best-effort — log but don't panic.
-        eprintln!("launch: failed to record playtime for {slug}: {e}");
+        log::warn!("launch: failed to record playtime for {slug}: {e}");
     }
 
     // Deregister — monitor is the sole owner of this removal (both exit paths).

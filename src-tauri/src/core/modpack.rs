@@ -487,6 +487,17 @@ pub fn build_cf_pack_plan(
                 });
             }
             _ => {
+                let reason = if file.url.is_none() {
+                    "distribution disabled (url=None)"
+                } else {
+                    "no sha1 hash (md5-only or hashless)"
+                };
+                log::warn!(
+                    "modpack: CF file project_id={} file_id={} '{}' routed to manual — {reason}",
+                    manifest_file.project_id,
+                    manifest_file.file_id,
+                    file.file_name
+                );
                 manual.push(CfManualFile {
                     project_id: manifest_file.project_id,
                     file_id: manifest_file.file_id,
@@ -548,11 +559,17 @@ pub async fn resolve_and_build_cf_plan(
             Err(crate::core::providers::ProviderError::KeyMissing) => {
                 return Err(ModpackError::ResolverKeyMissing);
             }
-            Err(e) => failed.push(CfResolveFailure {
-                project_id: entry.project_id,
-                file_id: entry.file_id,
-                reason: e.to_string(),
-            }),
+            Err(e) => {
+                log::warn!(
+                    "modpack: resolve_and_build_cf_plan — could not resolve project_id={} file_id={}: {e}",
+                    entry.project_id, entry.file_id
+                );
+                failed.push(CfResolveFailure {
+                    project_id: entry.project_id,
+                    file_id: entry.file_id,
+                    reason: e.to_string(),
+                });
+            }
         }
     }
 
@@ -664,6 +681,10 @@ pub async fn resolve_pack_file(
         .ok_or(ModpackError::NoFiles)?
         .clone();
 
+    log::info!(
+        "modpack: resolve_pack_file — resolved project_id={project_id} version_id={version_id} file='{}'",
+        file.file_name
+    );
     Ok(ResolvedPackFile {
         url: file.url,
         file_name: file.file_name,
