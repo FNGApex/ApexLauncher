@@ -601,3 +601,6 @@ versions linger — no per-file override provenance is tracked. Per-file ledger 
 **Not done (needs GUI, not testable in WSL):** manual e2e update of a Browse-installed pack
 (latest + chosen version), Pack Lock toggle behavior, and the version dropdowns in the running app.
 Backend + frontend build verified headlessly; GUI run pending the WSLg/Windows-launch decision.
+
+**Squashed to `34c3b5c`, merged into main as `0a1112c` — 2026-06-17.** The per-checkpoint SHAs
+above (`d1156b9`..`646cd93`) are historical — unreachable once branch `modpack-slice-d` is deleted.
