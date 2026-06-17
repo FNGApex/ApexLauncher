@@ -863,8 +863,9 @@ async fn add_mod(
         .find(|v| v.id == version_id)
         .ok_or_else(|| format!("version '{version_id}' not found for project '{project_id}'"))?;
 
-    // 2. Load the instance manifest; derive already-installed project_ids.
+    // 2. Load the instance manifest; guard against pack-lock; derive already-installed project_ids.
     let mut instance = instances::load_manifest(&app, &slug)?;
+    instances::ensure_not_locked(&instance)?;
     let already_installed: HashSet<String> = instance.mods.iter().map(|m| m.project_id.clone()).collect();
 
     // 3. Run the planner.
@@ -940,6 +941,7 @@ async fn add_mod(
 ///
 /// `file_name` is the base `.jar` name (no `.disabled` suffix). Both `slug`
 /// and `file_name` are validated for path traversal before any FS access.
+/// Blocked when the instance is pack-locked.
 #[tauri::command]
 fn set_mod_enabled(
     app: tauri::AppHandle,
@@ -947,6 +949,8 @@ fn set_mod_enabled(
     file_name: String,
     enabled: bool,
 ) -> Result<(), String> {
+    let instance = instances::load_manifest(&app, &slug)?;
+    instances::ensure_not_locked(&instance)?;
     instances::set_mod_enabled(&app, &slug, &file_name, enabled)
 }
 
@@ -955,9 +959,26 @@ fn set_mod_enabled(
 ///
 /// `file_name` is the base `.jar` name (no `.disabled` suffix). Both `slug`
 /// and `file_name` are validated for path traversal before any FS access.
+/// Blocked when the instance is pack-locked.
 #[tauri::command]
 fn remove_mod(app: tauri::AppHandle, slug: String, file_name: String) -> Result<(), String> {
+    let instance = instances::load_manifest(&app, &slug)?;
+    instances::ensure_not_locked(&instance)?;
     instances::remove_mod(&app, &slug, &file_name)
+}
+
+// ---------------------------------------------------------------------------
+// D4: Pack Lock toggle
+// ---------------------------------------------------------------------------
+
+/// Set or clear the pack-lock flag on an instance.
+///
+/// When locked, mod-mutation commands (`add_mod`, `set_mod_enabled`,
+/// `remove_mod`, `update_mod`) will return an error. `update_modpack` is
+/// deliberately left unguarded — updating the pack is how you change it.
+#[tauri::command]
+fn set_pack_lock(app: tauri::AppHandle, slug: String, locked: bool) -> Result<(), String> {
+    instances::set_pack_lock(&app, &slug, locked)
 }
 
 // ---------------------------------------------------------------------------
@@ -987,8 +1008,9 @@ async fn update_mod(
     use core::download::{self as dl, DownloadItem, DownloadPlan, ExpectedHash, NoOpSink};
     use core::mod_install::{apply_swap, decide_update, fetch_newest_compatible, page_url_for, UpdateAction};
 
-    // 1. Load manifest; find the entry.
+    // 1. Load manifest; guard against pack-lock; find the entry.
     let mut instance = instances::load_manifest(&app, &slug)?;
+    instances::ensure_not_locked(&instance)?;
     let entry_idx = instance
         .mods
         .iter()
@@ -1190,6 +1212,7 @@ async fn import_mrpack_from_bytes(
     app: tauri::AppHandle,
     bytes: Vec<u8>,
     name_override: Option<String>,
+    pack_source: Option<instances::Source>,
 ) -> Result<MrpackImportResult, String> {
     use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
     use core::modpack::extract_overrides;
@@ -1270,6 +1293,9 @@ async fn import_mrpack_from_bytes(
     // 6. Merge mod entries into manifest and persist.
     let mut instance = instances::load_manifest(&app, &inst.slug)?;
     instance.mods = mod_entries;
+    if let Some(src) = pack_source {
+        instance.source = Some(src);
+    }
     instances::save_manifest(&app, &inst.slug, &instance)?;
 
     Ok(MrpackImportResult {
@@ -1290,7 +1316,7 @@ async fn import_mrpack(
 ) -> Result<MrpackImportResult, String> {
     let bytes = std::fs::read(&mrpack_path)
         .map_err(|e| format!("could not read mrpack file '{mrpack_path}': {e}"))?;
-    import_mrpack_from_bytes(app, bytes, name_override).await
+    import_mrpack_from_bytes(app, bytes, name_override, None).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,6 +1358,7 @@ async fn import_cf_zip_from_bytes(
     app: tauri::AppHandle,
     bytes: Vec<u8>,
     name_override: Option<String>,
+    pack_source: Option<instances::Source>,
 ) -> Result<CfImportResult, String> {
     use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
     use core::modpack::{extract_overrides, read_cf_manifest, resolve_and_build_cf_plan};
@@ -1404,6 +1431,9 @@ async fn import_cf_zip_from_bytes(
     // 6. Merge mod entries into manifest and persist.
     let mut instance = instances::load_manifest(&app, &inst.slug)?;
     instance.mods = mod_entries;
+    if let Some(src) = pack_source {
+        instance.source = Some(src);
+    }
     instances::save_manifest(&app, &inst.slug, &instance)?;
 
     Ok(CfImportResult {
@@ -1423,7 +1453,7 @@ async fn import_curseforge_zip(
 ) -> Result<CfImportResult, String> {
     let bytes = std::fs::read(&cf_zip_path)
         .map_err(|e| format!("could not read CurseForge zip '{cf_zip_path}': {e}"))?;
-    import_cf_zip_from_bytes(app, bytes, name_override).await
+    import_cf_zip_from_bytes(app, bytes, name_override, None).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1484,17 +1514,19 @@ async fn install_modpack(
     provider: String,
     project_id: String,
     page_url: Option<String>,
+    version_id: Option<String>,
 ) -> Result<ModpackInstallResult, String> {
     use core::modpack::resolve_pack_file;
     use core::providers::ProviderKind;
 
     // 1. Construct the provider.
     let settings = settings::load(&app).unwrap_or_default();
+    let target_ver = version_id.as_deref();
     let resolved = match provider.as_str() {
         "modrinth" => {
             let prov = ModrinthProvider;
             let http = ReqwestProviderClient(reqwest::Client::new());
-            resolve_pack_file(&prov, &http, &project_id)
+            resolve_pack_file(&prov, &http, &project_id, target_ver)
                 .await
                 .map_err(|e| e.to_string())?
         }
@@ -1506,7 +1538,7 @@ async fn install_modpack(
             );
             let prov = CurseForgeProvider::new(cf_key);
             let http = ReqwestProviderClient(reqwest::Client::new());
-            resolve_pack_file(&prov, &http, &project_id)
+            resolve_pack_file(&prov, &http, &project_id, target_ver)
                 .await
                 .map_err(|e| e.to_string())?
         }
@@ -1548,22 +1580,261 @@ async fn install_modpack(
     std::fs::write(&dest_path, &bytes)
         .map_err(|e| format!("could not write pack archive to cache: {e}"))?;
 
-    // Derive a display name from the file_name (strip extension) as name_override.
-    // The version name field isn't threaded through ResolvedPackFile; file_name is the
-    // best available fallback. C4 can pass an explicit name if desired.
-    let name_override: Option<String> = None;
+    // Build the provenance record for this Browse-path install.
+    // provider string is normalised to ProviderKind wire form below.
+    let provider_str = match resolved.provider {
+        ProviderKind::Modrinth => "modrinth".to_string(),
+        ProviderKind::CurseForge => "curseForge".to_string(),
+    };
+    let source = instances::Source {
+        provider: provider_str,
+        project_id: project_id.clone(),
+        file_id: resolved.version_id.clone(),
+        pack_version: resolved.version_name.clone(),
+    };
+
+    // Use the version display name as the instance name override when available.
+    let name_override: Option<String> = if resolved.version_name.is_empty() {
+        None
+    } else {
+        Some(resolved.version_name.clone())
+    };
 
     // 5. Dispatch to the correct C1 inner fn.
     match resolved.provider {
         ProviderKind::Modrinth => {
-            let result = import_mrpack_from_bytes(app, bytes, name_override).await?;
+            let result =
+                import_mrpack_from_bytes(app, bytes, name_override, Some(source)).await?;
             Ok(ModpackInstallResult::Mrpack(result))
         }
         ProviderKind::CurseForge => {
-            let result = import_cf_zip_from_bytes(app, bytes, name_override).await?;
+            let result =
+                import_cf_zip_from_bytes(app, bytes, name_override, Some(source)).await?;
             Ok(ModpackInstallResult::Curseforge(result))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// D3: pack update command
+// ---------------------------------------------------------------------------
+
+/// Result returned to the frontend by `update_modpack`.
+///
+/// One struct for both providers (mrpack and CurseForge). `manual` is empty for
+/// mrpack updates and carries distribution-disabled files for CF updates, reusing
+/// the `CfManualFile` shape from slice B.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackUpdateResult {
+    /// Number of pack mods newly added (file_name absent from the old pack mods).
+    pub added: u32,
+    /// Number of old pack mods removed (were `from_pack=true`, absent from new plan).
+    pub removed: u32,
+    /// Number of user-added mods kept (from_pack=false, not overwritten by new plan).
+    pub kept: u32,
+    /// Number of download failures (+ CF resolve failures for CF packs).
+    pub failed: u32,
+    /// Files the user must download manually (CF only; empty for mrpack).
+    pub manual: Vec<core::modpack::CfManualFile>,
+}
+
+/// Update an already-installed modpack instance to a newer (or user-chosen) version.
+///
+/// # Flow
+/// 1. `instances::load_manifest` — if `instance.source` is `None`, return `Err`
+///    (instance was not installed via Browse; has no pack project id to re-resolve from).
+/// 2. Resolve the target version via `modpack::resolve_pack_file` using
+///    `source.provider` + `source.project_id` + optional `version_id`.
+///    If the resolved `url` is `None` (pack file not distributable at the pack level),
+///    return `Err` — no manual variant at the update level.
+/// 3. Stage the archive to `cache/installers/<file_name>` via a reqwest GET.
+/// 4. Build the new plan:
+///    - Modrinth: `modpack::read_mrpack(bytes, mc_dir)` → `PackPlan`.
+///    - CurseForge: `modpack::read_cf_manifest(bytes)` + `modpack::resolve_and_build_cf_plan`.
+/// 5. Reconcile: `modpack::plan_pack_update(&instance.mods, &plan.mods)` →
+///    `{ to_remove, merged }`.
+/// 6. Delete removed pack jars from `mc/mods/` (both `<name>` and `<name>.disabled`).
+///    User jars are never touched.
+/// 7. `download::execute_plan` — download the new plan items.
+/// 8. `modpack::extract_overrides` — overlay `overrides/` (pack wins on config collisions).
+/// 9. Bump `instance.mods = merged`, `instance.source.file_id = resolved.version_id`,
+///    `instance.source.pack_version = resolved.version_name`. `instances::save_manifest`.
+/// 10. Return `PackUpdateResult`.
+///
+/// All errors map to `String`.
+#[tauri::command]
+async fn update_modpack(
+    app: tauri::AppHandle,
+    slug: String,
+    version_id: Option<String>,
+) -> Result<PackUpdateResult, String> {
+    use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
+    use core::modpack::{extract_overrides, plan_pack_update, resolve_pack_file};
+    use core::providers::ProviderKind;
+
+    // 1. Load instance + require source.
+    let mut instance = instances::load_manifest(&app, &slug)?;
+    let source = instance
+        .source
+        .as_ref()
+        .ok_or_else(|| {
+            "instance has no pack source — not updatable (installed locally)".to_string()
+        })?
+        .clone();
+
+    // Derive mc_dir from the instance directory.
+    let inst_dir = core::store::instances_dir(&app)?.join(&slug);
+    let mc_dir = inst_dir.join("mc");
+
+    // 2. Resolve the target pack file.
+    let settings = settings::load(&app).unwrap_or_default();
+    let target_ver = version_id.as_deref();
+
+    let resolved = match source.provider.as_str() {
+        "modrinth" => {
+            let prov = ModrinthProvider;
+            let http = ReqwestProviderClient(reqwest::Client::new());
+            resolve_pack_file(&prov, &http, &source.project_id, target_ver)
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        "curseForge" | "curseforge" => {
+            let cf_key = cf_api_key_from(
+                std::env::var(providers::CF_API_KEY_ENV).ok(),
+                settings.curseforge_api_key.clone(),
+                option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+            );
+            let prov = CurseForgeProvider::new(cf_key);
+            let http = ReqwestProviderClient(reqwest::Client::new());
+            resolve_pack_file(&prov, &http, &source.project_id, target_ver)
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        other => {
+            return Err(format!("unknown provider in instance source: {other}"));
+        }
+    };
+
+    // If the pack archive itself is not distributable, error out (no manual variant for update).
+    let url = resolved.url.ok_or_else(|| {
+        "pack archive is not distributable — cannot update automatically".to_string()
+    })?;
+
+    // 3. Stage archive to cache/installers/<file_name>.
+    let installers_dir = core::store::cache_installers_dir(&app)?;
+    let dest_path = installers_dir.join(&resolved.file_name);
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("could not fetch pack archive: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "pack archive download failed: HTTP {}",
+            response.status()
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("could not read pack archive bytes: {e}"))?
+        .to_vec();
+    std::fs::write(&dest_path, &bytes)
+        .map_err(|e| format!("could not write pack archive to cache: {e}"))?;
+
+    // 4. Build the new plan.
+    let (new_mod_entries, download_items, manual, resolve_failed_count) = match resolved.provider {
+        ProviderKind::Modrinth => {
+            let (_manifest, plan) =
+                core::modpack::read_mrpack(&bytes, &mc_dir).map_err(|e| e.to_string())?;
+            (plan.mods, plan.items, vec![], 0u32)
+        }
+        ProviderKind::CurseForge => {
+            let cf_key = cf_api_key_from(
+                std::env::var(providers::CF_API_KEY_ENV).ok(),
+                settings.curseforge_api_key.clone(),
+                option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+            );
+            let manifest = core::modpack::read_cf_manifest(&bytes).map_err(|e| e.to_string())?;
+            let provider = CurseForgeProvider::new(cf_key);
+            let http = ReqwestProviderClient(reqwest::Client::new());
+            let plan =
+                core::modpack::resolve_and_build_cf_plan(&provider, &http, &manifest, &mc_dir)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            let failed_count = plan.failed.len() as u32;
+            (plan.mods, plan.items, plan.manual, failed_count)
+        }
+    };
+
+    // 5. Reconcile mods.
+    let reconcile = plan_pack_update(&instance.mods, &new_mod_entries);
+
+    // Compute counts before consuming reconcile.
+    let removed_count = reconcile.to_remove.len() as u32;
+    let kept_count = reconcile.merged.iter().filter(|m| !m.from_pack).count() as u32;
+    let old_pack_names: std::collections::HashSet<&str> = instance
+        .mods
+        .iter()
+        .filter(|m| m.from_pack)
+        .map(|m| m.file_name.as_str())
+        .collect();
+    let added_count = reconcile
+        .merged
+        .iter()
+        .filter(|m| m.from_pack && !old_pack_names.contains(m.file_name.as_str()))
+        .count() as u32;
+
+    // 6. Delete removed pack jars from mc/mods/ (enabled + disabled).
+    let mods_dir = mc_dir.join("mods");
+    for entry in &reconcile.to_remove {
+        instances::remove_mod_from_disk_files(&mods_dir, &entry.file_name);
+    }
+
+    // 7. Execute download plan.
+    let download_plan = DownloadPlan::new(download_items);
+    let http_client = dl::build_client().map_err(|e| e.to_string())?;
+    let plan_result = dl::execute_plan(&http_client, &download_plan, &NoOpSink, 8).await;
+
+    let mut download_failed: u32 = resolve_failed_count;
+    for outcome in &plan_result.outcomes {
+        if let ItemStatus::Failed { .. } = &outcome.status {
+            download_failed += 1;
+        }
+    }
+
+    // 8. Extract overrides (pack wins on config/options collisions).
+    {
+        use std::io::Cursor;
+        let cursor = Cursor::new(&bytes);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| format!("could not re-open pack archive for overrides: {e}"))?;
+        extract_overrides(&mut archive, &mc_dir).map_err(|e| e.to_string())?;
+    }
+
+    // 9. Write updated manifest.
+    // Mutate `instance` directly — already loaded at step 1. A second load_manifest
+    // would risk reading a stale on-disk state written by a concurrent operation,
+    // discarding the reconcile result. Source is guaranteed Some (hard-errored at step 1).
+    instance.mods = reconcile.merged;
+    {
+        let src = instance
+            .source
+            .as_mut()
+            .expect("source must be Some — checked at step 1");
+        src.file_id = resolved.version_id;
+        src.pack_version = resolved.version_name;
+    }
+    instances::save_manifest(&app, &slug, &instance)?;
+
+    Ok(PackUpdateResult {
+        added: added_count,
+        removed: removed_count,
+        kept: kept_count,
+        failed: download_failed,
+        manual,
+    })
 }
 
 #[cfg(test)]
@@ -1632,9 +1903,11 @@ pub fn run() {
             set_mod_enabled,
             remove_mod,
             update_mod,
+            set_pack_lock,
             import_mrpack,
             import_curseforge_zip,
-            install_modpack
+            install_modpack,
+            update_modpack
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

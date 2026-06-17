@@ -47,6 +47,8 @@ export interface ModEntry {
   hashes: Record<string, string>;
   enabled: boolean;
   side: string;
+  /** `true` when written by a pack importer; `false` (default) for user-added mods. */
+  fromPack?: boolean;
 }
 
 export interface Instance {
@@ -59,6 +61,8 @@ export interface Instance {
   loader: Loader;
   java: JavaCfg;
   source: InstanceSource | null;
+  /** When `true`, mod-mutation commands are blocked by the backend. */
+  packLocked?: boolean;
   mods: ModEntry[];
   created: string;
   lastPlayed: string | null;
@@ -822,15 +826,56 @@ export type ModpackInstallResult =
  * `provider` is the wire value from `ProjectSummary.provider` (e.g. `"modrinth"`, `"curseforge"`).
  * `projectId` is the provider's project id.
  * `pageUrl` is the project's page URL, echoed back in the `"manual"` variant.
+ * `versionId` optionally pins the version to install; omit or pass `undefined` for latest.
  */
 export function installModpack(
   provider: string,
   projectId: string,
   pageUrl?: string,
+  versionId?: string,
 ): Promise<ModpackInstallResult> {
   return invoke<ModpackInstallResult>("install_modpack", {
     provider,
     projectId,
     pageUrl: pageUrl ?? null,
+    versionId: versionId ?? null,
   });
+}
+
+// --- Phase 6 slice D: pack update + Pack Lock. ---
+
+/**
+ * Aggregated result returned by `update_modpack`.
+ * Mirrors `PackUpdateResult` in `src-tauri/src/lib.rs` (serde camelCase).
+ * `manual` is empty for mrpack updates; carries distribution-disabled files for CF updates.
+ */
+export interface PackUpdateResult {
+  added: number;
+  removed: number;
+  kept: number;
+  failed: number;
+  manual: CfManualFile[];
+}
+
+/**
+ * Update an installed modpack to a newer (or user-chosen) version.
+ *
+ * `slug` is the instance slug. `versionId` pins the target version; omit for latest.
+ * Requires the instance to have a `source` recorded (i.e. installed via Browse).
+ */
+export function updateModpack(slug: string, versionId?: string): Promise<PackUpdateResult> {
+  return invoke<PackUpdateResult>("update_modpack", {
+    slug,
+    versionId: versionId ?? null,
+  });
+}
+
+/**
+ * Toggle the Pack Lock on an instance.
+ *
+ * When `locked` is `true`, the backend rejects all mod-mutation commands
+ * (add_mod, set_mod_enabled, remove_mod, update_mod) for this instance.
+ */
+export function setPackLock(slug: string, locked: boolean): Promise<void> {
+  return invoke<void>("set_pack_lock", { slug, locked });
 }

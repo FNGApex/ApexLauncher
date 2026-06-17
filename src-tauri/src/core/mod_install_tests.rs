@@ -746,6 +746,11 @@ fn planned_to_mod_entry_maps_fields() {
     assert!(entry.enabled);
     assert_eq!(entry.side, "unknown");
     assert_eq!(entry.hashes.get("sha512"), Some(&"deadbeef".to_string()));
+    // D1: user-added mods must always have from_pack=false.
+    assert!(
+        !entry.from_pack,
+        "planned_to_mod_entry must set from_pack=false for user-added mods"
+    );
 }
 
 /// `merge_mod_entries` appends new entries that don't clash.
@@ -1033,6 +1038,7 @@ fn stub_mod_entry(version_id: &str, file_name: &str, enabled: bool) -> ModEntry 
         hashes,
         enabled,
         side: "unknown".to_string(),
+        from_pack: false,
     }
 }
 

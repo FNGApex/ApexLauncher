@@ -1193,7 +1193,7 @@ async fn c2_modrinth_picks_first_version_primary_file() {
     let client = MockCfClient::new(vec![MockResp(200, two_versions)]);
     let provider = ModrinthProvider;
 
-    let resolved = resolve_pack_file(&provider, &client, "PROJ001")
+    let resolved = resolve_pack_file(&provider, &client, "PROJ001", None)
         .await
         .expect("should resolve");
 
@@ -1210,7 +1210,7 @@ async fn c2_primary_file_picked_when_present() {
     let client = MockCfClient::new(vec![MockResp(200, mr_versions_two_files_json())]);
     let provider = ModrinthProvider;
 
-    let resolved = resolve_pack_file(&provider, &client, "PROJ001")
+    let resolved = resolve_pack_file(&provider, &client, "PROJ001", None)
         .await
         .expect("should resolve");
 
@@ -1228,7 +1228,7 @@ async fn c2_no_primary_falls_back_to_first_file() {
     let client = MockCfClient::new(vec![MockResp(200, json)]);
     let provider = ModrinthProvider;
 
-    let resolved = resolve_pack_file(&provider, &client, "PROJ001")
+    let resolved = resolve_pack_file(&provider, &client, "PROJ001", None)
         .await
         .expect("should resolve with first file when no primary");
 
@@ -1246,7 +1246,7 @@ async fn c2_url_none_is_valid_resolved_state_not_error() {
     let client = MockCfClient::new(vec![MockResp(200, cf_versions_url_none_json())]);
     let provider = CurseForgeProvider::new(Some("test-key".to_string()));
 
-    let resolved = resolve_pack_file(&provider, &client, "12345")
+    let resolved = resolve_pack_file(&provider, &client, "12345", None)
         .await
         .expect("url: None must be a valid resolved state, not an error");
 
@@ -1259,7 +1259,7 @@ async fn c2_empty_version_list_returns_error() {
     let client = MockCfClient::new(vec![MockResp(200, mr_versions_empty_json())]);
     let provider = ModrinthProvider;
 
-    let result = resolve_pack_file(&provider, &client, "PROJ001").await;
+    let result = resolve_pack_file(&provider, &client, "PROJ001", None).await;
 
     assert!(
         matches!(result, Err(ModpackError::NoVersions)),
@@ -1273,7 +1273,7 @@ async fn c2_empty_files_list_returns_error() {
     let client = MockCfClient::new(vec![MockResp(200, mr_versions_no_files_json())]);
     let provider = ModrinthProvider;
 
-    let result = resolve_pack_file(&provider, &client, "PROJ001").await;
+    let result = resolve_pack_file(&provider, &client, "PROJ001", None).await;
 
     assert!(
         matches!(result, Err(ModpackError::NoFiles)),
@@ -1289,7 +1289,7 @@ async fn c2_curseforge_provider_picks_first_version_primary_file() {
     let client = MockCfClient::new(vec![MockResp(200, cf_versions.to_string())]);
     let provider = CurseForgeProvider::new(Some("test-key".to_string()));
 
-    let resolved = resolve_pack_file(&provider, &client, "238222")
+    let resolved = resolve_pack_file(&provider, &client, "238222", None)
         .await
         .expect("should resolve CF pack file");
 
@@ -1300,6 +1300,76 @@ async fn c2_curseforge_provider_picks_first_version_primary_file() {
         Some("https://edge.forgecdn.net/files/5034/058/jei-1.20.1-forge-15.3.0.4.jar")
     );
     assert_eq!(resolved.provider, ProviderKind::CurseForge);
+}
+
+// ── D1: from_pack provenance in planners ──────────────────────────────────
+
+/// `build_pack_plan` (mrpack path) must set `from_pack = true` on all `ModEntry`s
+/// it produces. This is the slice-D provenance tag used by the update reconciler.
+#[test]
+fn d1_build_pack_plan_mod_entries_have_from_pack_true() {
+    let json = include_str!("fixtures/mrpack_fabric.json");
+    let manifest = parse_modrinth_index(json).expect("should parse");
+    let tmp = mc_dir();
+    let plan = build_pack_plan(&manifest, tmp.path()).expect("should build plan");
+
+    // fabric fixture has at least one mod under mods/
+    assert!(
+        !plan.mods.is_empty(),
+        "fixture must produce at least one ModEntry"
+    );
+    for entry in &plan.mods {
+        assert!(
+            entry.from_pack,
+            "mrpack ModEntry '{}' must have from_pack=true",
+            entry.file_name
+        );
+    }
+}
+
+/// `build_cf_pack_plan` (CF path) must set `from_pack = true` on all `ModEntry`s.
+#[test]
+fn d1_build_cf_pack_plan_mod_entries_have_from_pack_true() {
+    let tmp = mc_dir();
+    let resolved = vec![(
+        cf_manifest_file(238222, 4536804),
+        version_file_with(
+            Some("https://edge.forgecdn.net/files/5034/058/jei.jar"),
+            "jei.jar",
+            &[("sha1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")],
+        ),
+    )];
+    let plan = build_cf_pack_plan(&resolved, tmp.path()).unwrap();
+
+    assert_eq!(plan.mods.len(), 1);
+    assert!(
+        plan.mods[0].from_pack,
+        "CF ModEntry must have from_pack=true"
+    );
+}
+
+// ── D1: version_id + version_name in ResolvedPackFile ─────────────────────
+
+/// `resolve_pack_file` must surface the version id and display name from the
+/// resolved `ProjectVersion` so `install_modpack` can build a full `Source`.
+#[tokio::test]
+async fn d1_resolve_pack_file_surfaces_version_id_and_name() {
+    let json = mr_versions_json(true, "https://cdn.modrinth.com/data/PROJ001/pack.mrpack");
+    let client = MockCfClient::new(vec![MockResp(200, json)]);
+    let provider = ModrinthProvider;
+
+    let resolved = resolve_pack_file(&provider, &client, "PROJ001", None)
+        .await
+        .expect("should resolve");
+
+    assert_eq!(
+        resolved.version_id, "VER001",
+        "version_id must match the provider's version id"
+    );
+    assert_eq!(
+        resolved.version_name, "Pack v1.0",
+        "version_name must match the provider's version display name"
+    );
 }
 
 #[test]
@@ -1316,4 +1386,352 @@ fn b4_manual_entries_never_have_empty_file_name() {
     assert_eq!(plan.manual.len(), 1);
     assert!(!plan.manual[0].file_name.is_empty());
     assert_eq!(plan.manual[0].file_name, "jei-real-name.jar");
+}
+
+// ── D2: version-targeted resolve ──────────────────────────────────────────
+
+/// Two-version Modrinth response: newest ("VER002") first, older ("VER001") second.
+fn mr_two_versions_json() -> String {
+    format!(
+        r#"[
+            {{
+                "id": "VER002",
+                "project_id": "PROJ001",
+                "name": "Pack v2.0 (newest)",
+                "version_number": "2.0.0",
+                "game_versions": ["1.21.1"],
+                "loaders": ["fabric"],
+                "files": [{{
+                    "url": "https://cdn.modrinth.com/data/PROJ001/v2.mrpack",
+                    "filename": "mypack-2.0.mrpack",
+                    "size": 3000,
+                    "hashes": {},
+                    "primary": true
+                }}],
+                "dependencies": []
+            }},
+            {{
+                "id": "VER001",
+                "project_id": "PROJ001",
+                "name": "Pack v1.0 (older)",
+                "version_number": "1.0.0",
+                "game_versions": ["1.21.1"],
+                "loaders": ["fabric"],
+                "files": [{{
+                    "url": "https://cdn.modrinth.com/data/PROJ001/v1.mrpack",
+                    "filename": "mypack-1.0.mrpack",
+                    "size": 2048,
+                    "hashes": {},
+                    "primary": true
+                }}],
+                "dependencies": []
+            }}
+        ]"#,
+        MR_HASHES, MR_HASHES_B
+    )
+}
+
+/// Two-version CF response: newest (id 5034058) first, older (5034059) second.
+fn cf_two_versions_json() -> String {
+    r#"{
+        "data": [
+            {
+                "id": 5034058,
+                "modId": 238222,
+                "displayName": "pack-2.0.zip",
+                "fileName": "pack-2.0.zip",
+                "fileDate": "2024-02-01T00:00:00.000Z",
+                "fileLength": 3000,
+                "downloadCount": 100,
+                "downloadUrl": "https://edge.forgecdn.net/files/5034/058/pack-2.0.zip",
+                "gameVersions": ["1.21.1", "Fabric"],
+                "sortableGameVersions": [],
+                "dependencies": [],
+                "isAvailable": true,
+                "isServerPack": false,
+                "fileFingerprint": 0,
+                "hashes": [
+                    { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "algo": 1 }
+                ],
+                "modules": []
+            },
+            {
+                "id": 5034059,
+                "modId": 238222,
+                "displayName": "pack-1.0.zip",
+                "fileName": "pack-1.0.zip",
+                "fileDate": "2024-01-01T00:00:00.000Z",
+                "fileLength": 2048,
+                "downloadCount": 50,
+                "downloadUrl": "https://edge.forgecdn.net/files/5034/059/pack-1.0.zip",
+                "gameVersions": ["1.21.1", "Fabric"],
+                "sortableGameVersions": [],
+                "dependencies": [],
+                "isAvailable": true,
+                "isServerPack": false,
+                "fileFingerprint": 0,
+                "hashes": [
+                    { "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "algo": 1 }
+                ],
+                "modules": []
+            }
+        ]
+    }"#
+    .to_string()
+}
+
+/// None → first/latest (slice-C parity, Modrinth).
+#[tokio::test]
+async fn d2_none_target_picks_latest_modrinth() {
+    let client = MockCfClient::new(vec![MockResp(200, mr_two_versions_json())]);
+    let provider = ModrinthProvider;
+
+    let resolved = resolve_pack_file(&provider, &client, "PROJ001", None)
+        .await
+        .expect("should resolve");
+
+    assert_eq!(resolved.version_id, "VER002", "None must pick newest (VER002)");
+    assert_eq!(resolved.file_name, "mypack-2.0.mrpack");
+}
+
+/// Some(matching id) → that version, not latest (Modrinth).
+#[tokio::test]
+async fn d2_some_target_picks_specified_version_modrinth() {
+    let client = MockCfClient::new(vec![MockResp(200, mr_two_versions_json())]);
+    let provider = ModrinthProvider;
+
+    let resolved = resolve_pack_file(&provider, &client, "PROJ001", Some("VER001"))
+        .await
+        .expect("should resolve targeted version");
+
+    assert_eq!(
+        resolved.version_id, "VER001",
+        "Some(VER001) must pick the older version, not the latest"
+    );
+    assert_eq!(resolved.file_name, "mypack-1.0.mrpack");
+    assert_eq!(
+        resolved.url.as_deref(),
+        Some("https://cdn.modrinth.com/data/PROJ001/v1.mrpack")
+    );
+}
+
+/// Some(unknown id) → VersionNotFound error naming the id (Modrinth).
+#[tokio::test]
+async fn d2_unknown_target_id_returns_version_not_found_modrinth() {
+    let client = MockCfClient::new(vec![MockResp(200, mr_two_versions_json())]);
+    let provider = ModrinthProvider;
+
+    let result = resolve_pack_file(&provider, &client, "PROJ001", Some("DOES_NOT_EXIST")).await;
+
+    match result {
+        Err(ModpackError::VersionNotFound(id)) => {
+            assert_eq!(id, "DOES_NOT_EXIST", "error must name the requested id");
+        }
+        other => panic!("expected VersionNotFound, got: {:?}", other),
+    }
+}
+
+/// None → first/latest (slice-C parity, CurseForge).
+#[tokio::test]
+async fn d2_none_target_picks_latest_curseforge() {
+    let client = MockCfClient::new(vec![MockResp(200, cf_two_versions_json())]);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let resolved = resolve_pack_file(&provider, &client, "238222", None)
+        .await
+        .expect("should resolve");
+
+    // CF id 5034058 is listed first (newest).
+    assert_eq!(resolved.version_id, "5034058", "None must pick newest CF version");
+    assert_eq!(resolved.file_name, "pack-2.0.zip");
+}
+
+/// Some(matching id) → that version, not latest (CurseForge).
+#[tokio::test]
+async fn d2_some_target_picks_specified_version_curseforge() {
+    let client = MockCfClient::new(vec![MockResp(200, cf_two_versions_json())]);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    // Target the older version (id "5034059").
+    let resolved = resolve_pack_file(&provider, &client, "238222", Some("5034059"))
+        .await
+        .expect("should resolve targeted CF version");
+
+    assert_eq!(resolved.version_id, "5034059");
+    assert_eq!(resolved.file_name, "pack-1.0.zip");
+    assert_eq!(
+        resolved.url.as_deref(),
+        Some("https://edge.forgecdn.net/files/5034/059/pack-1.0.zip")
+    );
+}
+
+/// Some(unknown id) → VersionNotFound error naming the id (CurseForge).
+#[tokio::test]
+async fn d2_unknown_target_id_returns_version_not_found_curseforge() {
+    let client = MockCfClient::new(vec![MockResp(200, cf_two_versions_json())]);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let result = resolve_pack_file(&provider, &client, "238222", Some("9999999")).await;
+
+    match result {
+        Err(ModpackError::VersionNotFound(id)) => {
+            assert_eq!(id, "9999999", "error must name the requested id");
+        }
+        other => panic!("expected VersionNotFound, got: {:?}", other),
+    }
+}
+
+// ── D3: plan_pack_update pure reconcile helper ────────────────────────────────
+
+/// Build a ModEntry with the given file_name and from_pack flag.
+fn mod_entry(file_name: &str, from_pack: bool) -> super::super::instances::ModEntry {
+    super::super::instances::ModEntry {
+        provider: "modrinth".to_string(),
+        project_id: String::new(),
+        version_id: String::new(),
+        file_name: file_name.to_string(),
+        hashes: Default::default(),
+        enabled: true,
+        side: "both".to_string(),
+        from_pack,
+    }
+}
+
+/// A pack mod absent from the new plan is added to `to_remove`.
+#[test]
+fn d3_vanished_pack_mod_is_in_to_remove() {
+    let current = vec![
+        mod_entry("sodium.jar", true),  // pack mod — will vanish
+        mod_entry("lithium.jar", true), // pack mod — stays
+    ];
+    let new_pack = vec![
+        mod_entry("lithium.jar", true), // only lithium in the new plan
+    ];
+
+    let plan = plan_pack_update(&current, &new_pack);
+
+    assert_eq!(plan.to_remove.len(), 1, "one pack mod vanished");
+    assert_eq!(plan.to_remove[0].file_name, "sodium.jar");
+}
+
+/// A user mod (`from_pack == false`) is NEVER added to `to_remove`,
+/// even when its file_name is absent from the new pack plan.
+#[test]
+fn d3_user_mod_never_in_to_remove() {
+    let current = vec![
+        mod_entry("my-mod.jar", false), // user-added, not in the new pack
+        mod_entry("sodium.jar", true),  // pack mod — also vanished
+    ];
+    let new_pack: Vec<super::super::instances::ModEntry> = vec![]; // empty new plan
+
+    let plan = plan_pack_update(&current, &new_pack);
+
+    // Only the pack mod vanishes; user mod is untouched.
+    assert_eq!(plan.to_remove.len(), 1);
+    assert_eq!(plan.to_remove[0].file_name, "sodium.jar");
+
+    // User mod is in merged with from_pack=false.
+    let kept = plan.merged.iter().find(|m| m.file_name == "my-mod.jar");
+    assert!(kept.is_some(), "user mod must be in merged");
+    assert!(
+        !kept.unwrap().from_pack,
+        "user mod must remain from_pack=false"
+    );
+}
+
+/// When a user mod and a new pack mod share the same file_name, the pack entry
+/// replaces the user entry — merged has exactly ONE record, from_pack=true.
+#[test]
+fn d3_same_filename_user_entry_replaced_by_pack() {
+    let current = vec![
+        mod_entry("sodium.jar", false), // user-added variant
+    ];
+    let new_pack = vec![
+        mod_entry("sodium.jar", true), // pack supersedes by same file_name
+    ];
+
+    let plan = plan_pack_update(&current, &new_pack);
+
+    assert!(
+        plan.to_remove.is_empty(),
+        "user mod must never be in to_remove"
+    );
+
+    // Exactly one record for sodium.jar in merged.
+    let sodium_entries: Vec<_> = plan
+        .merged
+        .iter()
+        .filter(|m| m.file_name == "sodium.jar")
+        .collect();
+    assert_eq!(
+        sodium_entries.len(),
+        1,
+        "must be exactly one entry for sodium.jar"
+    );
+    assert!(
+        sodium_entries[0].from_pack,
+        "the pack entry must win (from_pack=true)"
+    );
+}
+
+/// An unchanged pack mod (present in both current and new plan) stays in merged.
+#[test]
+fn d3_unchanged_pack_mod_stays_in_merged() {
+    let current = vec![
+        mod_entry("sodium.jar", true), // pack mod, unchanged
+    ];
+    let new_pack = vec![
+        mod_entry("sodium.jar", true), // same file in new plan
+    ];
+
+    let plan = plan_pack_update(&current, &new_pack);
+
+    assert!(
+        plan.to_remove.is_empty(),
+        "unchanged mod must not be removed"
+    );
+    assert_eq!(plan.merged.len(), 1);
+    assert_eq!(plan.merged[0].file_name, "sodium.jar");
+    assert!(plan.merged[0].from_pack);
+}
+
+/// Mixed scenario: user mod kept, pack mod vanished, pack mod unchanged, new pack mod added.
+/// Verifies `merged` contains exactly the right set.
+#[test]
+fn d3_mixed_scenario_merged_is_correct() {
+    let current = vec![
+        mod_entry("user-mod.jar", false), // user — not overwritten
+        mod_entry("sodium.jar", true),    // pack — vanished in new plan
+        mod_entry("lithium.jar", true),   // pack — stays unchanged
+    ];
+    let new_pack = vec![
+        mod_entry("lithium.jar", true), // unchanged
+        mod_entry("indium.jar", true),  // new addition in new pack version
+    ];
+
+    let plan = plan_pack_update(&current, &new_pack);
+
+    // to_remove: sodium vanished
+    assert_eq!(plan.to_remove.len(), 1);
+    assert_eq!(plan.to_remove[0].file_name, "sodium.jar");
+
+    // merged: user-mod + lithium + indium (3 entries)
+    let merged_names: Vec<_> = plan.merged.iter().map(|m| m.file_name.as_str()).collect();
+    assert!(
+        merged_names.contains(&"user-mod.jar"),
+        "user mod must survive"
+    );
+    assert!(
+        merged_names.contains(&"lithium.jar"),
+        "unchanged pack mod must survive"
+    );
+    assert!(
+        merged_names.contains(&"indium.jar"),
+        "new pack mod must be in merged"
+    );
+    assert!(
+        !merged_names.contains(&"sodium.jar"),
+        "vanished pack mod must NOT be in merged"
+    );
+    assert_eq!(plan.merged.len(), 3, "merged must have exactly 3 entries");
 }
