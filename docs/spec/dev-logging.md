@@ -100,3 +100,5 @@ CP1 landed before the loop. CP2 built across 2 iterations of /subagent-implement
 - F-1 (em-dash in a download log string) and F-2 (`unwrap_or_else` → `unwrap_or_default` at lib.rs:1597): both 🔵 nits, **dropped** by user — cosmetic, not worth tracking.
 - Manual GUI gate **verified** (macOS, 2026-06-17): `[INFO modloader_lib] auth: begin_login …` emitted to both the dev terminal and the logfile at `~/Library/Logs/com.apex.apexlauncher/apex.log`; plugin registers with no capability panic. F12 devtools route wired via `attachConsole()` (same INFO source). Logged paths are user-triggered, so idle boot writes nothing — expected.
 - Unrelated runtime bug surfaced during the GUI run: **downloads broken** (engine path fails). Filed as project follow-up `download-broken-runtime` for a future session — the new CP2 logging should make the failing item visible. Not a logging defect.
+
+**Squashed to 6db6fb7 — 2026-06-17.** Per-iteration SHAs above are historical (unreachable from any branch).
