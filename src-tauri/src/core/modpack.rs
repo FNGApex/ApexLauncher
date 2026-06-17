@@ -60,6 +60,18 @@ pub enum ModpackError {
     #[error("CurseForge API key is not configured — cannot resolve pack files")]
     ResolverKeyMissing,
 
+    /// A provider error during pack-file resolution (network, key-missing, bad response, etc.).
+    #[error("provider error resolving pack file: {0}")]
+    ResolverError(#[from] crate::core::providers::ProviderError),
+
+    /// No versions were returned for a project — cannot pick a file to install.
+    #[error("no versions found for this project — cannot resolve a pack file")]
+    NoVersions,
+
+    /// The latest version returned has no files — cannot pick a file to install.
+    #[error("the latest version for this project has no files")]
+    NoFiles,
+
     /// An I/O error occurred during overrides extraction.
     #[error("I/O error during overrides extraction: {0}")]
     Io(#[from] io::Error),
@@ -570,6 +582,66 @@ pub fn read_cf_manifest(bytes: &[u8]) -> Result<CfManifest, ModpackError> {
     };
 
     parse_cf_manifest(&manifest_json)
+}
+
+// ── C2: Pack-file resolver seam ───────────────────────────────────────────────
+
+/// The result of resolving a modpack project's latest version to a single installable file.
+///
+/// `url: None` is a valid outcome when the file's distribution is disabled (CF
+/// `allowModDistribution: false`); C3 turns this into a manual-download outcome.
+/// It is never an error.
+#[derive(Debug, Clone)]
+pub struct ResolvedPackFile {
+    /// Direct download URL; `None` means distribution is disabled (manual outcome).
+    pub url: Option<String>,
+    /// Filename declared by the provider (e.g. `"mypack-1.0.mrpack"`).
+    pub file_name: String,
+    /// Which provider supplied this result (useful for C3 dispatch).
+    pub provider: crate::core::providers::ProviderKind,
+}
+
+/// Resolve a modpack project to its latest version's primary (or first) file.
+///
+/// Calls `provider.get_versions(client, project_id, None, None)` — no mc/loader
+/// filter, because the pack itself defines those. "Latest" = the **first version
+/// returned**; both Modrinth and CurseForge return versions newest-first.
+///
+/// File selection: `files.iter().find(|f| f.primary)`, falling back to the first
+/// file if none is flagged primary.
+///
+/// `url: None` on the selected file is **not** an error — it is returned as-is;
+/// the caller (C3) is responsible for routing that to a manual-download outcome.
+///
+/// # Errors
+/// - [`ModpackError::NoVersions`] — the provider returned an empty version list.
+/// - [`ModpackError::NoFiles`] — the latest version carries no files.
+/// - Any [`crate::core::providers::ProviderError`] wrapped in [`ModpackError::ResolverError`].
+pub async fn resolve_pack_file(
+    provider: &dyn crate::core::providers::ModProvider,
+    client: &dyn crate::core::providers::ProviderHttpClient,
+    project_id: &str,
+) -> Result<ResolvedPackFile, ModpackError> {
+    let versions = provider
+        .get_versions(client, project_id, None, None)
+        .await
+        .map_err(ModpackError::ResolverError)?;
+
+    let latest = versions.into_iter().next().ok_or(ModpackError::NoVersions)?;
+
+    let file = latest
+        .files
+        .iter()
+        .find(|f| f.primary)
+        .or_else(|| latest.files.first())
+        .ok_or(ModpackError::NoFiles)?
+        .clone();
+
+    Ok(ResolvedPackFile {
+        url: file.url,
+        file_name: file.file_name,
+        provider: latest.provider,
+    })
 }
 
 // ── CP2: Plan builder ─────────────────────────────────────────────────────────

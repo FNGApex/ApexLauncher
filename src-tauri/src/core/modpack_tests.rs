@@ -1037,6 +1037,271 @@ async fn b4_resolve_and_build_cf_plan_key_missing_aborts_import() {
     );
 }
 
+// ── C2: resolve_pack_file ─────────────────────────────────────────────────
+
+use crate::core::modrinth::ModrinthProvider;
+use crate::core::providers::{ModProvider, ProviderKind};
+
+/// Modrinth hash object — both sha1 and sha512 are required by the Modrinth API.
+const MR_HASHES: &str = r#"{"sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sha512": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+const MR_HASHES_B: &str = r#"{"sha1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "sha512": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#;
+
+/// Build a minimal Modrinth versions JSON array with one version, one file.
+///
+/// Modrinth `MrFile.url` is a non-optional String — `url` param must be a valid URL string.
+fn mr_versions_json(primary: bool, url: &str) -> String {
+    format!(
+        r#"[{{
+            "id": "VER001",
+            "project_id": "PROJ001",
+            "name": "Pack v1.0",
+            "version_number": "1.0.0",
+            "game_versions": ["1.21.1"],
+            "loaders": ["fabric"],
+            "files": [{{
+                "url": "{}",
+                "filename": "mypack-1.0.mrpack",
+                "size": 2048,
+                "hashes": {},
+                "primary": {}
+            }}],
+            "dependencies": []
+        }}]"#,
+        url, MR_HASHES, primary
+    )
+}
+
+/// Build a Modrinth versions JSON with two files: non-primary then primary.
+fn mr_versions_two_files_json() -> String {
+    format!(
+        r#"[{{
+            "id": "VER001",
+            "project_id": "PROJ001",
+            "name": "Pack v1.0",
+            "version_number": "1.0.0",
+            "game_versions": ["1.21.1"],
+            "loaders": ["fabric"],
+            "files": [
+                {{
+                    "url": "https://cdn.modrinth.com/data/PROJ001/secondary.mrpack",
+                    "filename": "secondary.mrpack",
+                    "size": 1024,
+                    "hashes": {},
+                    "primary": false
+                }},
+                {{
+                    "url": "https://cdn.modrinth.com/data/PROJ001/primary.mrpack",
+                    "filename": "primary.mrpack",
+                    "size": 2048,
+                    "hashes": {},
+                    "primary": true
+                }}
+            ],
+            "dependencies": []
+        }}]"#,
+        MR_HASHES_B, MR_HASHES
+    )
+}
+
+/// Build an empty Modrinth versions JSON array.
+fn mr_versions_empty_json() -> String {
+    "[]".to_string()
+}
+
+/// Build a Modrinth versions JSON with a version that has no files.
+fn mr_versions_no_files_json() -> String {
+    r#"[{
+        "id": "VER001",
+        "project_id": "PROJ001",
+        "name": "Pack v1.0",
+        "version_number": "1.0.0",
+        "game_versions": ["1.21.1"],
+        "loaders": ["fabric"],
+        "files": [],
+        "dependencies": []
+    }]"#
+    .to_string()
+}
+
+/// Build a CF files response with one entry that has `downloadUrl: null` (distribution-disabled).
+fn cf_versions_url_none_json() -> String {
+    r#"{
+        "data": [{
+            "id": 9999001,
+            "modId": 12345,
+            "displayName": "mypack-1.0.zip",
+            "fileName": "mypack-1.0.zip",
+            "fileDate": "2024-01-01T00:00:00.000Z",
+            "fileLength": 2048,
+            "downloadCount": 0,
+            "downloadUrl": null,
+            "gameVersions": ["1.21.1", "Fabric"],
+            "sortableGameVersions": [],
+            "dependencies": [],
+            "isAvailable": true,
+            "isServerPack": false,
+            "fileFingerprint": 0,
+            "hashes": [
+                { "value": "abc123sha1hashvalue000000000000000000000", "algo": 1 }
+            ],
+            "modules": []
+        }]
+    }"#
+    .to_string()
+}
+
+#[tokio::test]
+async fn c2_modrinth_picks_first_version_primary_file() {
+    // Two-version response (newest first); first version must be returned, not the second.
+    let two_versions = format!(
+        r#"[
+            {{
+                "id": "VER002",
+                "project_id": "PROJ001",
+                "name": "Pack v2.0 (newest)",
+                "version_number": "2.0.0",
+                "game_versions": ["1.21.1"],
+                "loaders": ["fabric"],
+                "files": [{{
+                    "url": "https://cdn.modrinth.com/data/PROJ001/v2.mrpack",
+                    "filename": "mypack-2.0.mrpack",
+                    "size": 3000,
+                    "hashes": {},
+                    "primary": true
+                }}],
+                "dependencies": []
+            }},
+            {{
+                "id": "VER001",
+                "project_id": "PROJ001",
+                "name": "Pack v1.0 (older)",
+                "version_number": "1.0.0",
+                "game_versions": ["1.21.1"],
+                "loaders": ["fabric"],
+                "files": [{{
+                    "url": "https://cdn.modrinth.com/data/PROJ001/v1.mrpack",
+                    "filename": "mypack-1.0.mrpack",
+                    "size": 2048,
+                    "hashes": {},
+                    "primary": true
+                }}],
+                "dependencies": []
+            }}
+        ]"#,
+        MR_HASHES, MR_HASHES_B
+    );
+    let client = MockCfClient::new(vec![MockResp(200, two_versions)]);
+    let provider = ModrinthProvider;
+
+    let resolved = resolve_pack_file(&provider, &client, "PROJ001")
+        .await
+        .expect("should resolve");
+
+    assert_eq!(resolved.file_name, "mypack-2.0.mrpack");
+    assert_eq!(
+        resolved.url.as_deref(),
+        Some("https://cdn.modrinth.com/data/PROJ001/v2.mrpack")
+    );
+    assert_eq!(resolved.provider, ProviderKind::Modrinth);
+}
+
+#[tokio::test]
+async fn c2_primary_file_picked_when_present() {
+    let client = MockCfClient::new(vec![MockResp(200, mr_versions_two_files_json())]);
+    let provider = ModrinthProvider;
+
+    let resolved = resolve_pack_file(&provider, &client, "PROJ001")
+        .await
+        .expect("should resolve");
+
+    assert_eq!(resolved.file_name, "primary.mrpack");
+    assert_eq!(
+        resolved.url.as_deref(),
+        Some("https://cdn.modrinth.com/data/PROJ001/primary.mrpack")
+    );
+}
+
+#[tokio::test]
+async fn c2_no_primary_falls_back_to_first_file() {
+    // Single file, primary=false — should still be picked as first file.
+    let json = mr_versions_json(false, "https://cdn.modrinth.com/data/PROJ001/only.mrpack");
+    let client = MockCfClient::new(vec![MockResp(200, json)]);
+    let provider = ModrinthProvider;
+
+    let resolved = resolve_pack_file(&provider, &client, "PROJ001")
+        .await
+        .expect("should resolve with first file when no primary");
+
+    assert_eq!(resolved.file_name, "mypack-1.0.mrpack");
+    assert_eq!(
+        resolved.url.as_deref(),
+        Some("https://cdn.modrinth.com/data/PROJ001/only.mrpack")
+    );
+}
+
+#[tokio::test]
+async fn c2_url_none_is_valid_resolved_state_not_error() {
+    // url: null on a CF file is a valid "distribution-disabled" outcome; must NOT error.
+    // Modrinth always has a URL; only CF can produce url: None.
+    let client = MockCfClient::new(vec![MockResp(200, cf_versions_url_none_json())]);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let resolved = resolve_pack_file(&provider, &client, "12345")
+        .await
+        .expect("url: None must be a valid resolved state, not an error");
+
+    assert!(resolved.url.is_none(), "url should be None for distribution-disabled CF pack");
+    assert_eq!(resolved.file_name, "mypack-1.0.zip");
+}
+
+#[tokio::test]
+async fn c2_empty_version_list_returns_error() {
+    let client = MockCfClient::new(vec![MockResp(200, mr_versions_empty_json())]);
+    let provider = ModrinthProvider;
+
+    let result = resolve_pack_file(&provider, &client, "PROJ001").await;
+
+    assert!(
+        matches!(result, Err(ModpackError::NoVersions)),
+        "expected NoVersions, got: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn c2_empty_files_list_returns_error() {
+    let client = MockCfClient::new(vec![MockResp(200, mr_versions_no_files_json())]);
+    let provider = ModrinthProvider;
+
+    let result = resolve_pack_file(&provider, &client, "PROJ001").await;
+
+    assert!(
+        matches!(result, Err(ModpackError::NoFiles)),
+        "expected NoFiles, got: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn c2_curseforge_provider_picks_first_version_primary_file() {
+    // CF returns versions via `cf_files.json` shape; first entry should be picked.
+    let cf_versions = include_str!("fixtures/cf_files.json");
+    let client = MockCfClient::new(vec![MockResp(200, cf_versions.to_string())]);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let resolved = resolve_pack_file(&provider, &client, "238222")
+        .await
+        .expect("should resolve CF pack file");
+
+    // cf_files.json has 2 entries (newest first); first entry must be picked.
+    assert_eq!(resolved.file_name, "jei-1.20.1-forge-15.3.0.4.jar");
+    assert_eq!(
+        resolved.url.as_deref(),
+        Some("https://edge.forgecdn.net/files/5034/058/jei-1.20.1-forge-15.3.0.4.jar")
+    );
+    assert_eq!(resolved.provider, ProviderKind::CurseForge);
+}
+
 #[test]
 fn b4_manual_entries_never_have_empty_file_name() {
     // Once get_file errors are routed to `failed`, `manual` entries come
