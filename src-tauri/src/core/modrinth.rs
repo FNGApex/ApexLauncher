@@ -79,7 +79,6 @@ const USER_AGENT: &str = concat!(
 #[derive(Debug, Deserialize)]
 struct MrVersion {
     id: String,
-    project_id: String,
     name: String,
     version_number: String,
     game_versions: Vec<String>,
