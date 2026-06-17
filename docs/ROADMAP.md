@@ -90,9 +90,13 @@ Done early so the create-instance flow picks real versions/builds:
 - `.mrpack` import (Modrinth) — direct downloads + overrides. ✔ (slice A — `505670b`).
 - CF zip import — per-file URL resolution + manual-download surfacing. ✔ (slice B — `cfbabf2`..`f6a6556`; backend + UI, headless-verified, GUI import pending).
 - Browse modpacks from both providers. ✔ discovery (unified feed, opens provider page —
-  `docs/spec/ui-modpack-rework.md`). One-click in-app install from Browse still deferred (slice C).
-- Pack update / re-resolve.
-- **Done when:** you install a real CF and a real Modrinth modpack end to end.
+  `docs/spec/ui-modpack-rework.md`) **and** one-click in-app install from a Browse card. ✔
+  (slice C — `resolve_pack_file` → `install_modpack`, `ModpackInstallResult` tagged enum;
+  `docs/spec/modpack-import.md`).
+- Pack update / re-resolve. ⬜ planned (slice D — pack update + version picker + Pack Lock,
+  spec'd in `docs/spec/modpack-import.md`; not yet built).
+- **Done when:** you install a real CF and a real Modrinth modpack end to end. Slices A–C
+  shipped (Modrinth headless-verified; CF GUI import + live one-click pending the API key).
 
 ## Phase 7 — Polish & ship
 - Instance icons, themes (dark/light), skin/cape preview, import from other launchers.
@@ -107,11 +111,11 @@ Done early so the create-instance flow picks real versions/builds:
 ---
 
 ### Suggested next action
-Phase 5 is code-complete: slice A (Browse) and slice B (mod install — add/enable/disable/
-update + CF download-disabled fallback) both shipped. Modrinth path is fully functional with
-no key; manual verification (add Sodium, launch) is the open box for slice B. Three external
-gates pending in parallel: CurseForge API key approval (applied, ~48-72h — unblocks the CF
-half of Browse + install), Mojang app-review for the MS-auth client id
-(`docs/design/auth-client-id-blocker.md`), and NeoForge/Forge manual e2e from Phase 4. Next
-build phase is **Phase 6 — Modpack import** (the headline feature), which reuses the
-`ModProvider` trait + normalized types as its pack-resolver substrate.
+Phase 6 (modpack import) is shipped through slice C: `.mrpack` import (A), CF `.zip` import (B),
+and one-click in-app install from Browse (C) are all in. The remaining Phase 6 box is **slice D**
+— pack update / re-resolve (version picker + Pack Lock), already spec'd in
+`docs/spec/modpack-import.md` and the natural next build target. Three external gates still run
+in parallel: CurseForge API key approval (applied — unblocks the CF half of Browse, mod install,
+and pack import end to end), Mojang app-review for the MS-auth client id
+(`docs/design/auth-client-id-blocker.md`), and NeoForge/Forge manual e2e from Phase 4. After
+slice D, **Phase 7 — Polish & ship** (icons, themes, cross-platform CI, signing, auto-update).

@@ -49,13 +49,6 @@ Instances and caches live under a single folder so nothing is scattered across y
 Downloaded assets, libraries, and Java runtimes are shared across instances to save disk
 space.
 
-## CurseForge API key
-
-Browsing and importing CurseForge content requires a free API key from the
-[CurseForge console](https://console.curseforge.com). Modrinth needs no key. Released builds
-ship with a key baked in. If you build from source, add your own key to `src-tauri/.env`
-(`MODLOADER_CF_API_KEY=...`) or enter it at runtime under Settings → Advanced → API Keys.
-
 ## Building from source
 
 You will need [Node.js](https://nodejs.org) (≥ 20) and a stable
