@@ -2,3 +2,4 @@
 - 2026-06-09 accounts-extractmessage-cast — "Accounts.tsx extractMessage uses 'as Record<string,unknown>' cast at Tauri error boundary" — *(closed 2026-06-09)*
 - 2026-06-09 auth-test-cp4-misnamed — "auth.rs test cp4_f10_remove_account_keyring_failure_leaves_state_unchanged named cp4_ but tests CP3 store behavior" — *(closed 2026-06-09)*
 - 2026-06-14 storage-auth-reorg-c2 — "Wire materialization into launch (slice C2)" — *(closed 2026-06-14)*
+- 2026-06-17 phase6-modpack-next-slice-cd — "Phase 6 next: modpack slice C (browse install) or D (pack update)" — *(closed 2026-06-17)*

@@ -1,8 +1,10 @@
-# Modpack import (Phase 6 — Modrinth `.mrpack` slice A · CurseForge `.zip` slice B · Browse install slice C)
+# Modpack import (Phase 6 — Modrinth `.mrpack` slice A · CurseForge `.zip` slice B · Browse install slice C · pack update slice D)
 
 > Slices A (`.mrpack`), B (CurseForge `.zip`), and C (Browse → one-click install) are all
-> **shipped**; the sections below are the shipped contract. Slice C landed across
-> `2eac817`..`b1e21f3` — see `## Slice C` and the Implementation log near the end.
+> **shipped**; their sections are the shipped contract. Slice C landed across
+> `2eac817`..`b1e21f3`. **Slice D (pack update + version picker + Pack Lock) is the active
+> contract** — see `## Slice D`. Design ground truth: `docs/design/modpack-import.md`
+> § "Pack update (slice D ground truth)".
 
 
 ## Goal
@@ -260,7 +262,143 @@ TS; C duplicates code. One new command, one small refactor, one UI action.
 | Partial instance on mid-import failure | med | Same pre-existing gap as A/B (`modpack-import-partial-cleanup`); not re-litigated here |
 | Refactor accidentally changes A/B behavior | low | C1 is byte-identical body extraction; A/B tests gate it before C2+ build on top |
 
+## Slice D — pack update + version picker + Pack Lock (active)
+
+### Goal (slice D)
+
+Update an already-installed modpack instance to a newer (or user-chosen) pack version,
+preserving the user's own additions. Re-resolve the pack from its recorded `source`, download
+the target version, and overlay it: pack content wins on collision, user-added mods/configs
+survive untouched. Two supporting features land with it: a **version picker** at install/update
+(deferred from slice C) and **Pack Lock** (a per-instance toggle freezing a pack as installed).
+
+### Non-goals (slice D)
+
+- Rollback of a half-populated instance on mid-update/import failure — remains follow-up
+  `modpack-import-partial-cleanup`.
+- Batch CF resolution (`POST /v1/mods/files`) — remains a follow-up; the `ProviderHttpClient`
+  seam stays GET-only. Update re-resolves CF files one GET each (slice-B behavior).
+- Deleting override files (configs) dropped *between* pack versions — no per-file override
+  provenance is tracked; stale configs linger (documented limitation, follow-up).
+- Updating packs installed *before* this slice — they have `source: None`; no Update is offered.
+- A structured byte-diff / minimal-delta update — slice D overlays the full new plan (pack wins).
+
+### Success criteria (slice D)
+
+> Wire-shape note: success criteria name struct fields in their **IPC/JSON (camelCase)** form,
+> matching the rest of this spec; the Rust fields are the snake_case equivalents
+> (`projectId`→`project_id`, `fileId`→`file_id`, etc.).
+
+- [ ] `ModEntry` gains `fromPack: bool` (serde default `false`); `Instance` gains
+      `packLocked: bool` (serde default `false`). Both are purely additive — **no
+      `SCHEMA_VERSION` bump**, never read as a gate on existing data. Old manifests deserialize
+      unchanged (both default-false) — a backward-compat test asserts this.
+- [ ] **Provenance is populated only on the Browse path.** `install_modpack` writes
+      `Instance.source { provider, projectId, fileId, packVersion }` from the resolved pack
+      version (provider + clicked project id + resolved version id + version display name) → the
+      instance is updatable. The local-file imports (`import_mrpack` / `import_curseforge_zip`)
+      leave `source: None` (a `.mrpack` carries no project id; a CF `manifest.json` carries no
+      top-level *pack* project id) → not updatable. Mechanically, `import_mrpack_from_bytes` /
+      `import_cf_zip_from_bytes` accept an optional source arg: Browse passes `Some`, local-file
+      passes `None`.
+- [ ] `fromPack = true` is set on every pack `ModEntry` on **both** import paths (local + Browse)
+      — it marks pack-managed content regardless of update-ability. `add_mod` and `update_mod`
+      (Phase 5) construct `ModEntry` with `fromPack = false`.
+- [ ] The pack-file resolver accepts an optional target version id: `None` ⇒ latest (first
+      returned — slice-C behavior, unchanged); `Some(id)` ⇒ that version; an id that matches no
+      version ⇒ clear error. Verified for both providers via the mock `ProviderHttpClient` seam.
+- [ ] `install_modpack` gains `versionId: Option<String>` (latest when absent) — slice-C callers
+      passing no version still install latest.
+- [ ] A pure update-reconcile helper computes, from the current `ModEntry`s and the new pack
+      plan: pack mods to **remove** (`fromPack == true` and `fileName` absent from the new plan),
+      the new pack mods to **write**, and the user mods to **keep** (`fromPack == false`, never
+      removed). The merged `mods[]` is keyed by `fileName`: a new pack entry **replaces** any
+      existing entry (user or old-pack) of the same `fileName` (one record per filename, winner
+      `fromPack = true`); user entries the pack does not name are kept verbatim. Unit-tested
+      headlessly: removed set excludes user mods; a same-`fileName` user entry is replaced by the
+      pack entry (count stays 1); a `.disabled` pack jar is matched on removal.
+- [ ] `update_modpack(slug, versionId: Option<String>)` Tauri command: load instance + `source`
+      (error if `source` is `None`) → resolve target → stage archive to `cache/installers/` →
+      read bytes → build new plan vs existing `mc/` → reconcile → `execute_plan` (collisions
+      overwrite) → `extract_overrides` (overwrite) → bump `source.fileId`/`packVersion` → write
+      manifest → return `PackUpdateResult`. Wiring verified by `lib_tests.rs`-style shape tests
+      with a mock provider — no live HTTP.
+- [ ] `PackUpdateResult` is **one struct for both providers**:
+      `{ added, removed, kept, failed, manual: CfManualFile[] }` (`#[serde] camelCase`). `manual`
+      is empty for mrpack updates, carries distribution-disabled files for CF updates (reuses the
+      slice-B `CfManualFile` shape). One result type keeps the frontend toast provider-agnostic.
+- [ ] Removed pack jars are deleted from `mc/mods/` (both `<name>` and `<name>.disabled`); user
+      jars are not touched.
+- [ ] `set_pack_lock(slug, locked: bool)` command toggles `Instance.packLocked`. While locked,
+      the full mod-mutation command surface — `add_mod`, `set_mod_enabled`, `remove_mod`,
+      `update_mod` — rejects with a clear error (backend guard, not UI-only); `update_modpack`
+      (the sanctioned way to change a locked pack) is still allowed.
+- [ ] Frontend: a version dropdown on the Browse `ModpackCard` (install) and in `InstanceDetail`
+      (update), defaulting to latest, sourced from the existing `get_mod_versions` command called
+      with `gameVersion = None, loader = None` (a pack defines its own MC/loader);
+      `InstanceDetail` shows the instance's pack source (when `source` is set) + an **Update**
+      action + a **Pack Lock** toggle that disables the Manage-installs mutation controls when on;
+      an update-result toast reusing the existing import-toast pattern.
+- [ ] `src/lib/ipc.ts` mirrors the new/changed Rust commands + `PackUpdateResult` (camelCase).
+- [ ] Full Rust lib test suite green on the Windows toolchain (`scripts/build.sh test`);
+      `npm run build` green. No live network in any test.
+
+### Approaches (slice D) — update mechanism
+
+Copied from `docs/design/modpack-import.md` § "Approaches — update mechanism":
+
+| # | Approach | Sketch | Cost | Risk |
+|---|----------|--------|------|------|
+| A | Overlay re-install on the existing instance | resolve target → read pack → reconcile `fromPack` mods (remove vanished) → `execute_plan` (pack wins) → overlay overrides → bump source | med | low — reuses A/B/C plan + `*_from_bytes` seams |
+| B | Structured byte-diff old plan vs new plan | persist/re-resolve old manifest, compute deltas, apply minimal changes | high | med — needs old manifest stored/re-fetched; more failure modes |
+| C | Uninstall + fresh reinstall into the same slug | wipe pack content, reinstall | med | high — destroys user additions + edited configs |
+
+### Recommendation (slice D)
+
+**A.** The current `ModEntry` list filtered by `fromPack` *is* the old-version record, so no old
+manifest needs storing or re-fetching. Overlay-write with pack-wins-on-collision is exactly the
+chosen merge semantics and reuses the proven `build_pack_plan` / `resolve_and_build_cf_plan` /
+`extract_overrides` / `*_from_bytes` seams. B adds cost for no gain here; C destroys the user
+content the requirement preserves. Full rationale + Mermaid flow in the design doc.
+
+### Checkpoints (slice D)
+
+| # | Checkpoint | Files/areas | Agent | Est. files | Verifies |
+|---|------------|-------------|-------|------------|----------|
+| D1 | Manifest schema + provenance: add `fromPack` to `ModEntry`, `packLocked` to `Instance` (serde-default false, no `SCHEMA_VERSION` bump); set `fromPack=true` where pack `ModEntry`s are built (`build_pack_plan`/`build_cf_pack_plan` in modpack.rs); `fromPack=false` at the user-mod build site (`planned_to_mod_entry` in mod_install.rs); thread an optional source arg through `import_*_from_bytes` (Browse `install_modpack` passes `Some`, local-file commands pass `None`) | `src-tauri/src/core/instances.rs`, `src-tauri/src/core/modpack.rs`, `src-tauri/src/core/mod_install.rs`, `src-tauri/src/lib.rs` | atomic-builder | ~4 | unit tests: old manifest deserializes (both fields false); pack planner ModEntries `fromPack=true`; `planned_to_mod_entry` `fromPack=false`; Browse install populates `source`, local import leaves `source: None` |
+| D2 | Version-targeted resolve: parameterize the pack-file resolver with `target_version_id: Option<&str>` (`None`→latest, `Some`→by id, no-match→err); `install_modpack` gains `versionId: Option<String>` | `src-tauri/src/core/modpack.rs`, `src-tauri/src/lib.rs` | atomic-builder | ~2 | mock-HTTP tests both providers: target id picked; None→first/latest (slice-C parity); bad id→err |
+| D3 | Update planner (pure) + command: `plan_pack_update(current_mods, new_plan)` → `{ remove, write, keep }`; `update_modpack(slug, versionId?)` command + `PackUpdateResult`: load source (None→err) → resolve → stage → read → reconcile → `execute_plan` → `extract_overrides` → bump source → write manifest | `src-tauri/src/core/modpack.rs`, `src-tauri/src/lib.rs` | atomic-builder | ~2 | unit tests: removed = vanished `fromPack` mods only; user mods kept; pack supersedes by `fileName`; `.disabled` matched; command shape test (mock provider): source-None→err, result counts |
+| D4 | Pack Lock: `set_pack_lock(slug, locked)` command; guard `add_mod`/`set_mod_enabled`/`remove_mod`/`update_mod` to reject when `packLocked` (shared helper in instances.rs) | `src-tauri/src/lib.rs`, `src-tauri/src/core/instances.rs` | atomic-builder | ~2 | tests: toggle persists; each of the four mutation commands errors when locked; `update_modpack` still allowed |
+| D5 | Frontend: ipc wrappers (`updateModpack`, `setPackLock`, `installModpack` version arg) + `PackUpdateResult` type; Browse `ModpackCard` version dropdown; `InstanceDetail` pack-source display + Update action + version dropdown + Pack Lock toggle (disables manage actions when on) + update toast | `src/lib/ipc.ts`, `src/routes/Browse.tsx`, `src/routes/InstanceDetail.tsx` | atomic-builder | ~3 | `npm run build` green; ipc mirrors Rust (camelCase); update/lock/version-pick surfaced |
+
+### Risks (slice D)
+
+| Risk | Likelihood | Mitigation |
+|------|-----------|------------|
+| Update wrongly deletes a user-added mod | med | Removal set strictly = `fromPack == true` mods absent from the new plan; D3 success criterion + unit test assert user mods (`fromPack == false`) are never removed |
+| `fromPack` field breaks existing manifests on read | low | serde default `false`; D1 backward-compat deserialization test; old installs have `source: None` and are never updated anyway |
+| Stale config from a removed pack file lingers after update | med | Accepted + documented (no per-file override provenance); overlay applies new overrides pack-wins; per-file ledger is a follow-up |
+| Pack Lock enforced only in UI (bypassable) | low | Backend guard in the three mutation commands (D4) rejects when locked — defense in depth |
+| mrpack ModEntries carry empty ids → reconcile can't key on id | low | Reconcile keys on `fileName` (unique within `mods/`); a renamed mod jar = remove old + add new (correct outcome) |
+| `get_versions` ordering unreliable for version-picker default | low | Same first-returned assumption as slice C; dropdown lists all versions so the user can override; date-field sort remains a deferred follow-up |
+| Partial instance on mid-update failure | med | Same pre-existing gap as A/B/C (`modpack-import-partial-cleanup`); not re-litigated — explicit non-goal |
+
 ## Change log
+
+### 2026-06-16 — Slice D (pack update + version picker + Pack Lock) added
+
+**What changed:** Added the `## Slice D` contract (goal, non-goals, success criteria,
+approaches, recommendation, checkpoints D1–D5, risks). Retitled the spec + header note to mark
+slice D active. Slice D populates the long-dormant `Instance.source` provenance, adds
+`ModEntry.fromPack` + `Instance.packLocked`, an `update_modpack` command (overlay re-install,
+pack-wins-on-collision, user content preserved), a version picker (`versionId` on
+`install_modpack`/`update_modpack`), and a Pack Lock toggle with backend mutation guards.
+
+**Why:** Slices A–C ship install paths; slice D is the roadmap's pack-update slice. Scope set
+with the user: in — provenance + update-to-latest + version picker + Pack Lock; out (still
+follow-ups) — rollback, batch CF resolution, per-file override provenance. Merge semantics
+chosen by the user: pack wins on collision, preserve unconflicting user content (mods + configs
++ options).
 
 ### 2026-06-16 — Build & test note: use `scripts/build.sh`
 
