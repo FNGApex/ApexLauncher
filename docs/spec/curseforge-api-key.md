@@ -79,3 +79,5 @@ Built across 3 iterations of /subagent-implementation on branch `curseforge-api-
 
 **Deferred items still open:**
 - F-2 (🔵 `curseforge_live.rs` no longer mirrors full 3-tier precedence — passes `None` for the baked slot) — **dropped** per user: the live test is `#[ignore]`d and the `.env` read still covers the key; cosmetic mirror only.
+
+**Squashed to 3fe4382 — 2026-06-16.** Per-iteration SHAs above are historical (unreachable from any branch).
