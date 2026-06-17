@@ -72,20 +72,37 @@ Authoritative design lives in `docs/`:
 
 ## Build & run
 
-Rust is installed via rustup but **not on the default shell PATH**, so source it first:
+**Always build/test through `scripts/build.sh`** — never invoke `cargo`/`npm` directly for a
+build on this machine. The script is the single cross-platform entrypoint and handles the
+WSL→Windows split for you.
 
 ```bash
-# Frontend only
-npm install
-npm run build          # tsc + vite build (typecheck + bundle)
-
-# Full app (needs cargo on PATH)
-. "$HOME/.cargo/env" && npm run tauri dev     # dev window, HMR
-. "$HOME/.cargo/env" && cargo check           # (run inside src-tauri/) Rust typecheck
+scripts/build.sh check               # cargo check + tsc --noEmit (fast typecheck, both sides)
+scripts/build.sh test                # full Rust test suite (default mode)
+scripts/build.sh test core::download # forward a cargo test filter
+scripts/build.sh build               # real installable bundle for smoke testing (tauri build)
+scripts/build.sh dev                 # dev window, HMR
 ```
 
-Running rustup's profile line once (or restarting the terminal) puts cargo on PATH
-permanently and removes the need for the `. "$HOME/.cargo/env"` prefix.
+**On WSL (this machine):** the script mirrors the source tree onto the **native Windows
+filesystem** at `C:\Users\drgor\Documents\GitHub\ApexLauncher` (via rsync `--delete`, excluding
+`target/`, `node_modules/`, `.git/`, `gen/`, worktrees, scratch) and then builds it there with
+`scripts/apex-build.bat` using the Windows toolchain. We do **not** build inside WSL and we no
+longer build over the `\\wsl.localhost` UNC path:
+
+- WSL-native build fails — the Linux Tauri target needs GTK/WebKit dev libs that aren't installed
+  (Windows uses WebView2).
+- The old UNC approach (Windows cargo reading `\\wsl.localhost\...`) was slow and forced
+  `CARGO_INCREMENTAL=0`. Building on native NTFS restores incremental compilation.
+- The Windows toolchain lives at `C:\Users\drgor\.cargo\bin\cargo.exe` + `C:\Program Files\nodejs`;
+  the `.bat` puts both on PATH and keeps a separate `target/` on C:. First `npm install`/dep
+  build is slow; incremental rebuilds are fast.
+- **WSL-native is fine for non-build tasks:** `rustfmt --edition 2021 <files>` (formatting only
+  parses, no GTK) and any `cargo check` you might want for IDE purposes — but for authoritative
+  build/test results, use `scripts/build.sh`.
+
+**On macOS / Linux dev machines:** `scripts/build.sh` builds natively in place (needs the GTK/WebKit
+dev libs on Linux, Xcode CLT on macOS). Same mode vocabulary.
 
 ---
 
@@ -97,6 +114,7 @@ modloader/
 ├── README.md
 ├── .claude/project/     ← auto-loaded signals (signals.md + signals/*.md per domain)
 ├── docs/                design docs (ARCHITECTURE, ROADMAP, PROVIDERS)
+├── scripts/             build.sh (cross-platform entrypoint) + apex-build.bat (native Windows builder)
 ├── src/                 frontend (React + TS)
 │   ├── lib/             IPC wrappers, TanStack Query setup, prefetch
 │   ├── components/      shared UI (NewInstanceModal, …)

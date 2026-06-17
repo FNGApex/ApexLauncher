@@ -12,13 +12,13 @@
 
 | Purpose | Command | Source |
 |---------|---------|--------|
-| Frontend build (tsc + vite) | `npm run build` | package.json |
-| Dev window (HMR) | `. "$HOME/.cargo/env" && npm run tauri dev` | CLAUDE.md |
-| Rust typecheck | `. "$HOME/.cargo/env" && cargo check` (from `src-tauri/`) | CLAUDE.md |
-| Rust tests | `. "$HOME/.cargo/env" && cargo test` (from `src-tauri/`) | Cargo.toml |
+| Typecheck (cargo check + tsc) | `scripts/build.sh check` | scripts/build.sh |
+| Rust tests (+ filter) | `scripts/build.sh test [filter]` | scripts/build.sh |
+| Real app bundle (smoke test) | `scripts/build.sh build` | scripts/build.sh |
+| Dev window (HMR) | `scripts/build.sh dev` | scripts/build.sh |
 | Frontend dev only | `npm run dev` | package.json |
 
-Rust is installed via rustup — not on default PATH. Source `$HOME/.cargo/env` before any cargo/tauri command in a fresh shell.
+**Always build/test via `scripts/build.sh`** — the single cross-platform entrypoint. On **WSL** it mirrors the source onto the native Windows FS (`C:\Users\drgor\Documents\GitHub\ApexLauncher`) and builds there with `scripts/apex-build.bat` (native NTFS → incremental compilation works; no `\\wsl.localhost` UNC, no GTK blocker). On **macOS/Linux** it builds natively in place. Do not call `cargo`/`npm` directly for build/test. WSL-native is still fine for formatting (`rustfmt --edition 2021`).
 
 No CI configuration exists yet (planned Phase 7).
 

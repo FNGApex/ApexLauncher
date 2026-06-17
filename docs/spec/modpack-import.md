@@ -45,17 +45,18 @@ direct URLs).
 
 ## Build & test note (read before running anything)
 
-This crate builds on the **Windows** cargo toolchain over the WSL UNC path, NOT WSL-native
-(WSL lacks the GTK/WebKit libs Tauri's Linux target needs). Do not run `cargo` in WSL — it
-fails on `webkit2gtk-sys`. Run tests with:
+This crate does NOT build WSL-native (WSL lacks the GTK/WebKit libs Tauri's Linux target needs;
+`cargo` in WSL fails on `webkit2gtk-sys`). **Always build/test through `scripts/build.sh`** — on
+WSL it mirrors the source to the native Windows filesystem and builds there with the Windows
+toolchain (native NTFS, incremental compilation). Run tests with:
 
 ```bash
-cd /mnt/c && cmd.exe /c "C:\Users\drgor\apex-build.bat" <cargo-test-args>
-# e.g.  ... apex-build.bat --lib modpack -- --nocapture
+scripts/build.sh test                # full suite
+scripts/build.sh test modpack        # forward a cargo test filter (e.g. modpack module)
+scripts/build.sh check               # cargo check + tsc (fast typecheck)
 ```
 
-`apex-build.bat` sets `CARGO_INCREMENTAL=0` and forwards `%*` to
-`cargo test --manifest-path \\wsl.localhost\…\src-tauri\Cargo.toml`.
+`scripts/build.sh` forwards extra args to `cargo test --manifest-path src-tauri/Cargo.toml`.
 
 ## Approaches
 
@@ -260,6 +261,15 @@ TS; C duplicates code. One new command, one small refactor, one UI action.
 | Refactor accidentally changes A/B behavior | low | C1 is byte-identical body extraction; A/B tests gate it before C2+ build on top |
 
 ## Change log
+
+### 2026-06-16 — Build & test note: use `scripts/build.sh`
+
+**What changed:** Rewrote the "Build & test note" to point at `scripts/build.sh` (the new
+cross-platform entrypoint) instead of the standalone `C:\Users\drgor\apex-build.bat` over the WSL
+UNC path. **Why:** the build toolchain was reworked — on WSL the source is now mirrored to the
+native Windows filesystem and built there (native NTFS restores incremental compilation; no
+`\\wsl.localhost` UNC crawl). **Superseded:** prior note ran `cmd.exe /c "C:\Users\drgor\apex-build.bat"`
+with `CARGO_INCREMENTAL=0` and a `\\wsl.localhost\…` manifest path.
 
 ### 2026-06-16 — Slice C: "latest version" = first returned (no date sort)
 
