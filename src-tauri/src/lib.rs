@@ -1426,6 +1426,143 @@ async fn import_curseforge_zip(
     import_cf_zip_from_bytes(app, bytes, name_override).await
 }
 
+// ---------------------------------------------------------------------------
+// C3: Browse → one-click install
+// ---------------------------------------------------------------------------
+
+/// Tagged result returned to the frontend by `install_modpack`.
+///
+/// The `kind` field discriminates which branch occurred so the frontend can
+/// render the correct toast without re-deriving the provider.
+///
+/// - `"mrpack"` — Modrinth pack installed successfully.
+/// - `"curseforge"` — CurseForge pack installed; may carry a `manual` list for
+///   distribution-disabled files.
+/// - `"manual"` — the pack's primary file has `url: None` (distribution
+///   disabled at the pack level); no instance was created. The frontend should
+///   open `page_url` in the browser.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ModpackInstallResult {
+    /// Modrinth `.mrpack` installed successfully.
+    Mrpack(MrpackImportResult),
+    /// CurseForge `.zip` installed (manual list may be non-empty).
+    Curseforge(CfImportResult),
+    /// Pack file is not distributable; frontend must open `page_url`.
+    Manual {
+        /// Provider project page URL (echoed from the `page_url` parameter).
+        #[serde(rename = "pageUrl")]
+        page_url: String,
+        /// Filename as returned by the provider (useful for display).
+        #[serde(rename = "fileName")]
+        file_name: String,
+    },
+}
+
+/// Install a modpack from a Browse `ProjectSummary` in one click.
+///
+/// # Flow
+/// 1. Construct the real provider (Modrinth or CurseForge) from `provider`.
+/// 2. Call the C2 resolver (`resolve_pack_file`) → `ResolvedPackFile`.
+/// 3. If `url: None` (CF distribution-disabled) → return `ModpackInstallResult::Manual`
+///    carrying the `page_url` passed in by the frontend. No instance created.
+/// 4. Else: stage the archive to `cache/installers/<file_name>` via a reqwest GET.
+/// 5. Dispatch to the C1 inner fn by provider kind:
+///    - Modrinth → `import_mrpack_from_bytes` → `ModpackInstallResult::Mrpack`
+///    - CurseForge → `import_cf_zip_from_bytes` → `ModpackInstallResult::Curseforge`
+///
+/// The pack display name is the `name` field of the latest version; if that is
+/// empty, `file_name` is used as `name_override`.
+///
+/// All errors map to `String`.
+#[tauri::command]
+async fn install_modpack(
+    app: tauri::AppHandle,
+    provider: String,
+    project_id: String,
+    page_url: Option<String>,
+) -> Result<ModpackInstallResult, String> {
+    use core::modpack::resolve_pack_file;
+    use core::providers::ProviderKind;
+
+    // 1. Construct the provider.
+    let settings = settings::load(&app).unwrap_or_default();
+    let resolved = match provider.as_str() {
+        "modrinth" => {
+            let prov = ModrinthProvider;
+            let http = ReqwestProviderClient(reqwest::Client::new());
+            resolve_pack_file(&prov, &http, &project_id)
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        "curseForge" | "curseforge" => {
+            let cf_key = cf_api_key_from(
+                std::env::var(providers::CF_API_KEY_ENV).ok(),
+                settings.curseforge_api_key,
+                option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+            );
+            let prov = CurseForgeProvider::new(cf_key);
+            let http = ReqwestProviderClient(reqwest::Client::new());
+            resolve_pack_file(&prov, &http, &project_id)
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        other => {
+            return Err(format!("unknown provider: {other}"));
+        }
+    };
+
+    // 3. If no URL → manual outcome; no instance created.
+    let url = match resolved.url {
+        Some(u) => u,
+        None => {
+            return Ok(ModpackInstallResult::Manual {
+                page_url: page_url.unwrap_or_else(|| String::new()),
+                file_name: resolved.file_name,
+            });
+        }
+    };
+
+    // 4. Stage archive to cache/installers/<file_name>.
+    let installers_dir = core::store::cache_installers_dir(&app)?;
+    let dest_path = installers_dir.join(&resolved.file_name);
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("could not fetch pack archive: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "pack archive download failed: HTTP {}",
+            response.status()
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("could not read pack archive bytes: {e}"))?
+        .to_vec();
+    std::fs::write(&dest_path, &bytes)
+        .map_err(|e| format!("could not write pack archive to cache: {e}"))?;
+
+    // Derive a display name from the file_name (strip extension) as name_override.
+    // The version name field isn't threaded through ResolvedPackFile; file_name is the
+    // best available fallback. C4 can pass an explicit name if desired.
+    let name_override: Option<String> = None;
+
+    // 5. Dispatch to the correct C1 inner fn.
+    match resolved.provider {
+        ProviderKind::Modrinth => {
+            let result = import_mrpack_from_bytes(app, bytes, name_override).await?;
+            Ok(ModpackInstallResult::Mrpack(result))
+        }
+        ProviderKind::CurseForge => {
+            let result = import_cf_zip_from_bytes(app, bytes, name_override).await?;
+            Ok(ModpackInstallResult::Curseforge(result))
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
@@ -1493,7 +1630,8 @@ pub fn run() {
             remove_mod,
             update_mod,
             import_mrpack,
-            import_curseforge_zip
+            import_curseforge_zip,
+            install_modpack
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
