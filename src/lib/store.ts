@@ -1,88 +1,33 @@
 import { create } from "zustand";
 import type {
-  AddModResult,
-  CfImportResult,
-  MrpackImportResult,
-  ModpackInstallResult,
-  PackUpdateResult,
-  UpdateModResult,
-} from "@/lib/ipc";
+  Task,
+  TaskProgressPayload,
+  RunUpdatePayload,
+  RunLogPayload,
+} from "@/lib/bindings";
 
 // ---------------------------------------------------------------------------
-// Task types — mirror task_manager.rs (serde rename_all = "camelCase")
+// IPC types — generated from the Rust backend (tauri-specta). Re-exported here
+// under the names store consumers import; the store no longer hand-mirrors them.
 // ---------------------------------------------------------------------------
 
-export type TaskKind = "synthetic" | "packInstall" | "packUpdate" | "modAdd" | "modUpdate";
-
-/** Mirrors TaskStatus (#[serde(tag = "kind")]) */
-export type TaskStatus =
-  | { kind: "queued" }
-  | { kind: "planning" }
-  | { kind: "downloading" }
-  | { kind: "applying" }
-  | { kind: "done" }
-  | { kind: "failed"; message: string }
-  | { kind: "cancelled" };
-
-export interface ChildItem {
-  label: string;
-}
+export type {
+  Task,
+  TaskKind,
+  TaskStatus,
+  ChildItem,
+  TaskResult,
+} from "@/lib/bindings";
 
 /**
- * Terminal result carried by a `Done` task.
- * CP-3/CP-4 populate this; CP-7 forward-declares the union so callers can
- * consume it without needing a separate query.
+ * Run state held in the runs slice: the `run://update` payload plus the
+ * optional `elapsedMs` that only `list_running` hydration carries (the event
+ * payload omits it). Composed from generated types, not hand-redeclared.
  */
-export type TaskResult =
-  | ModpackInstallResult
-  | CfImportResult
-  | MrpackImportResult
-  | PackUpdateResult
-  | AddModResult
-  | UpdateModResult;
+export type RunState = RunUpdatePayload & { elapsedMs?: number | null };
 
-/** Mirrors task_manager::Task (serde camelCase) */
-export interface Task {
-  id: number;
-  kind: TaskKind;
-  parentLabel: string;
-  status: TaskStatus;
-  children: ChildItem[];
-  currentChild: string | null;
-  done: number;
-  total: number;
-  /** Terminal result; present only when status.kind === "done". CP-3/CP-4 populate. */
-  result?: TaskResult | null;
-}
-
-/** Mirrors TaskProgressPayload (serde camelCase) */
-export interface TaskProgressUpdate {
-  taskId: number;
-  currentChild: string | null;
-  done: number;
-  total: number;
-  bytes: number;
-}
-
-// ---------------------------------------------------------------------------
-// Run types — mirror RunUpdatePayload / RunInfoPayload / RunLogPayload
-// ---------------------------------------------------------------------------
-
-/** Mirrors RunUpdatePayload / RunInfoPayload (serde camelCase) */
-export interface RunState {
-  slug: string;
-  /** `"preparing"` | `"running"` | `"exited"` | `"killed"` | `"failed"` */
-  status: string;
-  exitCode: number | null;
-  /** Present only from list_running hydration (elapsed_ms). */
-  elapsedMs?: number;
-}
-
-/** Mirrors RunLogPayload (serde camelCase) */
-export interface RunLogLine {
-  stream: string;
-  line: string;
-}
+/** Buffered log line in the runs slice (mirrors the `get_run_logs` / `launch://log` shape). */
+export type RunLogLine = RunLogPayload;
 
 // ---------------------------------------------------------------------------
 // Store slices
@@ -92,7 +37,7 @@ interface TasksSlice {
   /** All tasks keyed by numeric id. Entries survive navigation. */
   tasks: Map<number, Task>;
   upsertTask: (task: Task) => void;
-  patchTaskProgress: (update: TaskProgressUpdate) => void;
+  patchTaskProgress: (update: TaskProgressPayload) => void;
 }
 
 interface RunsSlice {
