@@ -7,7 +7,7 @@ use tauri::Manager as _;
 // published crate, so widening visibility for testing is harmless.
 pub mod core;
 use core::auth::{self, AccountMeta, AccountStore, AuthError};
-use core::download::{self, DownloadPlan, ItemOutcome, ItemStatus, PlanResult, ProgressSink, ProgressUpdate};
+use core::download::{self, CancellableStatus, DownloadPlan, ItemOutcome, ItemStatus, PlanResult, ProgressSink, ProgressUpdate, execute_plan_cancellable};
 use core::forge_installer::{self, InstallerLoaderKind, InstallSink};
 use core::instances::{self, CreateInstanceReq, Instance, InstanceDetail};
 use core::java::JavaInstallation;
@@ -24,6 +24,7 @@ use core::providers::{
     SearchParams, SearchResult, ProjectVersion,
 };
 use core::settings::{self, Settings};
+use core::task_manager::{ChildItem, Task, TaskJob, TaskKind, TaskManager, TaskObserver, TaskProgress, TaskSpec};
 use core::versions::{self, McVersion};
 
 // --- Phase 3: authentication ---
@@ -514,6 +515,80 @@ impl From<launch::LogLine> for RunLogPayload {
     }
 }
 
+// --- Download Manager (task queue) payloads + observer (CP-2). ---
+
+/// Payload emitted on the `task://progress` Tauri event channel.
+///
+/// Mirrors [`task_manager::TaskProgress`] with serde camelCase. Fires per child
+/// transition while a task downloads. The frontend mirror lands in CP-7.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskProgressPayload {
+    task_id: u64,
+    /// Label of the child currently in flight; `null` between children.
+    current_child: Option<String>,
+    done: u32,
+    total: u32,
+    /// Bytes received so far for the current child (best-effort).
+    bytes: u64,
+}
+
+/// Payload emitted on the `task://update` Tauri event channel — one full task
+/// snapshot per lifecycle/status transition.
+///
+/// Mirrors [`task_manager::Task`] with serde camelCase. The status tag and
+/// child-item shapes already serialize camelCase from the core types. The
+/// frontend mirror lands in CP-7.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskUpdatePayload {
+    #[serde(flatten)]
+    task: Task,
+}
+
+/// A [`TaskObserver`] that emits `task://progress` / `task://update` on the
+/// Tauri event channel. The single Download-Manager worker calls this from its
+/// task; emission is best-effort (ignored if the webview is gone).
+struct TauriTaskObserver {
+    app: tauri::AppHandle,
+}
+
+impl TaskObserver for TauriTaskObserver {
+    fn progress(&self, update: TaskProgress) {
+        use tauri::Emitter as _;
+        let payload = TaskProgressPayload {
+            task_id: update.task_id,
+            current_child: update.current_child,
+            done: update.done,
+            total: update.total,
+            bytes: update.bytes,
+        };
+        let _ = self.app.emit("task://progress", payload);
+    }
+
+    fn status_changed(&self, task: &Task) {
+        use tauri::Emitter as _;
+        let payload = TaskUpdatePayload { task: task.clone() };
+        let _ = self.app.emit("task://update", payload);
+    }
+}
+
+/// Read the current Download-Manager task snapshot. Survives navigation —
+/// any page can hydrate from this regardless of when it mounted.
+#[tauri::command]
+async fn list_tasks(manager: tauri::State<'_, TaskManager>) -> Result<Vec<Task>, String> {
+    Ok(manager.list().await)
+}
+
+/// Cancel a task by id. Trips the task's cancel token (a running download stops
+/// acquiring new permits) and short-circuits a still-queued task to `Cancelled`.
+/// Idempotent; a no-op for unknown or already-terminal ids.
+#[tauri::command]
+async fn cancel_task(manager: tauri::State<'_, TaskManager>, id: u64) -> Result<(), String> {
+    manager.cancel(id).await;
+    Ok(())
+}
+
 /// Payload emitted on the `install://log` Tauri event channel.
 ///
 /// Distinct from `launch://log` — installer output is log-shaped (one line at
@@ -1002,128 +1077,57 @@ async fn get_mod_versions(
 ///
 /// Per-item download failures are captured in `AddModResult.failed`; they do NOT
 /// abort the whole operation (remaining items still execute).
+/// Enqueue an add-mod task and return its task id synchronously.
+///
+/// The `ensure_not_locked` guard runs here (synchronously, before enqueue) so a
+/// locked instance errors without touching the queue. All download work runs
+/// inside [`ModAddJob`].
 #[tauri::command]
 async fn add_mod(
     app: tauri::AppHandle,
+    manager: tauri::State<'_, TaskManager>,
     provider: String,
     project_id: String,
     version_id: String,
     slug: String,
     mc_version: String,
     loader: String,
-) -> Result<AddModResult, String> {
-    use core::download::{self as dl, DownloadPlan, NoOpSink};
-    use core::mod_install::{attribute_outcomes, build_download_items, merge_mod_entries, partition_by_file_name, resolve_install};
-    use std::collections::HashSet;
-
-    log::info!("mod: add_mod project_id={project_id} version={version_id} instance={slug}");
-
-    // 1. Build provider + HTTP client.
-    let http = ReqwestProviderClient(reqwest::Client::new());
-    let settings = settings::load(&app).unwrap_or_default();
-    // Resolve CF key once; reused for both version fetch and dep resolution.
-    let cf_key = cf_api_key_from(
-        std::env::var(providers::CF_API_KEY_ENV).ok(),
-        settings.curseforge_api_key,
-        option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
-    );
-
-    // Resolve the root version by fetching all compatible versions and picking
-    // the one matching `version_id`.
-    let versions = match provider.as_str() {
-        "modrinth" => {
-            let p = ModrinthProvider;
-            p.get_versions(&http, &project_id, Some(&mc_version), Some(&loader))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        "curseforge" => {
-            let p = CurseForgeProvider::new(cf_key.clone());
-            p.get_versions(&http, &project_id, Some(&mc_version), Some(&loader))
-                .await
-                .map_err(|e| e.to_string())?
-        }
+) -> Result<u64, String> {
+    // Validate provider string early so a bad caller gets a synchronous error.
+    match provider.as_str() {
+        "modrinth" | "curseforge" => {}
         other => return Err(format!("unknown provider: {other}")),
-    };
-
-    let root_version = versions
-        .into_iter()
-        .find(|v| v.id == version_id)
-        .ok_or_else(|| format!("version '{version_id}' not found for project '{project_id}'"))?;
-
-    // 2. Load the instance manifest; guard against pack-lock; derive already-installed project_ids.
-    let mut instance = instances::load_manifest(&app, &slug)?;
-    instances::ensure_not_locked(&instance)?;
-    let already_installed: HashSet<String> = instance.mods.iter().map(|m| m.project_id.clone()).collect();
-
-    // 3. Run the planner.
-    // Pass `&project_id` as the root slug so the root mod's page_url uses the
-    // mod's own project identifier, not the instance slug.
-    let plan = match provider.as_str() {
-        "modrinth" => {
-            let p = ModrinthProvider;
-            resolve_install(&p, &http, root_version, &project_id, &project_id, &mc_version, &loader, &already_installed).await
-        }
-        "curseforge" => {
-            let p = CurseForgeProvider::new(cf_key);
-            resolve_install(&p, &http, root_version, &project_id, &project_id, &mc_version, &loader, &already_installed).await
-        }
-        other => return Err(format!("unknown provider: {other}")),
-    };
-
-    // 4. Execute downloads into `<instances>/<slug>/mc/mods/`.
-    // Validate the slug here at the join site — `load_manifest` already verified it,
-    // but making the invariant explicit prevents silent breakage on future reorder.
-    instances::validate_slug(&slug).map_err(|e| format!("invalid instance slug: {e}"))?;
-    let inst_dir = core::store::instances_dir(&app)?.join(&slug);
-    let mods_dir = inst_dir.join("mc").join("mods");
-    std::fs::create_dir_all(&mods_dir).map_err(|e| format!("could not create mods dir: {e}"))?;
-
-    // Validate provider-supplied file names before building DownloadItems.
-    // A compromised/malicious provider response with `file_name` containing `../`,
-    // `/`, `\`, a drive prefix, or a non-`.jar` extension must never reach the FS.
-    // Invalid entries go directly to `result.failed`; valid entries proceed normally.
-    let (valid_downloads, invalid_downloads) = partition_by_file_name(plan.downloads.clone());
-
-    let download_plan = DownloadPlan::new(build_download_items(
-        &core::mod_install::InstallPlan {
-            downloads: valid_downloads.clone(),
-            ..Default::default()
-        },
-        &mods_dir,
-    ));
-    let mut result = AddModResult {
-        manual: plan.manual.clone(),
-        unresolved: plan.unresolved.clone(),
-        suggestions: plan.suggestions.clone(),
-        warnings: plan.warnings.clone(),
-        failed: invalid_downloads,
-        ..Default::default()
-    };
-
-    if !download_plan.items.is_empty() {
-        let client = dl::build_client().map_err(|e| e.to_string())?;
-        let n = 8_usize;
-        let plan_result = dl::execute_plan(&client, &download_plan, &NoOpSink, n).await;
-
-        // Attribute outcomes by URL (order-independent) — execute_plan uses
-        // FuturesUnordered and prepends already-skipped items, so index matching is wrong.
-        let (added, mut failed) = attribute_outcomes(&valid_downloads, &plan_result);
-        result.added = added;
-        result.failed.append(&mut failed);
     }
 
-    // 5. Merge added entries into manifest and persist.
-    merge_mod_entries(&mut instance.mods, result.added.clone());
-    instances::save_manifest(&app, &slug, &instance)?;
+    // Guard: reject if pack-locked (synchronous, before enqueue).
+    let instance = instances::load_manifest(&app, &slug)?;
+    instances::ensure_not_locked(&instance)?;
 
-    log::info!(
-        "mod: add_mod done — added={}, failed={}, manual={}",
-        result.added.len(),
-        result.failed.len(),
-        result.manual.len()
-    );
-    Ok(result)
+    log::info!("mod: add_mod enqueue project_id={project_id} version={version_id} instance={slug}");
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let task_id_cell: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let task_id_cell_job = Arc::clone(&task_id_cell);
+
+    let id = manager.enqueue(TaskSpec {
+        kind: TaskKind::ModAdd,
+        parent_label: format!("Add mod {project_id}"),
+        job: Box::new(ModAddJob {
+            app: app.clone(),
+            task_id_cell: task_id_cell_job,
+            provider,
+            project_id,
+            version_id,
+            slug,
+            mc_version,
+            loader,
+        }),
+    }).await;
+
+    task_id_cell.store(id, Ordering::SeqCst);
+    Ok(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,206 +1183,514 @@ fn set_pack_lock(app: tauri::AppHandle, slug: String, locked: bool) -> Result<()
 // CP4: Update a single installed mod
 // ---------------------------------------------------------------------------
 
-/// Update a single tracked mod to its newest compatible version.
+/// Enqueue an update-mod task and return its task id synchronously.
 ///
-/// # Flow
-/// 1. Load manifest; find the `ModEntry` whose `project_id` matches — error if absent.
-/// 2. Build provider + HTTP client (mirrors `add_mod` / `search_mods`).
-/// 3. Resolve the newest compatible version via `fetch_newest_compatible` (CP1 planner).
-/// 4. `decide_update` decides what to do:
-///    - `UpToDate` / `Unresolved` / `Manual` → no disk change; return status.
-///    - `Swap` → download the new file into `mc/mods/`:
-///      a. On success: delete old file (both `.jar` and `.jar.disabled`), apply
-///         `apply_swap` to update the entry in place (`version_id`/`file_name`/`hashes`),
-///         **preserve `enabled`** (disabled mod → new file placed with `.disabled` suffix).
-///      b. On failure: leave old file + entry untouched; return `"failed"`.
-/// 5. Save manifest on swap success; return `UpdateModResult`.
+/// The `ensure_not_locked` guard runs here (synchronously, before enqueue) so a
+/// locked instance errors without touching the queue. The entry-existence check
+/// also runs here so a bad project_id errors immediately. All download work runs
+/// inside [`ModUpdateJob`].
 #[tauri::command]
 async fn update_mod(
     app: tauri::AppHandle,
+    manager: tauri::State<'_, TaskManager>,
     slug: String,
     project_id: String,
-) -> Result<UpdateModResult, String> {
-    use core::download::{self as dl, DownloadItem, DownloadPlan, ExpectedHash, NoOpSink};
-    use core::mod_install::{apply_swap, decide_update, fetch_newest_compatible, page_url_for, UpdateAction};
-
-    log::info!("mod: update_mod project_id={project_id} instance={slug}");
-
-    // 1. Load manifest; guard against pack-lock; find the entry.
-    let mut instance = instances::load_manifest(&app, &slug)?;
+) -> Result<u64, String> {
+    // Guard: reject if pack-locked (synchronous, before enqueue).
+    let instance = instances::load_manifest(&app, &slug)?;
     instances::ensure_not_locked(&instance)?;
-    let entry_idx = instance
-        .mods
-        .iter()
-        .position(|m| m.project_id == project_id)
-        .ok_or_else(|| format!("mod with project_id '{project_id}' not found in instance '{slug}'"))?;
 
-    let mc_version = instance.minecraft.clone();
-    let loader = instance.loader.kind.clone();
+    // Validate the mod entry exists.
+    if !instance.mods.iter().any(|m| m.project_id == project_id) {
+        return Err(format!("mod with project_id '{project_id}' not found in instance '{slug}'"));
+    }
 
-    // 2. Build provider + HTTP client (mirror of add_mod).
-    let http = ReqwestProviderClient(reqwest::Client::new());
-    let settings = settings::load(&app).unwrap_or_default();
-    let cf_key = cf_api_key_from(
-        std::env::var(providers::CF_API_KEY_ENV).ok(),
-        settings.curseforge_api_key,
-        option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
-    );
+    log::info!("mod: update_mod enqueue project_id={project_id} instance={slug}");
 
-    let provider_str = instance.mods[entry_idx].provider.clone();
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    // 3. Resolve newest compatible version.
-    let newest = match provider_str.as_str() {
-        "modrinth" => {
-            let p = ModrinthProvider;
-            fetch_newest_compatible(&p, &http, &project_id, &mc_version, &loader, None).await
-        }
-        "curseforge" => {
-            let p = CurseForgeProvider::new(cf_key);
-            fetch_newest_compatible(&p, &http, &project_id, &mc_version, &loader, None).await
-        }
-        other => return Err(format!("unknown provider '{other}' in manifest")),
-    };
+    let task_id_cell: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let task_id_cell_job = Arc::clone(&task_id_cell);
 
-    // 4. Decide action.
-    let action = decide_update(&instance.mods[entry_idx], newest.as_ref());
+    let id = manager.enqueue(TaskSpec {
+        kind: TaskKind::ModUpdate,
+        parent_label: format!("Update mod {project_id}"),
+        job: Box::new(ModUpdateJob {
+            app: app.clone(),
+            task_id_cell: task_id_cell_job,
+            slug,
+            project_id,
+        }),
+    }).await;
 
-    match action {
-        UpdateAction::UpToDate => {
-            log::info!("mod-update: project_id={project_id} already up to date");
-            Ok(UpdateModResult {
-                status: "upToDate".to_string(),
-                entry: None,
-                page_url: None,
-                error: None,
-            })
-        }
-        UpdateAction::Unresolved => {
-            log::info!("mod-update: project_id={project_id} no matching version / unresolved");
-            Ok(UpdateModResult {
-                status: "unresolved".to_string(),
-                entry: None,
-                page_url: None,
-                error: None,
-            })
-        }
-        UpdateAction::Manual { page_url: _, file_name: _ } => {
-            // page_url from decide_update is empty placeholder; build the real one here.
-            let newest_version = newest.as_ref().unwrap(); // safe: Manual arm means newest is Some
-            let new_file = newest_version
-                .files
-                .iter()
-                .find(|f| f.primary)
-                .or_else(|| newest_version.files.first())
-                .unwrap(); // safe: Manual arm means files is non-empty
-            let real_page_url = page_url_for(newest_version.provider, &project_id);
-            log::warn!(
-                "mod-update: project_id={project_id} distribution disabled — download '{}' manually from {real_page_url}",
-                new_file.file_name
-            );
-            Ok(UpdateModResult {
-                status: "manual".to_string(),
-                entry: None,
-                page_url: Some(real_page_url),
-                error: Some(format!(
-                    "distribution disabled; download '{}' manually",
-                    new_file.file_name
-                )),
-            })
-        }
-        UpdateAction::Swap { new_file, new_version_id } => {
-            // Build the destination path.
-            instances::validate_slug(&slug)
-                .map_err(|e| format!("invalid instance slug: {e}"))?;
-            let inst_dir = core::store::instances_dir(&app)?.join(&slug);
-            let mods_dir = inst_dir.join("mc").join("mods");
-            std::fs::create_dir_all(&mods_dir)
-                .map_err(|e| format!("could not create mods dir: {e}"))?;
+    task_id_cell.store(id, Ordering::SeqCst);
+    Ok(id)
+}
 
-            let url = new_file.url.clone().unwrap(); // safe: Swap arm guarantees url is Some
+// ---------------------------------------------------------------------------
+// CP-4: ModAddJob
+// ---------------------------------------------------------------------------
 
-            // Validate provider-supplied file name before any FS write.
-            // A malicious or compromised provider response could supply `"../evil.jar"`,
-            // an absolute path, or a non-jar name — reject before joining to mods_dir.
-            if let Err(e) = instances::validate_mod_file_name(&new_file.file_name) {
-                return Ok(UpdateModResult {
-                    status: "failed".to_string(),
-                    entry: None,
-                    page_url: None,
-                    error: Some(format!("invalid provider file name: {e}")),
-                });
+/// [`TaskJob`] that installs a mod (and required transitive deps) into an instance.
+///
+/// Pattern mirrors [`ImportMrpackJob`]:
+/// - PLAN: fetch root version + run BFS dep resolver → build child queue.
+/// - DOWNLOAD: stage into `<inst_dir>/.staging-<task_id>/mods/` with cancel support.
+/// - APPLY: promote staging → `mc/mods/`, merge mod entries, save manifest.
+///
+/// Terminal result = [`AddModResult`] JSON on `task://update`.
+struct ModAddJob {
+    app: tauri::AppHandle,
+    task_id_cell: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    provider: String,
+    project_id: String,
+    version_id: String,
+    slug: String,
+    mc_version: String,
+    loader: String,
+}
+
+#[async_trait::async_trait]
+impl TaskJob for ModAddJob {
+    async fn run(self: Box<Self>, ctx: &core::task_manager::TaskContext) {
+        use core::mod_install::{attribute_outcomes, build_download_items, merge_mod_entries, partition_by_file_name, resolve_install};
+        use core::modpack::{promote_staging, remap_to_staging};
+        use std::collections::HashSet;
+        use std::sync::atomic::Ordering;
+
+        let task_id = self.task_id_cell.load(Ordering::SeqCst);
+        log::info!("mod: ModAddJob task_id={task_id} project_id={} instance={}", self.project_id, self.slug);
+
+        // --- PLAN ---
+        ctx.enter_planning().await;
+
+        // Build provider + HTTP client.
+        let http = ReqwestProviderClient(reqwest::Client::new());
+        let settings = settings::load(&self.app).unwrap_or_default();
+        let cf_key = cf_api_key_from(
+            std::env::var(providers::CF_API_KEY_ENV).ok(),
+            settings.curseforge_api_key,
+            option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+        );
+
+        // Fetch the root version.
+        let versions = match self.provider.as_str() {
+            "modrinth" => {
+                let p = ModrinthProvider;
+                match p.get_versions(&http, &self.project_id, Some(&self.mc_version), Some(&self.loader)).await {
+                    Ok(v) => v,
+                    Err(e) => { ctx.finish_failed(e.to_string()).await; return; }
+                }
             }
-
-            // Choose expected hash: sha512 > sha1 > None.
-            let expected_hash = if let Some(h) = new_file.hashes.get("sha512") {
-                Some(ExpectedHash::Sha512(h.clone()))
-            } else if let Some(h) = new_file.hashes.get("sha1") {
-                Some(ExpectedHash::Sha1(h.clone()))
-            } else {
-                None
-            };
-
-            // If the mod is disabled, place the new file with the `.disabled` suffix
-            // so disk state matches the `enabled` flag after the swap.
-            let enabled = instance.mods[entry_idx].enabled;
-            let dest_file_name = if enabled {
-                new_file.file_name.clone()
-            } else {
-                format!("{}.disabled", new_file.file_name)
-            };
-
-            let download_plan = DownloadPlan::new(vec![DownloadItem {
-                url: url.clone(),
-                dest: mods_dir.join(&dest_file_name),
-                expected_hash,
-                size: new_file.size,
-            }]);
-
-            let client = dl::build_client().map_err(|e| e.to_string())?;
-            let plan_result = dl::execute_plan(&client, &download_plan, &NoOpSink, 1).await;
-
-            // Check download outcome.
-            use core::download::ItemStatus;
-            let outcome = plan_result.outcomes.first();
-            let download_ok = matches!(
-                outcome.map(|o| &o.status),
-                Some(ItemStatus::Ok) | Some(ItemStatus::Skipped)
-            );
-
-            if !download_ok {
-                let err = outcome
-                    .and_then(|o| match &o.status {
-                        ItemStatus::Failed { error } => Some(error.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "download failed: no outcome recorded".to_string());
-                log::warn!("mod-update: project_id={project_id} download failed — {err}");
-                return Ok(UpdateModResult {
-                    status: "failed".to_string(),
-                    entry: None,
-                    page_url: None,
-                    error: Some(err),
-                });
+            "curseforge" => {
+                let p = CurseForgeProvider::new(cf_key.clone());
+                match p.get_versions(&http, &self.project_id, Some(&self.mc_version), Some(&self.loader)).await {
+                    Ok(v) => v,
+                    Err(e) => { ctx.finish_failed(e.to_string()).await; return; }
+                }
             }
+            other => { ctx.finish_failed(format!("unknown provider: {other}")).await; return; }
+        };
 
-            // Download succeeded: delete old file (both variants).
-            let old_file_name = instance.mods[entry_idx].file_name.clone();
-            instances::remove_mod_from_disk_files(&mods_dir, &old_file_name);
+        let root_version = match versions.into_iter().find(|v| v.id == self.version_id) {
+            Some(v) => v,
+            None => {
+                ctx.finish_failed(format!("version '{}' not found for project '{}'", self.version_id, self.project_id)).await;
+                return;
+            }
+        };
 
-            // Update the entry in place.
-            apply_swap(&mut instance.mods[entry_idx], &new_file, &new_version_id);
-            // Save manifest.
-            instances::save_manifest(&app, &slug, &instance)?;
+        // Load manifest (re-load in job for freshness; lock was already checked in command).
+        let mut instance = match instances::load_manifest(&self.app, &self.slug) {
+            Ok(i) => i,
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+        let already_installed: HashSet<String> = instance.mods.iter().map(|m| m.project_id.clone()).collect();
 
-            log::info!(
-                "mod: update_mod done — project_id={project_id} updated to version {new_version_id}"
-            );
-            Ok(UpdateModResult {
-                status: "updated".to_string(),
-                entry: Some(instance.mods[entry_idx].clone()),
-                page_url: None,
-                error: None,
-            })
+        // BFS dep resolver.
+        let plan = match self.provider.as_str() {
+            "modrinth" => {
+                let p = ModrinthProvider;
+                resolve_install(&p, &http, root_version, &self.project_id, &self.project_id, &self.mc_version, &self.loader, &already_installed).await
+            }
+            "curseforge" => {
+                let p = CurseForgeProvider::new(cf_key);
+                resolve_install(&p, &http, root_version, &self.project_id, &self.project_id, &self.mc_version, &self.loader, &already_installed).await
+            }
+            other => { ctx.finish_failed(format!("unknown provider: {other}")).await; return; }
+        };
+
+        // Validate + partition download items.
+        let (valid_downloads, invalid_downloads) = partition_by_file_name(plan.downloads.clone());
+
+        let inst_dir = match core::store::instances_dir(&self.app) {
+            Ok(d) => d.join(&self.slug),
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+        let mc_dir = inst_dir.join("mc");
+        let mods_dir = mc_dir.join("mods");
+
+        if let Err(e) = std::fs::create_dir_all(&mods_dir) {
+            ctx.finish_failed(format!("could not create mods dir: {e}")).await;
+            return;
+        }
+
+        let items = build_download_items(
+            &core::mod_install::InstallPlan {
+                downloads: valid_downloads.clone(),
+                ..Default::default()
+            },
+            &mods_dir,
+        );
+
+        let staging_dir = staging_dir_for(&inst_dir, task_id);
+
+        // Remap destinations from mc_dir → staging_dir (preserves mods/ sub-path).
+        let staged_items = remap_to_staging(items, &mc_dir, &staging_dir);
+        let children = children_from_items(&staged_items);
+
+        // --- DOWNLOAD ---
+        let staged_plan = DownloadPlan::new(staged_items);
+        ctx.enter_downloading(children).await;
+
+        let http_client = match download::build_client() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                ctx.finish_failed(e.to_string()).await;
+                return;
+            }
+        };
+
+        let dl_result = execute_plan_cancellable(
+            &http_client,
+            &staged_plan,
+            &core::download::NoOpSink,
+            8,
+            ctx.cancel_token(),
+        ).await;
+
+        if dl_result.cancelled || ctx.is_cancelled() {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_cancelled().await;
+            return;
+        }
+
+        // Build a synthetic PlanResult from CancellableOutcomes for attribute_outcomes.
+        let plan_result = {
+            use core::download::{ItemOutcome, PlanResult};
+            let outcomes: Vec<ItemOutcome> = dl_result.outcomes.iter().filter_map(|o| {
+                match &o.status {
+                    CancellableStatus::Ran(s) => Some(ItemOutcome {
+                        url: o.url.clone(),
+                        status: s.clone(),
+                    }),
+                    CancellableStatus::Cancelled => None,
+                }
+            }).collect();
+            PlanResult { outcomes }
+        };
+
+        let (added, mut dl_failed) = attribute_outcomes(&valid_downloads, &plan_result);
+
+        // --- APPLY ---
+        ctx.enter_applying().await;
+
+        if let Err(e) = promote_staging(&staging_dir, &mc_dir) {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_failed(format!("promote failed: {e}")).await;
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&staging_dir);
+
+        // Merge entries + persist manifest.
+        merge_mod_entries(&mut instance.mods, added.clone());
+        if let Err(e) = instances::save_manifest(&self.app, &self.slug, &instance) {
+            ctx.finish_failed(e).await;
+            return;
+        }
+
+        let mut result = AddModResult {
+            added,
+            manual: plan.manual,
+            unresolved: plan.unresolved,
+            suggestions: plan.suggestions,
+            warnings: plan.warnings,
+            failed: invalid_downloads,
+        };
+        result.failed.append(&mut dl_failed);
+
+        log::info!(
+            "mod: ModAddJob done task_id={task_id} — added={} failed={} manual={}",
+            result.added.len(), result.failed.len(), result.manual.len()
+        );
+
+        match serde_json::to_value(&result) {
+            Ok(v) => ctx.finish_done_with_result(v).await,
+            Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CP-4: ModUpdateJob
+// ---------------------------------------------------------------------------
+
+/// [`TaskJob`] that updates a single installed mod to its newest compatible version.
+///
+/// Pattern mirrors [`ModAddJob`]:
+/// - PLAN: load manifest, resolve newest compatible version, decide action.
+/// - DOWNLOAD (Swap case only): stage new file in `.staging-<task_id>/mods/`.
+/// - APPLY: promote staging, delete old file, update manifest entry.
+///
+/// No-op cases (UpToDate / Unresolved / Manual) skip Download/Apply phases and
+/// finish immediately with a result payload.
+///
+/// Terminal result = [`UpdateModResult`] JSON on `task://update`.
+struct ModUpdateJob {
+    app: tauri::AppHandle,
+    task_id_cell: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    slug: String,
+    project_id: String,
+}
+
+#[async_trait::async_trait]
+impl TaskJob for ModUpdateJob {
+    async fn run(self: Box<Self>, ctx: &core::task_manager::TaskContext) {
+        use core::download::{DownloadItem, ExpectedHash};
+        use core::mod_install::{apply_swap, decide_update, fetch_newest_compatible, page_url_for, UpdateAction};
+        use core::modpack::{promote_staging, remap_to_staging};
+        use std::sync::atomic::Ordering;
+
+        let task_id = self.task_id_cell.load(Ordering::SeqCst);
+        log::info!("mod: ModUpdateJob task_id={task_id} project_id={} instance={}", self.project_id, self.slug);
+
+        // --- PLAN ---
+        ctx.enter_planning().await;
+
+        let mut instance = match instances::load_manifest(&self.app, &self.slug) {
+            Ok(i) => i,
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+
+        let entry_idx = match instance.mods.iter().position(|m| m.project_id == self.project_id) {
+            Some(i) => i,
+            None => {
+                ctx.finish_failed(format!("mod '{}' not found in instance '{}'", self.project_id, self.slug)).await;
+                return;
+            }
+        };
+
+        let mc_version = instance.minecraft.clone();
+        let loader = instance.loader.kind.clone();
+
+        let http = ReqwestProviderClient(reqwest::Client::new());
+        let settings = settings::load(&self.app).unwrap_or_default();
+        let cf_key = cf_api_key_from(
+            std::env::var(providers::CF_API_KEY_ENV).ok(),
+            settings.curseforge_api_key,
+            option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+        );
+
+        let provider_str = instance.mods[entry_idx].provider.clone();
+        let newest = match provider_str.as_str() {
+            "modrinth" => {
+                let p = ModrinthProvider;
+                fetch_newest_compatible(&p, &http, &self.project_id, &mc_version, &loader, None).await
+            }
+            "curseforge" => {
+                let p = CurseForgeProvider::new(cf_key);
+                fetch_newest_compatible(&p, &http, &self.project_id, &mc_version, &loader, None).await
+            }
+            other => {
+                ctx.finish_failed(format!("unknown provider '{other}' in manifest")).await;
+                return;
+            }
+        };
+
+        let action = decide_update(&instance.mods[entry_idx], newest.as_ref());
+
+        // Handle non-download outcomes immediately (skip Download/Apply phases).
+        let finish_result = match &action {
+            UpdateAction::UpToDate => {
+                log::info!("mod-update: project_id={} already up to date", self.project_id);
+                Some(UpdateModResult { status: "upToDate".to_string(), entry: None, page_url: None, error: None })
+            }
+            UpdateAction::Unresolved => {
+                log::info!("mod-update: project_id={} no matching version / unresolved", self.project_id);
+                Some(UpdateModResult { status: "unresolved".to_string(), entry: None, page_url: None, error: None })
+            }
+            UpdateAction::Manual { .. } => {
+                let newest_version = newest.as_ref().unwrap();
+                let new_file = newest_version.files.iter().find(|f| f.primary).or_else(|| newest_version.files.first()).unwrap();
+                let real_page_url = page_url_for(newest_version.provider, &self.project_id);
+                log::warn!(
+                    "mod-update: project_id={} distribution disabled — download '{}' manually from {real_page_url}",
+                    self.project_id, new_file.file_name
+                );
+                Some(UpdateModResult {
+                    status: "manual".to_string(),
+                    entry: None,
+                    page_url: Some(real_page_url),
+                    error: Some(format!("distribution disabled; download '{}' manually", new_file.file_name)),
+                })
+            }
+            UpdateAction::Swap { .. } => None,
+        };
+
+        if let Some(result) = finish_result {
+            match serde_json::to_value(&result) {
+                Ok(v) => ctx.finish_done_with_result(v).await,
+                Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+            }
+            return;
+        }
+
+        // Swap path: extract new_file + new_version_id from action.
+        let (new_file, new_version_id) = match action {
+            UpdateAction::Swap { new_file, new_version_id } => (new_file, new_version_id),
+            _ => unreachable!(),
+        };
+
+        // Validate provider file name.
+        if let Err(e) = instances::validate_mod_file_name(&new_file.file_name) {
+            let result = UpdateModResult {
+                status: "failed".to_string(), entry: None, page_url: None,
+                error: Some(format!("invalid provider file name: {e}")),
+            };
+            match serde_json::to_value(&result) {
+                Ok(v) => ctx.finish_done_with_result(v).await,
+                Err(e2) => ctx.finish_failed(format!("serialize result: {e2}")).await,
+            }
+            return;
+        }
+
+        let url = new_file.url.clone().unwrap(); // safe: Swap arm guarantees url is Some
+
+        let expected_hash = if let Some(h) = new_file.hashes.get("sha512") {
+            Some(ExpectedHash::Sha512(h.clone()))
+        } else if let Some(h) = new_file.hashes.get("sha1") {
+            Some(ExpectedHash::Sha1(h.clone()))
+        } else {
+            None
+        };
+
+        let enabled = instance.mods[entry_idx].enabled;
+        let dest_file_name = if enabled {
+            new_file.file_name.clone()
+        } else {
+            format!("{}.disabled", new_file.file_name)
+        };
+
+        let inst_dir = match core::store::instances_dir(&self.app) {
+            Ok(d) => d.join(&self.slug),
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+        let mc_dir = inst_dir.join("mc");
+        let mods_dir = mc_dir.join("mods");
+
+        if let Err(e) = std::fs::create_dir_all(&mods_dir) {
+            ctx.finish_failed(format!("could not create mods dir: {e}")).await;
+            return;
+        }
+
+        let staging_dir = staging_dir_for(&inst_dir, task_id);
+
+        // Remap single-file download into staging.
+        let items = vec![DownloadItem {
+            url: url.clone(),
+            dest: mods_dir.join(&dest_file_name),
+            expected_hash,
+            size: new_file.size,
+        }];
+        let staged_items = remap_to_staging(items, &mc_dir, &staging_dir);
+        let children = children_from_items(&staged_items);
+
+        // --- DOWNLOAD ---
+        let staged_plan = DownloadPlan::new(staged_items);
+        ctx.enter_downloading(children).await;
+
+        let http_client = match download::build_client() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                ctx.finish_failed(e.to_string()).await;
+                return;
+            }
+        };
+
+        let dl_result = execute_plan_cancellable(
+            &http_client,
+            &staged_plan,
+            &core::download::NoOpSink,
+            1,
+            ctx.cancel_token(),
+        ).await;
+
+        if dl_result.cancelled || ctx.is_cancelled() {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_cancelled().await;
+            return;
+        }
+
+        // Check download outcome.
+        let download_ok = dl_result.outcomes.first().map(|o| {
+            matches!(&o.status, CancellableStatus::Ran(ItemStatus::Ok) | CancellableStatus::Ran(ItemStatus::Skipped))
+        }).unwrap_or(false);
+
+        if !download_ok {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            let err = dl_result.outcomes.first().and_then(|o| {
+                match &o.status {
+                    CancellableStatus::Ran(ItemStatus::Failed { error }) => Some(error.clone()),
+                    _ => None,
+                }
+            }).unwrap_or_else(|| "download failed: no outcome recorded".to_string());
+            log::warn!("mod-update: project_id={} download failed — {err}", self.project_id);
+            let result = UpdateModResult { status: "failed".to_string(), entry: None, page_url: None, error: Some(err) };
+            match serde_json::to_value(&result) {
+                Ok(v) => ctx.finish_done_with_result(v).await,
+                Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+            }
+            return;
+        }
+
+        // --- APPLY ---
+        ctx.enter_applying().await;
+
+        if let Err(e) = promote_staging(&staging_dir, &mc_dir) {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_failed(format!("promote failed: {e}")).await;
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&staging_dir);
+
+        // Delete old file (both variants).
+        let old_file_name = instance.mods[entry_idx].file_name.clone();
+        instances::remove_mod_from_disk_files(&mods_dir, &old_file_name);
+
+        // Update manifest entry in place.
+        apply_swap(&mut instance.mods[entry_idx], &new_file, &new_version_id);
+        if let Err(e) = instances::save_manifest(&self.app, &self.slug, &instance) {
+            ctx.finish_failed(e).await;
+            return;
+        }
+
+        log::info!(
+            "mod: ModUpdateJob done task_id={task_id} — project_id={} updated to version {new_version_id}",
+            self.project_id
+        );
+
+        let result = UpdateModResult {
+            status: "updated".to_string(),
+            entry: Some(instance.mods[entry_idx].clone()),
+            page_url: None,
+            error: None,
+        };
+        match serde_json::to_value(&result) {
+            Ok(v) => ctx.finish_done_with_result(v).await,
+            Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
         }
     }
 }
@@ -1405,136 +1717,320 @@ pub struct MrpackImportResult {
     pub failed_files: Vec<String>,
 }
 
-/// Import a local Modrinth `.mrpack` file into a new instance.
+// ---------------------------------------------------------------------------
+// CP-3: Pack job helpers
+// ---------------------------------------------------------------------------
+
+/// Staging directory name for a task: `<inst_dir>/.staging-<task_id>`.
+/// The staging dir is a sibling of the instance dir, so both reside on the
+/// same volume — rename is guaranteed atomic.
+fn staging_dir_for(inst_dir: &std::path::Path, task_id: u64) -> std::path::PathBuf {
+    inst_dir.join(format!(".staging-{task_id}"))
+}
+
+/// Tally outcomes from a cancellable plan run (installed / failed / failed_files).
+fn tally_cancellable(
+    outcomes: &[core::download::CancellableOutcome],
+) -> (u32, u32, Vec<String>) {
+    let mut installed = 0u32;
+    let mut failed = 0u32;
+    let mut failed_files: Vec<String> = Vec::new();
+    for o in outcomes {
+        match &o.status {
+            CancellableStatus::Ran(ItemStatus::Ok | ItemStatus::Skipped) => installed += 1,
+            CancellableStatus::Ran(ItemStatus::Failed { .. }) => {
+                failed += 1;
+                failed_files.push(o.url.clone());
+            }
+            CancellableStatus::Cancelled => {} // not counted; run was cancelled
+        }
+    }
+    (installed, failed, failed_files)
+}
+
+/// Build a [`ChildItem`] list from plan items (basename of each dest path).
+fn children_from_items(items: &[core::download::DownloadItem]) -> Vec<ChildItem> {
+    items
+        .iter()
+        .map(|item| ChildItem {
+            label: item
+                .dest
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| item.url.clone()),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// CP-3: ImportMrpackJob
+// ---------------------------------------------------------------------------
+
+/// [`TaskJob`] that imports a local `.mrpack` into a new instance.
 ///
-/// # Flow
-/// 1. Read `mrpack_path` bytes from disk.
-/// 2. Call `read_mrpack` to parse `modrinth.index.json` and build a [`PackPlan`].
-/// 3. Create an instance via `instances::create` (name = `name_override` or manifest.name;
-///    mc + loader from manifest).
-/// 4. Execute the download plan (`execute_plan`, `NoOpSink`); tally installed/failed.
-/// 5. Extract overrides (`extract_overrides`) into the instance `mc/` dir.
-/// 6. Merge `PackPlan.mods` into the instance manifest; persist.
-/// 7. Return [`MrpackImportResult`].
+/// Mirrors the old `import_mrpack_from_bytes` flow but:
+/// - Downloads into a staging dir (`<inst_dir>/.staging-<task_id>/`).
+/// - Uses [`execute_plan_cancellable`] with the task's cancel token.
+/// - Promotes staging on success; discards on cancel/failure.
+/// - Emits lifecycle via [`TaskContext`]; terminal result = [`MrpackImportResult`].
 ///
-/// All errors map to `String`.
-async fn import_mrpack_from_bytes(
+/// `task_id_cell` carries the assigned task id (written by the command after
+/// `enqueue()` returns, read by `run()` before first use). See
+/// `enqueue_import_mrpack` for the ordering guarantee.
+struct ImportMrpackJob {
     app: tauri::AppHandle,
+    task_id_cell: std::sync::Arc<std::sync::atomic::AtomicU64>,
     bytes: Vec<u8>,
     name_override: Option<String>,
     pack_source: Option<instances::Source>,
-) -> Result<MrpackImportResult, String> {
-    use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
-    use core::modpack::extract_overrides;
-
-    log::info!("modpack: import_mrpack starting");
-
-    // 2. Parse manifest minimally to obtain name/mc/loader for instance creation.
-    //    The full parse+plan goes through the tested `read_mrpack` seam below (step 4).
-    let pre_create_manifest = {
-        use std::io::{Cursor, Read};
-        let mut archive = zip::ZipArchive::new(Cursor::new(&bytes))
-            .map_err(|e| format!("could not open mrpack zip: {e}"))?;
-        let index_json = {
-            let mut entry = archive
-                .by_name("modrinth.index.json")
-                .map_err(|_| "modrinth.index.json not found in archive".to_string())?;
-            let mut buf = String::new();
-            entry.read_to_string(&mut buf).map_err(|e| e.to_string())?;
-            buf
-        };
-        modpack::parse_modrinth_index(&index_json).map_err(|e| e.to_string())?
-    };
-
-    // 3. Create the instance.
-    let instance_name = name_override
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| pre_create_manifest.name.clone());
-
-    let inst = instances::create(
-        &app,
-        CreateInstanceReq {
-            name: instance_name,
-            minecraft: pre_create_manifest.minecraft.clone(),
-            loader: instances::Loader {
-                kind: pre_create_manifest.loader.kind.clone(),
-                version: pre_create_manifest.loader.version.clone(),
-            },
-        },
-    )?;
-
-    // Locate the instance mc/ directory.
-    let inst_dir = core::store::instances_dir(&app)?.join(&inst.slug);
-    let mc_dir = inst_dir.join("mc");
-
-    // 4. Parse manifest + build plan through the tested seam.
-    //    `read_mrpack` opens the zip, re-parses modrinth.index.json, and runs
-    //    `build_pack_plan` — the same path exercised by the unit tests.
-    let (_manifest, plan) = modpack::read_mrpack(&bytes, &mc_dir).map_err(|e| e.to_string())?;
-    let skipped_count = plan.skipped.len() as u32;
-    let mod_entries = plan.mods.clone();
-    let download_plan = DownloadPlan::new(plan.items);
-
-    // Execute downloads.
-    let client = dl::build_client().map_err(|e| e.to_string())?;
-    let plan_result = dl::execute_plan(&client, &download_plan, &NoOpSink, 8).await;
-
-    let mut installed: u32 = 0;
-    let mut failed: u32 = 0;
-    let mut failed_files: Vec<String> = Vec::new();
-
-    for outcome in &plan_result.outcomes {
-        match &outcome.status {
-            ItemStatus::Ok | ItemStatus::Skipped => installed += 1,
-            ItemStatus::Failed { .. } => {
-                failed += 1;
-                failed_files.push(outcome.url.clone());
-            }
-        }
-    }
-
-    // 5. Extract overrides into mc_dir.
-    {
-        use std::io::Cursor;
-        let cursor = Cursor::new(&bytes);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .map_err(|e| format!("could not re-open mrpack zip for overrides: {e}"))?;
-        extract_overrides(&mut archive, &mc_dir).map_err(|e| e.to_string())?;
-    }
-
-    // 6. Merge mod entries into manifest and persist.
-    let mut instance = instances::load_manifest(&app, &inst.slug)?;
-    instance.mods = mod_entries;
-    if let Some(src) = pack_source {
-        instance.source = Some(src);
-    }
-    instances::save_manifest(&app, &inst.slug, &instance)?;
-
-    log::info!(
-        "modpack: import_mrpack done — installed={installed} failed={failed} skipped={skipped_count}"
-    );
-    if failed > 0 {
-        log::warn!("modpack: import_mrpack — {failed} file(s) failed to download");
-    }
-    Ok(MrpackImportResult {
-        slug: inst.slug,
-        name: inst.name,
-        installed,
-        failed,
-        skipped: skipped_count,
-        failed_files,
-    })
 }
 
+#[async_trait::async_trait]
+impl TaskJob for ImportMrpackJob {
+    async fn run(self: Box<Self>, ctx: &core::task_manager::TaskContext) {
+        use core::modpack::{extract_overrides, promote_staging, remap_to_staging};
+        use std::sync::atomic::Ordering;
+
+        let task_id = self.task_id_cell.load(Ordering::SeqCst);
+        log::info!("modpack: ImportMrpackJob task_id={task_id} starting");
+
+        // --- PLAN ---
+        ctx.enter_planning().await;
+
+        // Parse manifest (minimal) for instance creation.
+        let pre_manifest = {
+            use std::io::{Cursor, Read as _};
+            let r: Result<_, String> = (|| {
+                let mut archive = zip::ZipArchive::new(Cursor::new(&self.bytes))
+                    .map_err(|e| format!("could not open mrpack zip: {e}"))?;
+                let mut entry = archive
+                    .by_name("modrinth.index.json")
+                    .map_err(|_| "modrinth.index.json not found".to_string())?;
+                let mut buf = String::new();
+                entry.read_to_string(&mut buf).map_err(|e| e.to_string())?;
+                modpack::parse_modrinth_index(&buf).map_err(|e| e.to_string())
+            })();
+            match r {
+                Ok(m) => m,
+                Err(e) => {
+                    ctx.finish_failed(e).await;
+                    return;
+                }
+            }
+        };
+
+        let instance_name = self
+            .name_override
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| pre_manifest.name.clone());
+
+        let inst = match instances::create(
+            &self.app,
+            CreateInstanceReq {
+                name: instance_name,
+                minecraft: pre_manifest.minecraft.clone(),
+                loader: instances::Loader {
+                    kind: pre_manifest.loader.kind.clone(),
+                    version: pre_manifest.loader.version.clone(),
+                },
+            },
+        ) {
+            Ok(i) => i,
+            Err(e) => {
+                ctx.finish_failed(e).await;
+                return;
+            }
+        };
+
+        let inst_dir = match core::store::instances_dir(&self.app) {
+            Ok(d) => d.join(&inst.slug),
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+        let mc_dir = inst_dir.join("mc");
+        let staging_dir = staging_dir_for(&inst_dir, task_id);
+
+        // Parse + build plan (items still target mc_dir at this stage).
+        let (plan_result, skipped_count, mod_entries) = match modpack::read_mrpack(&self.bytes, &mc_dir) {
+            Ok((_manifest, plan)) => {
+                let skipped = plan.skipped.len() as u32;
+                let mods = plan.mods.clone();
+                (plan.items, skipped, mods)
+            }
+            Err(e) => {
+                ctx.finish_failed(e.to_string()).await;
+                return;
+            }
+        };
+
+        // Remap destinations to staging dir.
+        let staged_items = remap_to_staging(plan_result, &mc_dir, &staging_dir);
+
+        // Build child labels from the (remapped) items.
+        let children = children_from_items(&staged_items);
+
+        // --- DOWNLOAD ---
+        let staged_plan = DownloadPlan::new(staged_items);
+        ctx.enter_downloading(children).await;
+
+        let http_client = match download::build_client() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                ctx.finish_failed(e.to_string()).await;
+                return;
+            }
+        };
+
+        let dl_result = execute_plan_cancellable(
+            &http_client,
+            &staged_plan,
+            &core::download::NoOpSink,
+            8,
+            ctx.cancel_token(),
+        )
+        .await;
+
+        if dl_result.cancelled || ctx.is_cancelled() {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_cancelled().await;
+            return;
+        }
+
+        let (installed, failed, failed_files) = tally_cancellable(&dl_result.outcomes);
+
+        // --- APPLY ---
+        ctx.enter_applying().await;
+
+        // Promote staging → mc_dir.
+        if let Err(e) = promote_staging(&staging_dir, &mc_dir) {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_failed(format!("promote failed: {e}")).await;
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&staging_dir);
+
+        // Extract overrides directly into mc_dir (post-promote).
+        {
+            use std::io::Cursor;
+            if let Err(e) = zip::ZipArchive::new(Cursor::new(&self.bytes))
+                .map_err(|e| format!("could not re-open mrpack zip for overrides: {e}"))
+                .and_then(|mut archive| {
+                    extract_overrides(&mut archive, &mc_dir).map_err(|e| e.to_string())
+                })
+            {
+                ctx.finish_failed(e).await;
+                return;
+            }
+        }
+
+        // Merge mod entries + persist manifest.
+        let result = match instances::load_manifest(&self.app, &inst.slug) {
+            Ok(mut instance) => {
+                instance.mods = mod_entries;
+                if let Some(src) = self.pack_source {
+                    instance.source = Some(src);
+                }
+                match instances::save_manifest(&self.app, &inst.slug, &instance) {
+                    Ok(_) => Ok(MrpackImportResult {
+                        slug: inst.slug,
+                        name: inst.name,
+                        installed,
+                        failed,
+                        skipped: skipped_count,
+                        failed_files,
+                    }),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        };
+
+        match result {
+            Ok(r) => {
+                log::info!(
+                    "modpack: ImportMrpackJob done — slug='{}' installed={} failed={}",
+                    r.slug, r.installed, r.failed
+                );
+                match serde_json::to_value(&r) {
+                    Ok(v) => ctx.finish_done_with_result(v).await,
+                    Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                }
+            }
+            Err(e) => ctx.finish_failed(e).await,
+        }
+    }
+}
+
+/// Enqueue an `.mrpack` import task and return its id synchronously.
+///
+/// The task runs Plan → Download (staged) → Apply (promote + overrides + manifest).
+/// The terminal `task://update` event carries the [`MrpackImportResult`] JSON.
 #[tauri::command]
 async fn import_mrpack(
     app: tauri::AppHandle,
+    manager: tauri::State<'_, TaskManager>,
     mrpack_path: String,
     name_override: Option<String>,
-) -> Result<MrpackImportResult, String> {
+) -> Result<u64, String> {
     let bytes = std::fs::read(&mrpack_path)
         .map_err(|e| format!("could not read mrpack file '{mrpack_path}': {e}"))?;
-    import_mrpack_from_bytes(app, bytes, name_override, None).await
+    enqueue_import_mrpack(&app, &manager, bytes, name_override, None).await
+}
+
+/// Inner fn shared by `import_mrpack` and `install_modpack` (mrpack branch).
+///
+/// The `task_id_cell` pattern: we need the task id inside the job for staging
+/// dir naming. The id is only known after `enqueue()` returns, but the job
+/// struct must be moved into the spec before enqueue. Solution: share an
+/// `Arc<AtomicU64>` between command and job; command writes the id immediately
+/// after enqueue returns; the job reads it at first use (inside `run()`, which
+/// the worker calls only after the enqueue `send` completes on the channel —
+/// the Tokio `unbounded_channel` guarantees the send-before-recv ordering, so
+/// the job always reads a non-zero id).
+async fn enqueue_import_mrpack(
+    app: &tauri::AppHandle,
+    manager: &tauri::State<'_, TaskManager>,
+    bytes: Vec<u8>,
+    name_override: Option<String>,
+    pack_source: Option<instances::Source>,
+) -> Result<u64, String> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Parse pack name for the task label (best-effort; fall back to generic label).
+    let pack_name = {
+        use std::io::{Cursor, Read as _};
+        (|| {
+            let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).ok()?;
+            let mut entry = archive.by_name("modrinth.index.json").ok()?;
+            let mut buf = String::new();
+            entry.read_to_string(&mut buf).ok()?;
+            modpack::parse_modrinth_index(&buf).ok().map(|m| m.name)
+        })()
+        .unwrap_or_else(|| "Modpack".to_string())
+    };
+
+    let task_id_cell: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let task_id_cell_job = Arc::clone(&task_id_cell);
+
+    let id = manager.enqueue(TaskSpec {
+        kind: TaskKind::PackInstall,
+        parent_label: format!("Install {pack_name}"),
+        job: Box::new(ImportMrpackJob {
+            app: app.clone(),
+            task_id_cell: task_id_cell_job,
+            bytes,
+            name_override,
+            pack_source,
+        }),
+    }).await;
+
+    // Write the assigned id into the cell so the job can read it.
+    // This happens before the worker's `recv()` yields the message to run the job.
+    task_id_cell.store(id, Ordering::SeqCst);
+    Ok(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -1558,135 +2054,232 @@ pub struct CfImportResult {
     pub manual: Vec<core::modpack::CfManualFile>,
 }
 
-/// Import a local CurseForge modpack `.zip` into a new instance.
+// ---------------------------------------------------------------------------
+// CP-3: ImportCfZipJob
+// ---------------------------------------------------------------------------
+
+/// [`TaskJob`] that imports a CurseForge `.zip` modpack into a new instance.
 ///
-/// # Flow
-/// 1. Read `cf_zip_path` bytes from disk; parse `manifest.json` via `read_cf_manifest`.
-/// 2. Create an instance via `instances::create` (name = `name_override` or manifest.name;
-///    mc + loader from manifest).
-/// 3. Resolve every `files[]` entry via `CurseForgeProvider::get_file` and build the
-///    `CfPackPlan` (`resolve_and_build_cf_plan` — the tested seam).
-/// 4. Execute the download plan (`execute_plan`, `NoOpSink`); tally installed/failed.
-/// 5. Extract overrides (`extract_overrides`, reused unchanged) into the instance `mc/` dir.
-/// 6. Merge `CfPackPlan.mods` into the instance manifest; persist.
-/// 7. Return [`CfImportResult`].
-///
-/// All errors map to `String`.
-async fn import_cf_zip_from_bytes(
+/// Same stage-and-promote pattern as [`ImportMrpackJob`]:
+/// - PLAN: parse manifest + resolve files via CF API → build child queue.
+/// - DOWNLOAD: execute into staging dir with cancel support.
+/// - APPLY: promote staging → mc_dir, extract overrides, save manifest.
+struct ImportCfZipJob {
     app: tauri::AppHandle,
+    task_id_cell: std::sync::Arc<std::sync::atomic::AtomicU64>,
     bytes: Vec<u8>,
     name_override: Option<String>,
     pack_source: Option<instances::Source>,
-) -> Result<CfImportResult, String> {
-    use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
-    use core::modpack::{extract_overrides, read_cf_manifest, resolve_and_build_cf_plan};
-
-    log::info!("modpack: import_curseforge_zip starting");
-
-    // 1. Parse manifest.json.
-    let manifest = read_cf_manifest(&bytes).map_err(|e| e.to_string())?;
-
-    // 2. Create the instance.
-    let instance_name = name_override
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| manifest.name.clone());
-
-    let inst = instances::create(
-        &app,
-        CreateInstanceReq {
-            name: instance_name,
-            minecraft: manifest.minecraft.clone(),
-            loader: instances::Loader {
-                kind: manifest.loader.kind.clone(),
-                version: manifest.loader.version.clone(),
-            },
-        },
-    )?;
-
-    let inst_dir = core::store::instances_dir(&app)?.join(&inst.slug);
-    let mc_dir = inst_dir.join("mc");
-
-    // 3. Resolve files (CF API) + build the plan through the tested seam.
-    let settings = settings::load(&app).unwrap_or_default();
-    let cf_key = cf_api_key_from(
-        std::env::var(providers::CF_API_KEY_ENV).ok(),
-        settings.curseforge_api_key,
-        option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
-    );
-    let provider = CurseForgeProvider::new(cf_key);
-    let http = ReqwestProviderClient(reqwest::Client::new());
-
-    let plan = resolve_and_build_cf_plan(&provider, &http, &manifest, &mc_dir)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let manual = plan.manual.clone();
-    let mod_entries = plan.mods.clone();
-    let resolve_failed_count = plan.failed.len() as u32;
-    let download_plan = DownloadPlan::new(plan.items);
-
-    // 4. Execute downloads.
-    let client = dl::build_client().map_err(|e| e.to_string())?;
-    let plan_result = dl::execute_plan(&client, &download_plan, &NoOpSink, 8).await;
-
-    let mut installed: u32 = 0;
-    let mut failed: u32 = resolve_failed_count;
-
-    for outcome in &plan_result.outcomes {
-        match &outcome.status {
-            ItemStatus::Ok | ItemStatus::Skipped => installed += 1,
-            ItemStatus::Failed { .. } => failed += 1,
-        }
-    }
-
-    // 5. Extract overrides into mc_dir (reused unchanged).
-    {
-        use std::io::Cursor;
-        let cursor = Cursor::new(&bytes);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .map_err(|e| format!("could not re-open CF zip for overrides: {e}"))?;
-        extract_overrides(&mut archive, &mc_dir).map_err(|e| e.to_string())?;
-    }
-
-    // 6. Merge mod entries into manifest and persist.
-    let mut instance = instances::load_manifest(&app, &inst.slug)?;
-    instance.mods = mod_entries;
-    if let Some(src) = pack_source {
-        instance.source = Some(src);
-    }
-    instances::save_manifest(&app, &inst.slug, &instance)?;
-
-    log::info!(
-        "modpack: import_curseforge_zip done — installed={installed} failed={failed} manual={}",
-        manual.len()
-    );
-    if failed > 0 {
-        log::warn!("modpack: import_curseforge_zip — {failed} file(s) failed (download or resolve)");
-    }
-    if !manual.is_empty() {
-        log::warn!(
-            "modpack: import_curseforge_zip — {} file(s) require manual download",
-            manual.len()
-        );
-    }
-    Ok(CfImportResult {
-        slug: inst.slug,
-        name: inst.name,
-        installed,
-        failed,
-        manual,
-    })
 }
 
+#[async_trait::async_trait]
+impl TaskJob for ImportCfZipJob {
+    async fn run(self: Box<Self>, ctx: &core::task_manager::TaskContext) {
+        use core::modpack::{
+            extract_overrides, promote_staging, remap_to_staging,
+            read_cf_manifest, resolve_and_build_cf_plan,
+        };
+        use std::sync::atomic::Ordering;
+
+        let task_id = self.task_id_cell.load(Ordering::SeqCst);
+        log::info!("modpack: ImportCfZipJob task_id={task_id} starting");
+
+        // --- PLAN ---
+        ctx.enter_planning().await;
+
+        // Parse manifest.json.
+        let manifest = match read_cf_manifest(&self.bytes) {
+            Ok(m) => m,
+            Err(e) => { ctx.finish_failed(e.to_string()).await; return; }
+        };
+
+        let instance_name = self
+            .name_override
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| manifest.name.clone());
+
+        let inst = match instances::create(
+            &self.app,
+            CreateInstanceReq {
+                name: instance_name,
+                minecraft: manifest.minecraft.clone(),
+                loader: instances::Loader {
+                    kind: manifest.loader.kind.clone(),
+                    version: manifest.loader.version.clone(),
+                },
+            },
+        ) {
+            Ok(i) => i,
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+
+        let inst_dir = match core::store::instances_dir(&self.app) {
+            Ok(d) => d.join(&inst.slug),
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+        let mc_dir = inst_dir.join("mc");
+        let staging_dir = staging_dir_for(&inst_dir, task_id);
+
+        // Resolve CF files + build plan.
+        let settings = settings::load(&self.app).unwrap_or_default();
+        let cf_key = cf_api_key_from(
+            std::env::var(providers::CF_API_KEY_ENV).ok(),
+            settings.curseforge_api_key,
+            option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+        );
+        let provider = CurseForgeProvider::new(cf_key);
+        let http = ReqwestProviderClient(reqwest::Client::new());
+
+        let plan = match resolve_and_build_cf_plan(&provider, &http, &manifest, &mc_dir).await {
+            Ok(p) => p,
+            Err(e) => { ctx.finish_failed(e.to_string()).await; return; }
+        };
+
+        let manual = plan.manual.clone();
+        let mod_entries = plan.mods.clone();
+        let resolve_failed_count = plan.failed.len() as u32;
+
+        // Remap to staging.
+        let staged_items = remap_to_staging(plan.items, &mc_dir, &staging_dir);
+        let children = children_from_items(&staged_items);
+
+        // --- DOWNLOAD ---
+        let staged_plan = DownloadPlan::new(staged_items);
+        ctx.enter_downloading(children).await;
+
+        let http_client = match download::build_client() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                ctx.finish_failed(e.to_string()).await;
+                return;
+            }
+        };
+
+        let dl_result = execute_plan_cancellable(
+            &http_client,
+            &staged_plan,
+            &core::download::NoOpSink,
+            8,
+            ctx.cancel_token(),
+        )
+        .await;
+
+        if dl_result.cancelled || ctx.is_cancelled() {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_cancelled().await;
+            return;
+        }
+
+        let (installed, dl_failed, _) = tally_cancellable(&dl_result.outcomes);
+        let failed = resolve_failed_count + dl_failed;
+
+        // --- APPLY ---
+        ctx.enter_applying().await;
+
+        if let Err(e) = promote_staging(&staging_dir, &mc_dir) {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_failed(format!("promote failed: {e}")).await;
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&staging_dir);
+
+        {
+            use std::io::Cursor;
+            if let Err(e) = zip::ZipArchive::new(Cursor::new(&self.bytes))
+                .map_err(|e| format!("could not re-open CF zip for overrides: {e}"))
+                .and_then(|mut archive| {
+                    extract_overrides(&mut archive, &mc_dir).map_err(|e| e.to_string())
+                })
+            {
+                ctx.finish_failed(e).await;
+                return;
+            }
+        }
+
+        let result = match instances::load_manifest(&self.app, &inst.slug) {
+            Ok(mut instance) => {
+                instance.mods = mod_entries;
+                if let Some(src) = self.pack_source {
+                    instance.source = Some(src);
+                }
+                match instances::save_manifest(&self.app, &inst.slug, &instance) {
+                    Ok(_) => Ok(CfImportResult {
+                        slug: inst.slug,
+                        name: inst.name,
+                        installed,
+                        failed,
+                        manual,
+                    }),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        };
+
+        match result {
+            Ok(r) => {
+                log::info!(
+                    "modpack: ImportCfZipJob done — slug='{}' installed={} failed={}",
+                    r.slug, r.installed, r.failed
+                );
+                match serde_json::to_value(&r) {
+                    Ok(v) => ctx.finish_done_with_result(v).await,
+                    Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                }
+            }
+            Err(e) => ctx.finish_failed(e).await,
+        }
+    }
+}
+
+/// Inner fn shared by `import_curseforge_zip` and `install_modpack` (CF branch).
+async fn enqueue_import_cf_zip(
+    app: &tauri::AppHandle,
+    manager: &tauri::State<'_, TaskManager>,
+    bytes: Vec<u8>,
+    name_override: Option<String>,
+    pack_source: Option<instances::Source>,
+) -> Result<u64, String> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let pack_name = modpack::read_cf_manifest(&bytes)
+        .map(|m| m.name)
+        .unwrap_or_else(|_| "Modpack".to_string());
+
+    let task_id_cell: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let task_id_cell_job = Arc::clone(&task_id_cell);
+
+    let id = manager.enqueue(TaskSpec {
+        kind: TaskKind::PackInstall,
+        parent_label: format!("Install {pack_name}"),
+        job: Box::new(ImportCfZipJob {
+            app: app.clone(),
+            task_id_cell: task_id_cell_job,
+            bytes,
+            name_override,
+            pack_source,
+        }),
+    }).await;
+
+    task_id_cell.store(id, Ordering::SeqCst);
+    Ok(id)
+}
+
+/// Enqueue a CurseForge `.zip` import task and return its id synchronously.
 #[tauri::command]
 async fn import_curseforge_zip(
     app: tauri::AppHandle,
+    manager: tauri::State<'_, TaskManager>,
     cf_zip_path: String,
     name_override: Option<String>,
-) -> Result<CfImportResult, String> {
+) -> Result<u64, String> {
     let bytes = std::fs::read(&cf_zip_path)
         .map_err(|e| format!("could not read CurseForge zip '{cf_zip_path}': {e}"))?;
-    import_cf_zip_from_bytes(app, bytes, name_override, None).await
+    enqueue_import_cf_zip(&app, &manager, bytes, name_override, None).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1724,37 +2317,30 @@ pub enum ModpackInstallResult {
 
 /// Install a modpack from a Browse `ProjectSummary` in one click.
 ///
-/// # Flow
-/// 1. Construct the real provider (Modrinth or CurseForge) from `provider`.
-/// 2. Call the C2 resolver (`resolve_pack_file`) → `ResolvedPackFile`.
-/// 3. If `url: None` (CF distribution-disabled) → return `ModpackInstallResult::Manual`
-///    carrying the `page_url` passed in by the frontend. No instance created.
-/// 4. Else: stage the archive to `cache/installers/<file_name>` via a reqwest GET.
-/// 5. Dispatch to the C1 inner fn by provider kind:
-///    - Modrinth → `import_mrpack_from_bytes` → `ModpackInstallResult::Mrpack`
-///    - CurseForge → `import_cf_zip_from_bytes` → `ModpackInstallResult::Curseforge`
+/// Returns the enqueued task id. The terminal `task://update` event carries the
+/// [`ModpackInstallResult`] JSON (Mrpack or Curseforge variant).
 ///
-/// The pack display name is the `name` field of the latest version; if that is
-/// empty, `file_name` is used as `name_override`.
-///
-/// `provider` accepts the `ProviderKind` wire values: `"modrinth"` or `"curseForge"`
-/// (lowercase `"curseforge"` is also accepted as a defensive fallback).
-///
-/// All errors map to `String`.
+/// Special case: if the resolved pack file has `url: None` (CF distribution-
+/// disabled), the command returns `Err("MANUAL:<json>")` immediately — no task
+/// is created. The JSON payload encodes `{ "pageUrl": "...", "fileName": "..." }`
+/// so CP-7 can detect and route the manual case without a task. This preserves
+/// the invariant that `Ok(u64)` always means "a task was enqueued."
 #[tauri::command]
 async fn install_modpack(
     app: tauri::AppHandle,
+    manager: tauri::State<'_, TaskManager>,
     provider: String,
     project_id: String,
     page_url: Option<String>,
     version_id: Option<String>,
-) -> Result<ModpackInstallResult, String> {
+) -> Result<u64, String> {
     use core::modpack::resolve_pack_file;
     use core::providers::ProviderKind;
 
     log::info!("modpack: install_modpack provider={provider} project_id={project_id}");
 
-    // 1. Construct the provider.
+    // 1. Resolve the pack file (network call — must happen before enqueue so we
+    //    can detect the Manual case synchronously).
     let settings = settings::load(&app).unwrap_or_default();
     let target_ver = version_id.as_deref();
     let resolved = match provider.as_str() {
@@ -1782,7 +2368,8 @@ async fn install_modpack(
         }
     };
 
-    // 3. If no URL → manual outcome; no instance created.
+    // 2. If no URL → manual case: no instance, no task. Encode as structured error
+    //    so CP-7 can detect it and open page_url in the browser.
     let url = match resolved.url {
         Some(u) => u,
         None => {
@@ -1790,14 +2377,16 @@ async fn install_modpack(
                 "modpack: install_modpack — pack file '{}' is not distributable; routing to manual",
                 resolved.file_name
             );
-            return Ok(ModpackInstallResult::Manual {
-                page_url: page_url.unwrap_or_else(|| String::new()),
-                file_name: resolved.file_name,
+            let manual_json = serde_json::json!({
+                "pageUrl": page_url.unwrap_or_default(),
+                "fileName": resolved.file_name,
             });
+            return Err(format!("MANUAL:{manual_json}"));
         }
     };
 
-    // 4. Stage archive to cache/installers/<file_name>.
+    // 3. Download the archive to cache/installers/<file_name> synchronously
+    //    (small; determines provider kind for job dispatch).
     let installers_dir = core::store::cache_installers_dir(&app)?;
     let dest_path = installers_dir.join(&resolved.file_name);
     let response = reqwest::Client::new()
@@ -1819,8 +2408,7 @@ async fn install_modpack(
     std::fs::write(&dest_path, &bytes)
         .map_err(|e| format!("could not write pack archive to cache: {e}"))?;
 
-    // Build the provenance record for this Browse-path install.
-    // provider string is normalised to ProviderKind wire form below.
+    // 4. Build provenance record.
     let provider_str = match resolved.provider {
         ProviderKind::Modrinth => "modrinth".to_string(),
         ProviderKind::CurseForge => "curseForge".to_string(),
@@ -1831,27 +2419,19 @@ async fn install_modpack(
         file_id: resolved.version_id.clone(),
         pack_version: resolved.version_name.clone(),
     };
-
-    // Use the version display name as the instance name override when available.
     let name_override: Option<String> = if resolved.version_name.is_empty() {
         None
     } else {
         Some(resolved.version_name.clone())
     };
 
-    // 5. Dispatch to the correct C1 inner fn.
+    // 5. Enqueue the correct job.
     match resolved.provider {
         ProviderKind::Modrinth => {
-            let result =
-                import_mrpack_from_bytes(app, bytes, name_override, Some(source)).await?;
-            log::info!("modpack: install_modpack done — mrpack slug='{}'", result.slug);
-            Ok(ModpackInstallResult::Mrpack(result))
+            enqueue_import_mrpack(&app, &manager, bytes, name_override, Some(source)).await
         }
         ProviderKind::CurseForge => {
-            let result =
-                import_cf_zip_from_bytes(app, bytes, name_override, Some(source)).await?;
-            log::info!("modpack: install_modpack done — curseforge slug='{}'", result.slug);
-            Ok(ModpackInstallResult::Curseforge(result))
+            enqueue_import_cf_zip(&app, &manager, bytes, name_override, Some(source)).await
         }
     }
 }
@@ -1880,57 +2460,238 @@ pub struct PackUpdateResult {
     pub manual: Vec<core::modpack::CfManualFile>,
 }
 
-/// Update an already-installed modpack instance to a newer (or user-chosen) version.
+// ---------------------------------------------------------------------------
+// CP-3: UpdateModpackJob
+// ---------------------------------------------------------------------------
+
+/// [`TaskJob`] that updates an existing modpack instance to a new version.
 ///
-/// # Flow
-/// 1. `instances::load_manifest` — if `instance.source` is `None`, return `Err`
-///    (instance was not installed via Browse; has no pack project id to re-resolve from).
-/// 2. Resolve the target version via `modpack::resolve_pack_file` using
-///    `source.provider` + `source.project_id` + optional `version_id`.
-///    If the resolved `url` is `None` (pack file not distributable at the pack level),
-///    return `Err` — no manual variant at the update level.
-/// 3. Stage the archive to `cache/installers/<file_name>` via a reqwest GET.
-/// 4. Build the new plan:
-///    - Modrinth: `modpack::read_mrpack(bytes, mc_dir)` → `PackPlan`.
-///    - CurseForge: `modpack::read_cf_manifest(bytes)` + `modpack::resolve_and_build_cf_plan`.
-/// 5. Reconcile: `modpack::plan_pack_update(&instance.mods, &plan.mods)` →
-///    `{ to_remove, merged }`.
-/// 6. Delete removed pack jars from `mc/mods/` (both `<name>` and `<name>.disabled`).
-///    User jars are never touched.
-/// 7. `download::execute_plan` — download the new plan items.
-/// 8. `modpack::extract_overrides` — overlay `overrides/` (pack wins on config collisions).
-/// 9. Bump `instance.mods = merged`, `instance.source.file_id = resolved.version_id`,
-///    `instance.source.pack_version = resolved.version_name`. `instances::save_manifest`.
-/// 10. Return `PackUpdateResult`.
+/// Stage-and-promote pattern identical to the install jobs:
+/// - PLAN: load instance, resolve target version + download archive, build plan.
+/// - DOWNLOAD: execute into staging with cancel support.
+/// - APPLY: delete removed mods, promote staging, extract overrides, save manifest.
+struct UpdateModpackJob {
+    app: tauri::AppHandle,
+    task_id_cell: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    slug: String,
+    // Pre-fetched at enqueue time (network call in command before enqueue).
+    bytes: Vec<u8>,
+    resolved_version_id: String,
+    resolved_version_name: String,
+    resolved_provider: core::providers::ProviderKind,
+}
+
+#[async_trait::async_trait]
+impl TaskJob for UpdateModpackJob {
+    async fn run(self: Box<Self>, ctx: &core::task_manager::TaskContext) {
+        use core::modpack::{
+            extract_overrides, plan_pack_update, promote_staging, remap_to_staging,
+            resolve_and_build_cf_plan, read_cf_manifest, read_mrpack,
+        };
+        use core::providers::ProviderKind;
+        use std::sync::atomic::Ordering;
+
+        let task_id = self.task_id_cell.load(Ordering::SeqCst);
+        log::info!("modpack: UpdateModpackJob task_id={task_id} instance={}", self.slug);
+
+        // --- PLAN ---
+        ctx.enter_planning().await;
+
+        // Load instance + require source.
+        let mut instance = match instances::load_manifest(&self.app, &self.slug) {
+            Ok(i) => i,
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+        if instance.source.is_none() {
+            ctx.finish_failed(
+                "instance has no pack source — not updatable (installed locally)".to_string()
+            ).await;
+            return;
+        }
+
+        let inst_dir = match core::store::instances_dir(&self.app) {
+            Ok(d) => d.join(&self.slug),
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+        let mc_dir = inst_dir.join("mc");
+        let staging_dir = staging_dir_for(&inst_dir, task_id);
+
+        // Build new plan from the pre-fetched bytes.
+        let settings = settings::load(&self.app).unwrap_or_default();
+        let (new_mod_entries, download_items, manual, resolve_failed_count) =
+            match self.resolved_provider {
+                ProviderKind::Modrinth => {
+                    match read_mrpack(&self.bytes, &mc_dir) {
+                        Ok((_manifest, plan)) => (plan.mods, plan.items, vec![], 0u32),
+                        Err(e) => { ctx.finish_failed(e.to_string()).await; return; }
+                    }
+                }
+                ProviderKind::CurseForge => {
+                    let cf_key = cf_api_key_from(
+                        std::env::var(providers::CF_API_KEY_ENV).ok(),
+                        settings.curseforge_api_key.clone(),
+                        option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+                    );
+                    let manifest = match read_cf_manifest(&self.bytes) {
+                        Ok(m) => m,
+                        Err(e) => { ctx.finish_failed(e.to_string()).await; return; }
+                    };
+                    let provider = CurseForgeProvider::new(cf_key);
+                    let http = ReqwestProviderClient(reqwest::Client::new());
+                    match resolve_and_build_cf_plan(&provider, &http, &manifest, &mc_dir).await {
+                        Ok(plan) => {
+                            let failed_count = plan.failed.len() as u32;
+                            (plan.mods, plan.items, plan.manual, failed_count)
+                        }
+                        Err(e) => { ctx.finish_failed(e.to_string()).await; return; }
+                    }
+                }
+            };
+
+        // Reconcile mods.
+        let reconcile = plan_pack_update(&instance.mods, &new_mod_entries);
+
+        // Counts (computed before consuming reconcile).
+        let removed_count = reconcile.to_remove.len() as u32;
+        let kept_count = reconcile.merged.iter().filter(|m| !m.from_pack).count() as u32;
+        let old_pack_names: std::collections::HashSet<&str> = instance
+            .mods
+            .iter()
+            .filter(|m| m.from_pack)
+            .map(|m| m.file_name.as_str())
+            .collect();
+        let added_count = reconcile
+            .merged
+            .iter()
+            .filter(|m| m.from_pack && !old_pack_names.contains(m.file_name.as_str()))
+            .count() as u32;
+
+        // Delete removed pack jars immediately (before downloading; removal is safe
+        // even on cancel because they were already superseded by the new plan).
+        let mods_dir = mc_dir.join("mods");
+        for entry in &reconcile.to_remove {
+            instances::remove_mod_from_disk_files(&mods_dir, &entry.file_name);
+        }
+
+        // Remap to staging.
+        let staged_items = remap_to_staging(download_items, &mc_dir, &staging_dir);
+        let children = children_from_items(&staged_items);
+
+        // --- DOWNLOAD ---
+        let staged_plan = DownloadPlan::new(staged_items);
+        ctx.enter_downloading(children).await;
+
+        let http_client = match download::build_client() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                ctx.finish_failed(e.to_string()).await;
+                return;
+            }
+        };
+
+        let dl_result = execute_plan_cancellable(
+            &http_client,
+            &staged_plan,
+            &core::download::NoOpSink,
+            8,
+            ctx.cancel_token(),
+        )
+        .await;
+
+        if dl_result.cancelled || ctx.is_cancelled() {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_cancelled().await;
+            return;
+        }
+
+        let (_, dl_failed, _) = tally_cancellable(&dl_result.outcomes);
+        let download_failed = resolve_failed_count + dl_failed;
+
+        // --- APPLY ---
+        ctx.enter_applying().await;
+
+        if let Err(e) = promote_staging(&staging_dir, &mc_dir) {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_failed(format!("promote failed: {e}")).await;
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&staging_dir);
+
+        // Extract overrides (pack wins on config/options collisions).
+        {
+            use std::io::Cursor;
+            if let Err(e) = zip::ZipArchive::new(Cursor::new(&self.bytes))
+                .map_err(|e| format!("could not re-open pack archive for overrides: {e}"))
+                .and_then(|mut archive| {
+                    extract_overrides(&mut archive, &mc_dir).map_err(|e| e.to_string())
+                })
+            {
+                ctx.finish_failed(e).await;
+                return;
+            }
+        }
+
+        // Write updated manifest.
+        instance.mods = reconcile.merged;
+        {
+            let src = instance.source.as_mut()
+                .expect("source must be Some — checked at plan step");
+            src.file_id = self.resolved_version_id.clone();
+            src.pack_version = self.resolved_version_name.clone();
+        }
+        if let Err(e) = instances::save_manifest(&self.app, &self.slug, &instance) {
+            ctx.finish_failed(e).await;
+            return;
+        }
+
+        let result = PackUpdateResult {
+            added: added_count,
+            removed: removed_count,
+            kept: kept_count,
+            failed: download_failed,
+            manual,
+        };
+
+        log::info!(
+            "modpack: UpdateModpackJob done — added={} removed={} kept={} failed={}",
+            result.added, result.removed, result.kept, result.failed
+        );
+
+        match serde_json::to_value(&result) {
+            Ok(v) => ctx.finish_done_with_result(v).await,
+            Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+        }
+    }
+}
+
+/// Update an existing modpack instance. Resolves + downloads the archive
+/// synchronously, then enqueues the job and returns the task id.
 ///
-/// All errors map to `String`.
+/// The network resolution + archive download happen in the command body
+/// (before enqueue) so that errors surface immediately. The heavy FS work
+/// (plan execution, promote, overrides) runs in the task.
 #[tauri::command]
 async fn update_modpack(
     app: tauri::AppHandle,
+    manager: tauri::State<'_, TaskManager>,
     slug: String,
     version_id: Option<String>,
-) -> Result<PackUpdateResult, String> {
-    use core::download::{self as dl, DownloadPlan, ItemStatus, NoOpSink};
-    use core::modpack::{extract_overrides, plan_pack_update, resolve_pack_file};
-    use core::providers::ProviderKind;
+) -> Result<u64, String> {
+    use core::modpack::resolve_pack_file;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    log::info!("modpack: update_modpack instance={slug}");
+    log::info!("modpack: update_modpack enqueue instance={slug}");
 
-    // 1. Load instance + require source.
-    let mut instance = instances::load_manifest(&app, &slug)?;
+    // Load instance to get provider info (needed for resolve).
+    let instance = instances::load_manifest(&app, &slug)?;
     let source = instance
         .source
-        .as_ref()
         .ok_or_else(|| {
             "instance has no pack source — not updatable (installed locally)".to_string()
-        })?
-        .clone();
+        })?;
 
-    // Derive mc_dir from the instance directory.
-    let inst_dir = core::store::instances_dir(&app)?.join(&slug);
-    let mc_dir = inst_dir.join("mc");
-
-    // 2. Resolve the target pack file.
     let settings = settings::load(&app).unwrap_or_default();
     let target_ver = version_id.as_deref();
 
@@ -1959,12 +2720,11 @@ async fn update_modpack(
         }
     };
 
-    // If the pack archive itself is not distributable, error out (no manual variant for update).
     let url = resolved.url.ok_or_else(|| {
         "pack archive is not distributable — cannot update automatically".to_string()
     })?;
 
-    // 3. Stage archive to cache/installers/<file_name>.
+    // Download the archive to cache/installers.
     let installers_dir = core::store::cache_installers_dir(&app)?;
     let dest_path = installers_dir.join(&resolved.file_name);
     let response = reqwest::Client::new()
@@ -1986,109 +2746,25 @@ async fn update_modpack(
     std::fs::write(&dest_path, &bytes)
         .map_err(|e| format!("could not write pack archive to cache: {e}"))?;
 
-    // 4. Build the new plan.
-    let (new_mod_entries, download_items, manual, resolve_failed_count) = match resolved.provider {
-        ProviderKind::Modrinth => {
-            let (_manifest, plan) =
-                core::modpack::read_mrpack(&bytes, &mc_dir).map_err(|e| e.to_string())?;
-            (plan.mods, plan.items, vec![], 0u32)
-        }
-        ProviderKind::CurseForge => {
-            let cf_key = cf_api_key_from(
-                std::env::var(providers::CF_API_KEY_ENV).ok(),
-                settings.curseforge_api_key.clone(),
-                option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
-            );
-            let manifest = core::modpack::read_cf_manifest(&bytes).map_err(|e| e.to_string())?;
-            let provider = CurseForgeProvider::new(cf_key);
-            let http = ReqwestProviderClient(reqwest::Client::new());
-            let plan =
-                core::modpack::resolve_and_build_cf_plan(&provider, &http, &manifest, &mc_dir)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            let failed_count = plan.failed.len() as u32;
-            (plan.mods, plan.items, plan.manual, failed_count)
-        }
-    };
+    let task_id_cell: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let task_id_cell_job = Arc::clone(&task_id_cell);
 
-    // 5. Reconcile mods.
-    let reconcile = plan_pack_update(&instance.mods, &new_mod_entries);
-    log::info!(
-        "modpack: update_modpack reconcile — to_remove={} merged={}",
-        reconcile.to_remove.len(),
-        reconcile.merged.len()
-    );
+    let id = manager.enqueue(TaskSpec {
+        kind: TaskKind::PackUpdate,
+        parent_label: format!("Update {slug}"),
+        job: Box::new(UpdateModpackJob {
+            app: app.clone(),
+            task_id_cell: task_id_cell_job,
+            slug: slug.clone(),
+            bytes,
+            resolved_version_id: resolved.version_id,
+            resolved_version_name: resolved.version_name,
+            resolved_provider: resolved.provider,
+        }),
+    }).await;
 
-    // Compute counts before consuming reconcile.
-    let removed_count = reconcile.to_remove.len() as u32;
-    let kept_count = reconcile.merged.iter().filter(|m| !m.from_pack).count() as u32;
-    let old_pack_names: std::collections::HashSet<&str> = instance
-        .mods
-        .iter()
-        .filter(|m| m.from_pack)
-        .map(|m| m.file_name.as_str())
-        .collect();
-    let added_count = reconcile
-        .merged
-        .iter()
-        .filter(|m| m.from_pack && !old_pack_names.contains(m.file_name.as_str()))
-        .count() as u32;
-
-    // 6. Delete removed pack jars from mc/mods/ (enabled + disabled).
-    let mods_dir = mc_dir.join("mods");
-    for entry in &reconcile.to_remove {
-        instances::remove_mod_from_disk_files(&mods_dir, &entry.file_name);
-    }
-
-    // 7. Execute download plan.
-    let download_plan = DownloadPlan::new(download_items);
-    let http_client = dl::build_client().map_err(|e| e.to_string())?;
-    let plan_result = dl::execute_plan(&http_client, &download_plan, &NoOpSink, 8).await;
-
-    let mut download_failed: u32 = resolve_failed_count;
-    for outcome in &plan_result.outcomes {
-        if let ItemStatus::Failed { .. } = &outcome.status {
-            download_failed += 1;
-        }
-    }
-
-    // 8. Extract overrides (pack wins on config/options collisions).
-    {
-        use std::io::Cursor;
-        let cursor = Cursor::new(&bytes);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .map_err(|e| format!("could not re-open pack archive for overrides: {e}"))?;
-        extract_overrides(&mut archive, &mc_dir).map_err(|e| e.to_string())?;
-    }
-
-    // 9. Write updated manifest.
-    // Mutate `instance` directly — already loaded at step 1. A second load_manifest
-    // would risk reading a stale on-disk state written by a concurrent operation,
-    // discarding the reconcile result. Source is guaranteed Some (hard-errored at step 1).
-    instance.mods = reconcile.merged;
-    {
-        let src = instance
-            .source
-            .as_mut()
-            .expect("source must be Some — checked at step 1");
-        src.file_id = resolved.version_id;
-        src.pack_version = resolved.version_name;
-    }
-    instances::save_manifest(&app, &slug, &instance)?;
-
-    log::info!(
-        "modpack: update_modpack done — added={added_count} removed={removed_count} kept={kept_count} failed={download_failed}"
-    );
-    if download_failed > 0 {
-        log::warn!("modpack: update_modpack — {download_failed} file(s) failed (download or resolve)");
-    }
-    Ok(PackUpdateResult {
-        added: added_count,
-        removed: removed_count,
-        kept: kept_count,
-        failed: download_failed,
-        manual,
-    })
+    task_id_cell.store(id, Ordering::SeqCst);
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -2153,6 +2829,15 @@ pub fn run() {
                 });
             let shared: SharedAccountStore = Arc::new(tokio::sync::Mutex::new(store));
             app.manage(shared);
+
+            // Download Manager: serial FIFO task queue. Constructed here (not in
+            // run()) because its observer needs the AppHandle to emit task://*
+            // events. `new` spawns the single worker task on the Tauri runtime.
+            let task_observer = Arc::new(TauriTaskObserver {
+                app: app.handle().clone(),
+            });
+            let task_manager = TaskManager::new(task_observer);
+            app.manage(task_manager);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2174,6 +2859,8 @@ pub fn run() {
             list_running,
             get_run_state,
             get_run_logs,
+            list_tasks,
+            cancel_task,
             begin_login,
             cancel_login,
             get_account,

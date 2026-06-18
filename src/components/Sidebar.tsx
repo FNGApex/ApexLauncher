@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { LayoutGrid, Compass, Settings as Cog, Box, LogIn, LogOut, Loader2, X } from "lucide-react";
+import { LayoutGrid, Compass, Settings as Cog, Box, LogIn, LogOut, Loader2, X, Gamepad2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   beginLogin,
@@ -11,6 +11,8 @@ import {
   listenDeviceCode,
   type DeviceCodePayload,
 } from "@/lib/ipc";
+import { DownloadManagerButton } from "@/components/DownloadManager";
+import { useAppStore } from "@/lib/store";
 
 const NAV = [
   { to: "/instances", label: "Instances", icon: LayoutGrid },
@@ -116,6 +118,14 @@ export function Sidebar() {
           </NavLink>
         ))}
       </nav>
+
+      {/* Running indicator */}
+      <RunningIndicator />
+
+      {/* Download Manager trigger */}
+      <div className="border-t border-border px-3 py-2">
+        <DownloadManagerButton />
+      </div>
 
       {/* Bottom-left auth control */}
       <div className="border-t border-border px-3 py-3">
@@ -247,6 +257,31 @@ function LoggedOutControl({
         )}
         {inLoginFlow ? "Signing in…" : "Sign in with Microsoft"}
       </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Running indicator — shows a live count of active (preparing/running) instances
+// ---------------------------------------------------------------------------
+
+function RunningIndicator() {
+  const runs = useAppStore((s) => s.runs);
+  const activeCount = [...runs.values()].filter(
+    (r) => r.status === "preparing" || r.status === "running",
+  ).length;
+
+  if (activeCount === 0) return null;
+
+  return (
+    <div className="px-3 pb-1">
+      <div className="flex items-center gap-2 rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-2 text-xs text-green-400">
+        <Gamepad2 className="size-3.5 shrink-0" />
+        <span className="flex items-center gap-1.5">
+          <span className="size-1.5 animate-pulse rounded-full bg-green-400" />
+          {activeCount} running
+        </span>
+      </div>
     </div>
   );
 }

@@ -4,3 +4,4 @@
 - 2026-06-14 storage-auth-reorg-c2 — "Wire materialization into launch (slice C2)" — *(closed 2026-06-14)*
 - 2026-06-17 phase6-modpack-next-slice-cd — "Phase 6 next: modpack slice C (browse install) or D (pack update)" — *(closed 2026-06-17)*
 - 2026-06-17 modpack-import-c-name-override — "install_modpack name_override=None; pack version name unused" — *(closed 2026-06-17)*
+- 2026-06-18 cp9-decode-manual-install — "Frontend must decode install_modpack Err(MANUAL:) in CP-9" — *(closed 2026-06-18)*
