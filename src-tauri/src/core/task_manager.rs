@@ -35,15 +35,18 @@ use crate::core::download::CancelToken;
 // Task model
 // ---------------------------------------------------------------------------
 
-/// The kind of work a task performs. Serialized as a lowercase tag for the
-/// frontend. CP-3/CP-4 add the real `PackInstall` / `PackUpdate` / `ModAdd` /
-/// `ModUpdate` variants; the `Synthetic` variant exists for tests + this
-/// checkpoint's no-real-ops contract.
+/// The kind of work a task performs. Serialized as a camelCase tag for the
+/// frontend. CP-4 adds `ModAdd` / `ModUpdate`; the `Synthetic` variant exists
+/// for tests + the no-real-ops contract from CP-2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskKind {
     /// Test / placeholder work with no real side effects.
     Synthetic,
+    /// A new modpack install (import_mrpack, import_curseforge_zip, install_modpack).
+    PackInstall,
+    /// An update to an already-installed modpack (update_modpack).
+    PackUpdate,
 }
 
 /// Lifecycle status of a task. Matches the design's state diagram.
@@ -90,7 +93,7 @@ pub struct ChildItem {
 }
 
 /// A snapshot of one task's full state. Cloned out of the snapshot for reads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     /// Unique, monotonic task id (assigned at enqueue).
@@ -110,6 +113,12 @@ pub struct Task {
     pub done: u32,
     /// Total number of children (set once the plan is built).
     pub total: u32,
+    /// Terminal result payload set by [`TaskContext::finish_done_with_result`].
+    /// `None` until the task reaches `Done` via that method; stays `None` for
+    /// tasks that finish via `finish_done` (no result), `finish_failed`, or
+    /// `finish_cancelled`. Serialized as `null` when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +251,23 @@ impl TaskContext {
 
     /// Terminal: `Done`.
     pub async fn finish_done(&self) {
+        self.set_status(TaskStatus::Done).await;
+    }
+
+    /// Terminal: `Done` with a result payload attached to the task snapshot.
+    ///
+    /// The result is set before the status transitions to `Done`, so the
+    /// `task://update` event the observer fires carries both the terminal status
+    /// and the payload. The frontend CP-7 reads `task.result` on the Done event.
+    ///
+    /// Lock discipline: write lock taken synchronously, dropped before the status
+    /// notification (observer call). No lock is held across `.await`.
+    pub async fn finish_done_with_result(&self, value: serde_json::Value) {
+        // Write the result into the snapshot, then transition to Done.
+        self.with_snapshot_mut(|t| {
+            t.result = Some(value);
+        })
+        .await;
         self.set_status(TaskStatus::Done).await;
     }
 
@@ -378,6 +404,7 @@ impl TaskManager {
             current_child: None,
             done: 0,
             total: 0,
+            result: None,
         };
         {
             let mut guard = self.snapshot.write().await;

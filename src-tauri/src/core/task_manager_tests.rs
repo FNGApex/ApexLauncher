@@ -412,6 +412,115 @@ async fn snapshot_reflects_current_child_and_counts() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// CP-3 tests: TaskKind variants + result carrier
+// ---------------------------------------------------------------------------
+
+/// `PackInstall` and `PackUpdate` are distinct from `Synthetic` and from each other.
+#[test]
+fn cp3_task_kind_variants_are_distinct() {
+    assert_ne!(TaskKind::PackInstall, TaskKind::Synthetic);
+    assert_ne!(TaskKind::PackUpdate, TaskKind::Synthetic);
+    assert_ne!(TaskKind::PackInstall, TaskKind::PackUpdate);
+}
+
+/// `TaskKind::PackInstall` serialises as the camelCase tag `"packInstall"` for the frontend.
+#[test]
+fn cp3_pack_install_kind_serializes_camel_case() {
+    let v = serde_json::to_value(TaskKind::PackInstall).expect("serialize");
+    assert_eq!(v, serde_json::json!("packInstall"));
+}
+
+/// `TaskKind::PackUpdate` serialises as `"packUpdate"`.
+#[test]
+fn cp3_pack_update_kind_serializes_camel_case() {
+    let v = serde_json::to_value(TaskKind::PackUpdate).expect("serialize");
+    assert_eq!(v, serde_json::json!("packUpdate"));
+}
+
+/// `finish_done_with_result` attaches an arbitrary JSON payload to the task snapshot.
+/// The terminal `task://update` (observer fires on the `Done` Task) carries the result.
+#[tokio::test]
+async fn cp3_finish_done_with_result_attaches_payload() {
+    let obs = Arc::new(CapturingObserver::default());
+    let mgr = TaskManager::new(obs.clone());
+
+    // Use a synthetic job that calls finish_done_with_result.
+    struct ResultJob;
+    #[async_trait::async_trait]
+    impl TaskJob for ResultJob {
+        async fn run(self: Box<Self>, ctx: &TaskContext) {
+            ctx.enter_planning().await;
+            ctx.enter_downloading(vec![]).await;
+            ctx.enter_applying().await;
+            let payload = serde_json::json!({ "slug": "my-pack", "installed": 3 });
+            ctx.finish_done_with_result(payload).await;
+        }
+    }
+
+    let spec = TaskSpec {
+        kind: TaskKind::PackInstall,
+        parent_label: "My Pack".to_owned(),
+        job: Box::new(ResultJob),
+    };
+    let id = mgr.enqueue(spec).await;
+
+    wait_until(&mgr, |s| find(s, id).status == TaskStatus::Done, "→ Done").await;
+
+    let snap = mgr.list().await;
+    let task = find(&snap, id);
+    assert_eq!(task.kind, TaskKind::PackInstall);
+    let result = task.result.as_ref().expect("result must be set after finish_done_with_result");
+    assert_eq!(result["slug"], "my-pack", "slug field must survive round-trip");
+    assert_eq!(result["installed"], 3, "installed count must survive round-trip");
+}
+
+/// The terminal Done task emitted via the observer (→ `task://update`) carries the result field.
+#[tokio::test]
+async fn cp3_terminal_update_carries_result_field() {
+    struct ResultCapture {
+        tasks: StdMutex<Vec<Task>>,
+    }
+    impl TaskObserver for ResultCapture {
+        fn status_changed(&self, task: &Task) {
+            self.tasks.lock().unwrap().push(task.clone());
+        }
+    }
+
+    let obs = Arc::new(ResultCapture { tasks: StdMutex::new(Vec::new()) });
+    let mgr = TaskManager::new(obs.clone());
+
+    struct ResultJob2;
+    #[async_trait::async_trait]
+    impl TaskJob for ResultJob2 {
+        async fn run(self: Box<Self>, ctx: &TaskContext) {
+            ctx.enter_planning().await;
+            ctx.enter_downloading(vec![]).await;
+            ctx.enter_applying().await;
+            ctx.finish_done_with_result(serde_json::json!({ "slug": "cf-pack" })).await;
+        }
+    }
+
+    let spec = TaskSpec {
+        kind: TaskKind::PackUpdate,
+        parent_label: "CF Pack".to_owned(),
+        job: Box::new(ResultJob2),
+    };
+    let id = mgr.enqueue(spec).await;
+
+    wait_until(&mgr, |s| find(s, id).status == TaskStatus::Done, "→ Done").await;
+
+    let all_tasks = obs.tasks.lock().unwrap().clone();
+    let done_task = all_tasks.iter()
+        .filter(|t| t.id == id)
+        .find(|t| t.status == TaskStatus::Done)
+        .expect("observer must have received a Done task");
+
+    let result = done_task.result.as_ref()
+        .expect("Done task emitted by observer must carry the result");
+    assert_eq!(result["slug"], "cf-pack");
+}
+
 /// A status change observer fires for the full lifecycle (→ task://update).
 #[tokio::test]
 async fn observer_sees_full_lifecycle() {
