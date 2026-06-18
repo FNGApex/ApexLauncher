@@ -6,7 +6,6 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { listen } from "@tauri-apps/api/event";
 import {
   AlertCircle,
   ArrowLeft,
@@ -38,21 +37,13 @@ import {
   updateMod,
   updateModpack,
   type FolderMod,
-  type LaunchLogPayload,
-  type LaunchExitPayload,
-  type InstallLogPayload,
   type ModEntry,
   type ProjectSummary,
   type ProviderCommandError,
-  LAUNCH_LOG_EVENT,
-  LAUNCH_EXIT_EVENT,
-  INSTALL_LOG_EVENT,
 } from "@/lib/ipc";
+import { useAppStore } from "@/lib/store";
 import { SlideOver } from "@/components/SlideOver";
 import { ProviderBadge } from "@/components/ProviderBadge";
-
-/** Max log lines kept in the console buffer before oldest are dropped. */
-const MAX_LOG_LINES = 500;
 
 const PAGE_LIMIT = 20;
 const DEBOUNCE_MS = 400;
@@ -70,80 +61,45 @@ export function InstanceDetail() {
     enabled: !!slug,
   });
 
-  const [running, setRunning] = useState(false);
+  // Run state + logs come from the app-level store (populated by AppShell listeners).
+  // Reading from here survives navigation: navigate away and back shows live status
+  // and replayed logs including any exit that fired while the user was on another page.
+  const runState = useAppStore((s) => (slug ? s.runs.get(slug) : undefined));
+  const runLogLines = useAppStore((s) => (slug ? s.runLogs.get(slug) : undefined));
+
+  // An instance is active while status is "preparing" or "running".
+  const running = runState?.status === "preparing" || runState?.status === "running";
+
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
-  const [logLines, setLogLines] = useState<string[]>([]);
   const [slideOverOpen, setSlideOverOpen] = useState(false);
   const consoleRef = useRef<HTMLPreElement>(null);
 
-  // Subscribe to launch://log, launch://exit, and install://log for this instance's slug.
-  useEffect(() => {
-    if (!slug) return;
-
-    let cancelled = false;
-    let unlistenLog: (() => void) | undefined;
-    let unlistenExit: (() => void) | undefined;
-    let unlistenInstall: (() => void) | undefined;
-
-    listen<LaunchLogPayload>(LAUNCH_LOG_EVENT, (event) => {
-      if (event.payload.instanceId !== slug) return;
-      setLogLines((prev) => {
-        const next = [...prev, `[${event.payload.stream}] ${event.payload.line}`];
-        return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next;
-      });
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenLog = fn;
-    }).catch(console.error);
-
-    listen<LaunchExitPayload>(LAUNCH_EXIT_EVENT, (event) => {
-      if (event.payload.instanceId !== slug) return;
-      setRunning(false);
-      const code = event.payload.code;
-      setLogLines((prev) => [
-        ...prev,
-        `[launcher] process exited (code ${code ?? "unknown"})`,
-      ]);
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenExit = fn;
-    }).catch(console.error);
-
-    // install://log carries no instanceId — the installer runs at most once at a
-    // time, so all lines are attributed to the instance being launched right now.
-    listen<InstallLogPayload>(INSTALL_LOG_EVENT, (event) => {
-      setLogLines((prev) => {
-        const next = [...prev, `[install:${event.payload.stream}] ${event.payload.line}`];
-        return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next;
-      });
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenInstall = fn;
-    }).catch(console.error);
-
-    return () => {
-      cancelled = true;
-      unlistenLog?.();
-      unlistenExit?.();
-      unlistenInstall?.();
-    };
-  }, [slug]);
-
-  // Auto-scroll console to bottom on new lines.
+  // Auto-scroll console to bottom when new log lines arrive.
   useEffect(() => {
     const el = consoleRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [logLines]);
+  }, [runLogLines]);
 
   async function handleLaunch() {
     if (!slug) return;
     setLaunchError(null);
+
+    // Warn when another pack is already running (2nd-launch warning).
+    const runs = useAppStore.getState().runs;
+    const activeRuns = [...runs.values()].filter(
+      (r) => r.status === "preparing" || r.status === "running",
+    );
+    if (activeRuns.length >= 1) {
+      const confirmed = window.confirm(
+        `${activeRuns.length} instance${activeRuns.length !== 1 ? "s are" : " is"} already running. Launch another?`,
+      );
+      if (!confirmed) return;
+    }
+
     setLaunching(true);
-    setLogLines([]);
     try {
       await launchInstance(slug);
-      setRunning(true);
     } catch (err) {
       setLaunchError(String(err));
     } finally {
@@ -245,7 +201,7 @@ export function InstanceDetail() {
             />
           </dl>
 
-          {(running || logLines.length > 0) && (
+          {(running || (runLogLines && runLogLines.length > 0)) && (
             <section className="mb-8">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-muted">
                 Console
@@ -254,9 +210,9 @@ export function InstanceDetail() {
                 ref={consoleRef}
                 className="h-64 overflow-y-auto rounded-lg border border-border bg-surface p-3 font-mono text-xs text-foreground"
               >
-                {logLines.length === 0
+                {!runLogLines || runLogLines.length === 0
                   ? "Waiting for output…"
-                  : logLines.join("\n")}
+                  : runLogLines.map((l) => `[${l.stream}] ${l.line}`).join("\n")}
               </pre>
             </section>
           )}

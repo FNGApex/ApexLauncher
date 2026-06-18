@@ -394,7 +394,29 @@ function ModpackCard({ pack }: ModpackCardProps) {
       qc.invalidateQueries({ queryKey: ["instances"] });
     },
     onError: (err) => {
-      setInstallError(err instanceof Error ? err.message : String(err));
+      const raw = err instanceof Error ? err.message : String(err);
+      // Distribution-disabled pack: backend returns Err("MANUAL:<json>") where
+      // json is {"pageUrl":"...","fileName":"..."}. Open the page and show a
+      // targeted message instead of surfacing the raw error string.
+      if (raw.startsWith("MANUAL:")) {
+        try {
+          const payload = JSON.parse(raw.slice("MANUAL:".length)) as {
+            pageUrl?: string;
+            fileName?: string;
+          };
+          if (payload.pageUrl) {
+            openUrl(payload.pageUrl).catch(console.error);
+          }
+          setInstallError(
+            `This pack cannot be auto-downloaded. Opening the page${payload.fileName ? ` to download "${payload.fileName}"` : ""} manually.`,
+          );
+        } catch {
+          // JSON parse failed — fall through to generic error display.
+          setInstallError(raw);
+        }
+        return;
+      }
+      setInstallError(raw);
     },
   });
 

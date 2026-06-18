@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Outlet } from "react-router-dom";
 import { Sidebar } from "@/components/Sidebar";
+import { Toasts } from "@/components/Toasts";
 import {
   LAUNCH_LOG_EVENT,
   LAUNCH_EXIT_EVENT,
@@ -140,6 +141,7 @@ export function AppShell() {
       <main className="flex-1 overflow-y-auto">
         <Outlet />
       </main>
+      <Toasts />
     </div>
   );
 }
