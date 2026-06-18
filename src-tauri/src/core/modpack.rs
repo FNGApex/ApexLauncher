@@ -1105,6 +1105,82 @@ pub fn plan_pack_update(
     PackUpdatePlan { to_remove, merged }
 }
 
+// ── CP-3: Staging helpers ────────────────────────────────────────────────────
+
+/// Remap a list of [`DownloadItem`]s so their `dest` paths point into
+/// `staging_dir` instead of `target_dir`.
+///
+/// Each item whose `dest` begins with `target_dir` has that prefix replaced by
+/// `staging_dir`, preserving the relative sub-path. Items whose `dest` does NOT
+/// begin with `target_dir` (e.g. shared cache items) are returned unchanged —
+/// those download in-place and are not staged.
+///
+/// Use this before passing a plan's items to [`execute_plan_cancellable`] so
+/// instance-bound files land in the staging dir and can be atomically promoted
+/// or discarded after downloads finish.
+pub fn remap_to_staging(
+    items: Vec<DownloadItem>,
+    target_dir: &Path,
+    staging_dir: &Path,
+) -> Vec<DownloadItem> {
+    items
+        .into_iter()
+        .map(|mut item| {
+            if let Ok(rel) = item.dest.strip_prefix(target_dir) {
+                item.dest = staging_dir.join(rel);
+            }
+            item
+        })
+        .collect()
+}
+
+// ── CP-3: Stage-and-promote helper ───────────────────────────────────────────
+
+/// Promote all files from `staging_dir` into `target_dir` using atomic renames.
+///
+/// The two directories **must reside on the same volume** so that `rename` is
+/// atomic at the OS level. This is guaranteed by choosing the staging dir as a
+/// sibling of the instance dir (e.g. `<instance_dir>/.staging-<task_id>/`).
+///
+/// For each file found (recursively) under `staging_dir`, the corresponding
+/// `target_dir`-relative path is computed and the file is renamed into place.
+/// Parent directories under `target_dir` are created as needed.
+///
+/// On success `staging_dir` is left empty (files moved, not copied).
+/// The caller is responsible for removing the empty staging dir afterwards
+/// (success path) or `remove_dir_all` on the full staging dir (cancel/fail path).
+///
+/// # Errors
+/// Returns the first I/O error encountered during rename or dir-creation.
+pub fn promote_staging(staging_dir: &Path, target_dir: &Path) -> Result<(), io::Error> {
+    promote_staging_recursive(staging_dir, staging_dir, target_dir)
+}
+
+fn promote_staging_recursive(
+    root: &Path,
+    current: &Path,
+    target_dir: &Path,
+) -> Result<(), io::Error> {
+    for entry in std::fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(root).expect("path is under root");
+        let dest = target_dir.join(rel);
+
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            std::fs::create_dir_all(&dest)?;
+            promote_staging_recursive(root, &path, target_dir)?;
+        } else {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&path, &dest)?;
+        }
+    }
+    Ok(())
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

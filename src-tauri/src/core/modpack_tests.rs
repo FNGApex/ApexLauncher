@@ -1697,6 +1697,123 @@ fn d3_unchanged_pack_mod_stays_in_merged() {
 
 /// Mixed scenario: user mod kept, pack mod vanished, pack mod unchanged, new pack mod added.
 /// Verifies `merged` contains exactly the right set.
+// ── CP-3: stage_and_promote ──────────────────────────────────────────────────
+
+/// `remap_to_staging` replaces the `target_dir` prefix with `staging_dir` for
+/// items under target, and leaves other items unchanged.
+#[test]
+fn cp3_remap_to_staging_replaces_target_prefix() {
+    use crate::core::download::{DownloadItem, ExpectedHash};
+    let target = std::path::Path::new("/instance/mc");
+    let staging = std::path::Path::new("/instance/.staging-1");
+
+    let items = vec![
+        // Instance-bound (under target) — should be remapped.
+        DownloadItem {
+            url: "https://cdn.modrinth.com/sodium.jar".into(),
+            dest: target.join("mods/sodium.jar"),
+            expected_hash: Some(ExpectedHash::Sha1("abc".into())),
+            size: None,
+        },
+        // Shared cache item (NOT under target) — unchanged.
+        DownloadItem {
+            url: "https://launcher.mojang.com/lib.jar".into(),
+            dest: std::path::PathBuf::from("/cache/libraries/lib.jar"),
+            expected_hash: None,
+            size: None,
+        },
+    ];
+
+    let remapped = remap_to_staging(items, target, staging);
+    assert_eq!(
+        remapped[0].dest,
+        staging.join("mods/sodium.jar"),
+        "instance-bound item remapped to staging"
+    );
+    assert_eq!(
+        remapped[1].dest,
+        std::path::PathBuf::from("/cache/libraries/lib.jar"),
+        "cache item unchanged"
+    );
+}
+
+/// `promote_staging` moves all files from staging into target and leaves
+/// staging empty.
+#[test]
+fn cp3_promote_staging_moves_files_to_target() {
+    let tmp = TempDir::new().unwrap();
+    let staging = tmp.path().join("staging");
+    let target = tmp.path().join("target");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+
+    // Create a nested file structure in staging.
+    std::fs::create_dir_all(staging.join("mods")).unwrap();
+    std::fs::write(staging.join("mods/sodium.jar"), b"sodium").unwrap();
+    std::fs::write(staging.join("mods/lithium.jar"), b"lithium").unwrap();
+    std::fs::create_dir_all(staging.join("config")).unwrap();
+    std::fs::write(staging.join("config/settings.cfg"), b"cfg").unwrap();
+
+    promote_staging(&staging, &target).unwrap();
+
+    assert!(
+        target.join("mods/sodium.jar").exists(),
+        "sodium.jar promoted"
+    );
+    assert!(
+        target.join("mods/lithium.jar").exists(),
+        "lithium.jar promoted"
+    );
+    assert!(
+        target.join("config/settings.cfg").exists(),
+        "config promoted"
+    );
+    // Staging files are gone (renamed, not copied).
+    assert!(
+        !staging.join("mods/sodium.jar").exists(),
+        "staging file removed after rename"
+    );
+}
+
+/// `promote_staging` on an empty staging dir is a no-op (no error).
+#[test]
+fn cp3_promote_staging_empty_dir_is_noop() {
+    let tmp = TempDir::new().unwrap();
+    let staging = tmp.path().join("staging");
+    let target = tmp.path().join("target");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+
+    // Should succeed without touching target.
+    promote_staging(&staging, &target).unwrap();
+    assert_eq!(
+        std::fs::read_dir(&target).unwrap().count(),
+        0,
+        "target unchanged"
+    );
+}
+
+/// Cancellation path: discarding the staging dir leaves the target (instance)
+/// tree unmodified.
+#[test]
+fn cp3_discard_staging_leaves_target_clean() {
+    let tmp = TempDir::new().unwrap();
+    let staging = tmp.path().join("staging");
+    let target = tmp.path().join("target");
+    std::fs::create_dir_all(staging.join("mods")).unwrap();
+    std::fs::write(staging.join("mods/badmod.jar"), b"partial").unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+    // Target has a pre-existing file unrelated to the download.
+    std::fs::write(target.join("existing.txt"), b"keep").unwrap();
+
+    // Cancel: discard staging, never promote.
+    std::fs::remove_dir_all(&staging).unwrap();
+
+    // Target is completely unmodified.
+    assert!(!target.join("mods/badmod.jar").exists(), "not promoted");
+    assert!(target.join("existing.txt").exists(), "unrelated file intact");
+}
+
 #[test]
 fn d3_mixed_scenario_merged_is_correct() {
     let current = vec![
