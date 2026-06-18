@@ -11,6 +11,7 @@ import {
   listenDeviceCode,
   type DeviceCodePayload,
 } from "@/lib/ipc";
+import { DownloadManagerButton } from "@/components/DownloadManager";
 
 const NAV = [
   { to: "/instances", label: "Instances", icon: LayoutGrid },
@@ -116,6 +117,11 @@ export function Sidebar() {
           </NavLink>
         ))}
       </nav>
+
+      {/* Download Manager trigger */}
+      <div className="border-t border-border px-3 py-2">
+        <DownloadManagerButton />
+      </div>
 
       {/* Bottom-left auth control */}
       <div className="border-t border-border px-3 py-3">
