@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Loader2, Upload, X } from "lucide-react";
@@ -9,9 +8,7 @@ import {
   importCurseforgeZip,
   importMrpack,
   listMinecraftVersions,
-  type CfImportResult,
   type LoaderKind,
-  type MrpackImportResult,
 } from "@/lib/ipc";
 import { META_STALE_TIME } from "@/lib/query";
 
@@ -34,17 +31,13 @@ type Tab = "create" | "import";
  *  what each MC version actually supports.
  *
  *  The Import tab accepts a local `.mrpack` or CurseForge `.zip` and calls the
- *  matching IPC command, routing by file extension. On success the caller is
- *  notified via `onMrpackImport` / `onCfImport` so it can surface the result
- *  summary toast outside the modal. */
+ *  matching IPC command, routing by file extension. The commands return a task id;
+ *  the terminal result is delivered via `task://update` and handled by the
+ *  app-level store subscriber in AppShell (CP-9 wires the toast). */
 export function NewInstanceModal({
   onClose,
-  onMrpackImport,
-  onCfImport,
 }: {
   onClose: () => void;
-  onMrpackImport?: (result: MrpackImportResult) => void;
-  onCfImport?: (result: CfImportResult) => void;
 }) {
   const [tab, setTab] = useState<Tab>("create");
 
@@ -80,11 +73,7 @@ export function NewInstanceModal({
         {tab === "create" ? (
           <CreateTab onClose={onClose} />
         ) : (
-          <ImportTab
-            onClose={onClose}
-            onMrpackImport={onMrpackImport}
-            onCfImport={onCfImport}
-          />
+          <ImportTab onClose={onClose} />
         )}
       </div>
     </div>
@@ -288,17 +277,8 @@ function CreateTab({ onClose }: { onClose: () => void }) {
   );
 }
 
-function ImportTab({
-  onClose,
-  onMrpackImport,
-  onCfImport,
-}: {
-  onClose: () => void;
-  onMrpackImport?: (result: MrpackImportResult) => void;
-  onCfImport?: (result: CfImportResult) => void;
-}) {
+function ImportTab({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
-  const navigate = useNavigate();
 
   const importMutation = useMutation({
     mutationFn: async () => {
@@ -314,28 +294,26 @@ function ImportTab({
       // Route by extension; extension check is lowercase so .MRPACK also matches.
       const lower = selected.toLowerCase();
       if (lower.endsWith(".mrpack")) {
-        const result = await importMrpack(selected);
-        return { kind: "mrpack" as const, result };
+        // Returns task id (number); result delivered via task://update.
+        const taskId = await importMrpack(selected);
+        return taskId;
       }
       if (lower.endsWith(".zip")) {
-        const result = await importCurseforgeZip(selected);
-        return { kind: "cf" as const, result };
+        // Returns task id (number); result delivered via task://update.
+        const taskId = await importCurseforgeZip(selected);
+        return taskId;
       }
       throw new Error(
         `Unsupported file type: ${selected}. Choose a .mrpack or .zip file.`,
       );
     },
-    onSuccess: async (outcome) => {
-      if (!outcome) return;
+    onSuccess: async (taskId) => {
+      if (taskId === null) return;
+      // The task is now enqueued. Invalidate instances so the home page refreshes
+      // when the task completes and the instance appears. The toast + navigation
+      // are handled by the CP-9 store subscriber.
       await qc.invalidateQueries({ queryKey: ["instances"] });
       onClose();
-      if (outcome.kind === "mrpack") {
-        onMrpackImport?.(outcome.result);
-        navigate(`/instances/${outcome.result.slug}`);
-      } else {
-        onCfImport?.(outcome.result);
-        navigate(`/instances/${outcome.result.slug}`);
-      }
     },
   });
 

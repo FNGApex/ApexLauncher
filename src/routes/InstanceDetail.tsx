@@ -12,7 +12,6 @@ import {
   AlertCircle,
   ArrowLeft,
   Download,
-  ExternalLink,
   FileBox,
   Key,
   Lock,
@@ -40,14 +39,12 @@ import {
   updateMod,
   updateModpack,
   type AddModResult,
-  type CfManualFile,
   type FolderMod,
   type LaunchLogPayload,
   type LaunchExitPayload,
   type InstallLogPayload,
   type ManualMod,
   type ModEntry,
-  type PackUpdateResult,
   type ProjectSummary,
   type ProviderCommandError,
   type UpdateModResult,
@@ -353,7 +350,6 @@ function PackSourcePanel({
 }: PackSourcePanelProps) {
   const qc = useQueryClient();
   const [selectedVersionId, setSelectedVersionId] = useState<string>("latest");
-  const [updateResult, setUpdateResult] = useState<PackUpdateResult | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [lockError, setLockError] = useState<string | null>(null);
 
@@ -375,8 +371,9 @@ function PackSourcePanel({
   const updateMutation = useMutation({
     mutationFn: () =>
       updateModpack(slug, selectedVersionId === "latest" ? undefined : selectedVersionId),
-    onSuccess: (res) => {
-      setUpdateResult(res);
+    onSuccess: (_taskId) => {
+      // updateModpack now returns a task id; the result arrives via task://update.
+      // CP-9 wires the completion toast. Invalidate so data refreshes when done.
       setUpdateError(null);
       qc.invalidateQueries({ queryKey: ["instance", slug] });
       qc.invalidateQueries({ queryKey: ["instances"] });
@@ -479,67 +476,7 @@ function PackSourcePanel({
         </p>
       )}
 
-      {/* Update result */}
-      {updateResult && (
-        <PackUpdateResultBadge result={updateResult} onDismiss={() => setUpdateResult(null)} />
-      )}
     </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Pack update result badge
-// ---------------------------------------------------------------------------
-
-interface PackUpdateResultBadgeProps {
-  result: PackUpdateResult;
-  onDismiss: () => void;
-}
-
-function PackUpdateResultBadge({ result, onDismiss }: PackUpdateResultBadgeProps) {
-  return (
-    <div className="mt-3 rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-xs">
-      <div className="flex items-start justify-between gap-2">
-        <div className="space-y-1">
-          <p className="font-medium text-foreground">Update complete</p>
-          <p className="text-muted">
-            {result.added} added · {result.removed} removed · {result.kept} kept
-            {result.failed > 0 && (
-              <span className="text-danger"> · {result.failed} failed</span>
-            )}
-          </p>
-
-          {result.manual.length > 0 && (
-            <div className="mt-2">
-              <p className="mb-1 font-medium text-muted">Requires manual download:</p>
-              <ul className="space-y-1">
-                {result.manual.map((m) => (
-                  <CfManualFileEntry key={`${m.projectId}:${m.fileId}`} file={m} />
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-        <button onClick={onDismiss} className="shrink-0 text-muted hover:text-foreground">
-          <X className="size-3.5" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function CfManualFileEntry({ file }: { file: CfManualFile }) {
-  return (
-    <li className="flex items-center justify-between gap-2 rounded-lg border border-border bg-surface px-3 py-1.5">
-      <span className="truncate text-muted">{file.fileName}</span>
-      <button
-        onClick={() => openUrl(file.pageUrl).catch(console.error)}
-        className="flex shrink-0 items-center gap-1 rounded px-2 py-0.5 text-xs font-medium text-primary hover:underline"
-      >
-        <ExternalLink className="size-3" />
-        Open page
-      </button>
-    </li>
   );
 }
 

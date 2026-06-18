@@ -1,21 +1,16 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Box, Plus, Server, Trash2, X } from "lucide-react";
+import { Box, Plus, Server, Trash2 } from "lucide-react";
 import {
   deleteInstance,
   listInstances,
-  type CfImportResult,
-  type CfManualFile,
   type Instance,
-  type MrpackImportResult,
 } from "@/lib/ipc";
 import { NewInstanceModal } from "@/components/NewInstanceModal";
 
 export function Home() {
   const [showModal, setShowModal] = useState(false);
-  const [importResult, setImportResult] = useState<MrpackImportResult | null>(null);
-  const [cfImportResult, setCfImportResult] = useState<CfImportResult | null>(null);
   const { data: instances, isLoading } = useQuery({
     queryKey: ["instances"],
     queryFn: listInstances,
@@ -57,99 +52,7 @@ export function Home() {
       )}
 
       {showModal && (
-        <NewInstanceModal
-          onClose={() => setShowModal(false)}
-          onMrpackImport={(result) => setImportResult(result)}
-          onCfImport={(result) => setCfImportResult(result)}
-        />
-      )}
-
-      {importResult && (
-        <ImportResultToast result={importResult} onClose={() => setImportResult(null)} />
-      )}
-
-      {cfImportResult && (
-        <CfImportResultToast result={cfImportResult} onClose={() => setCfImportResult(null)} />
-      )}
-    </div>
-  );
-}
-
-export function ImportResultToast({
-  result,
-  onClose,
-}: {
-  result: MrpackImportResult;
-  onClose: () => void;
-}) {
-  return (
-    <div className="fixed bottom-6 right-6 z-50 w-80 rounded-xl border border-border bg-surface p-4 shadow-xl">
-      <div className="mb-2 flex items-start justify-between gap-2">
-        <p className="font-medium">{result.name} imported</p>
-        <button
-          onClick={onClose}
-          className="shrink-0 rounded-md p-1 text-muted hover:bg-background hover:text-foreground"
-        >
-          <X className="size-4" />
-        </button>
-      </div>
-      <p className="text-sm text-muted">
-        {result.installed} installed · {result.skipped} skipped · {result.failed} failed
-      </p>
-      {result.failedFiles.length > 0 && (
-        <ul className="mt-2 max-h-28 overflow-y-auto text-xs text-danger">
-          {result.failedFiles.map((f) => (
-            <li key={f} className="truncate">
-              {f}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-export function CfImportResultToast({
-  result,
-  onClose,
-}: {
-  result: CfImportResult;
-  onClose: () => void;
-}) {
-  return (
-    <div className="fixed bottom-6 right-6 z-50 w-80 rounded-xl border border-border bg-surface p-4 shadow-xl">
-      <div className="mb-2 flex items-start justify-between gap-2">
-        <p className="font-medium">{result.name} imported</p>
-        <button
-          onClick={onClose}
-          className="shrink-0 rounded-md p-1 text-muted hover:bg-background hover:text-foreground"
-        >
-          <X className="size-4" />
-        </button>
-      </div>
-      <p className="text-sm text-muted">
-        {result.installed} installed · {result.failed} failed
-      </p>
-      {result.manual.length > 0 && (
-        <div className="mt-2">
-          <p className="text-xs font-medium text-foreground">
-            {result.manual.length} file{result.manual.length === 1 ? "" : "s"} need manual download:
-          </p>
-          <ul className="mt-1 max-h-28 overflow-y-auto text-xs">
-            {result.manual.map((m: CfManualFile) => (
-              <li key={`${m.projectId}-${m.fileId}`} className="truncate">
-                <a
-                  href={m.pageUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-primary hover:underline"
-                >
-                  {m.fileName}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </div>
+        <NewInstanceModal onClose={() => setShowModal(false)} />
       )}
     </div>
   );

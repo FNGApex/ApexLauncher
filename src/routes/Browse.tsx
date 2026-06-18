@@ -9,13 +9,11 @@ import {
   installModpack,
   listMinecraftVersions,
   searchMods,
-  type ModpackInstallResult,
   type ProjectSummary,
   type ProviderCommandError,
 } from "@/lib/ipc";
 import { META_STALE_TIME } from "@/lib/query";
 import { ProviderBadge } from "@/components/ProviderBadge";
-import { CfImportResultToast, ImportResultToast } from "@/routes/Home";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -357,7 +355,7 @@ interface ModpackCardProps {
 
 function ModpackCard({ pack }: ModpackCardProps) {
   const qc = useQueryClient();
-  const [installResult, setInstallResult] = useState<ModpackInstallResult | null>(null);
+  const [installQueued, setInstallQueued] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
   // "latest" sentinel means pass undefined → backend picks first version.
   const [selectedVersionId, setSelectedVersionId] = useState<string>("latest");
@@ -389,16 +387,11 @@ function ModpackCard({ pack }: ModpackCardProps) {
         pack.pageUrl ?? undefined,
         selectedVersionId === "latest" ? undefined : selectedVersionId,
       ),
-    onSuccess: (result) => {
-      if (result.kind === "manual") {
-        // Distribution-disabled: open the page for manual download.
-        if (result.pageUrl) {
-          openUrl(result.pageUrl).catch(console.error);
-        }
-      } else {
-        qc.invalidateQueries({ queryKey: ["instances"] });
-      }
-      setInstallResult(result);
+    onSuccess: (_taskId) => {
+      // Command returns a task id; the terminal result arrives via task://update
+      // and is handled by the store subscriber. CP-9 wires the completion toast.
+      setInstallQueued(true);
+      qc.invalidateQueries({ queryKey: ["instances"] });
     },
     onError: (err) => {
       setInstallError(err instanceof Error ? err.message : String(err));
@@ -504,28 +497,16 @@ function ModpackCard({ pack }: ModpackCardProps) {
         </div>
       )}
 
-      {/* Completion toasts — fixed, bottom-right */}
-      {installResult?.kind === "mrpack" && (
-        <ImportResultToast result={installResult} onClose={() => setInstallResult(null)} />
-      )}
-      {installResult?.kind === "curseforge" && (
-        <CfImportResultToast result={installResult} onClose={() => setInstallResult(null)} />
-      )}
-      {installResult?.kind === "manual" && (
-        <div className="fixed bottom-6 right-6 z-50 w-80 rounded-xl border border-border bg-surface p-4 shadow-xl">
-          <div className="mb-2 flex items-start justify-between gap-2">
-            <p className="font-medium text-sm">Manual download required</p>
-            <button
-              onClick={() => setInstallResult(null)}
-              className="shrink-0 rounded-md p-1 text-muted hover:bg-background hover:text-foreground"
-            >
-              <X className="size-4" />
-            </button>
-          </div>
-          <p className="text-xs text-muted">
-            {installResult.fileName} is not auto-installable — the project page has been opened for
-            manual download.
-          </p>
+      {/* Install queued notice — transient acknowledgement until CP-9 wires the toast */}
+      {installQueued && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-surface/60 px-4 py-2 text-xs text-muted">
+          <span>Install queued — check progress in the Download Manager.</span>
+          <button
+            onClick={() => setInstallQueued(false)}
+            className="shrink-0 rounded-md p-0.5 hover:bg-surface-2 hover:text-foreground"
+          >
+            <X className="size-3.5" />
+          </button>
         </div>
       )}
     </>

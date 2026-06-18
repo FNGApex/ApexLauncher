@@ -744,14 +744,18 @@ export interface MrpackImportResult {
 /**
  * Import a local `.mrpack` file into a new instance.
  *
+ * Enqueues a Download Manager task and resolves to the task id synchronously;
+ * the terminal {@link MrpackImportResult} rides the `task://update` event
+ * (carried on `Task.result`) keyed by that id.
+ *
  * `mrpackPath` is the absolute path to the `.mrpack` file on disk.
  * `nameOverride` optionally overrides the pack's `name` field for the instance name.
  */
 export function importMrpack(
   mrpackPath: string,
   nameOverride?: string,
-): Promise<MrpackImportResult> {
-  return invoke<MrpackImportResult>("import_mrpack", {
+): Promise<number> {
+  return invoke<number>("import_mrpack", {
     mrpackPath,
     nameOverride: nameOverride ?? null,
   });
@@ -791,14 +795,18 @@ export interface CfImportResult {
 /**
  * Import a local CurseForge modpack `.zip` into a new instance.
  *
+ * Enqueues a Download Manager task and resolves to the task id synchronously;
+ * the terminal {@link CfImportResult} rides the `task://update` event
+ * (carried on `Task.result`) keyed by that id.
+ *
  * `cfZipPath` is the absolute path to the `.zip` file on disk.
  * `nameOverride` optionally overrides the pack's `name` field for the instance name.
  */
 export function importCurseforgeZip(
   cfZipPath: string,
   nameOverride?: string,
-): Promise<CfImportResult> {
-  return invoke<CfImportResult>("import_curseforge_zip", {
+): Promise<number> {
+  return invoke<number>("import_curseforge_zip", {
     cfZipPath,
     nameOverride: nameOverride ?? null,
   });
@@ -827,14 +835,18 @@ export type ModpackInstallResult =
  * `projectId` is the provider's project id.
  * `pageUrl` is the project's page URL, echoed back in the `"manual"` variant.
  * `versionId` optionally pins the version to install; omit or pass `undefined` for latest.
+ *
+ * Enqueues a Download Manager task and resolves to the task id synchronously;
+ * the terminal {@link ModpackInstallResult} rides the `task://update` event
+ * (carried on `Task.result`) keyed by that id.
  */
 export function installModpack(
   provider: string,
   projectId: string,
   pageUrl?: string,
   versionId?: string,
-): Promise<ModpackInstallResult> {
-  return invoke<ModpackInstallResult>("install_modpack", {
+): Promise<number> {
+  return invoke<number>("install_modpack", {
     provider,
     projectId,
     pageUrl: pageUrl ?? null,
@@ -862,9 +874,13 @@ export interface PackUpdateResult {
  *
  * `slug` is the instance slug. `versionId` pins the target version; omit for latest.
  * Requires the instance to have a `source` recorded (i.e. installed via Browse).
+ *
+ * Enqueues a Download Manager task and resolves to the task id synchronously;
+ * the terminal {@link PackUpdateResult} rides the `task://update` event
+ * (carried on `Task.result`) keyed by that id.
  */
-export function updateModpack(slug: string, versionId?: string): Promise<PackUpdateResult> {
-  return invoke<PackUpdateResult>("update_modpack", {
+export function updateModpack(slug: string, versionId?: string): Promise<number> {
+  return invoke<number>("update_modpack", {
     slug,
     versionId: versionId ?? null,
   });
@@ -878,4 +894,144 @@ export function updateModpack(slug: string, versionId?: string): Promise<PackUpd
  */
 export function setPackLock(slug: string, locked: boolean): Promise<void> {
   return invoke<void>("set_pack_lock", { slug, locked });
+}
+
+// ---------------------------------------------------------------------------
+// CP-7: task/run command + event wrappers. Mirrors lib.rs task+run payloads.
+// ---------------------------------------------------------------------------
+
+// --- Task event payloads ---
+
+/**
+ * Progress update emitted on `task://progress` while a task downloads.
+ * Mirrors `TaskProgressPayload` in lib.rs (serde camelCase).
+ */
+export interface TaskProgressPayload {
+  taskId: number;
+  currentChild: string | null;
+  done: number;
+  total: number;
+  bytes: number;
+}
+
+/** Event name constant for task progress. */
+export const TASK_PROGRESS_EVENT = "task://progress" as const;
+
+/** Event name constant for task status/lifecycle updates. */
+export const TASK_UPDATE_EVENT = "task://update" as const;
+
+/**
+ * Subscribe to `task://progress` events.
+ * Returns an unlisten function — call it to unsubscribe.
+ */
+export function listenTaskProgress(
+  handler: (payload: TaskProgressPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<TaskProgressPayload>(TASK_PROGRESS_EVENT, (event) =>
+    handler(event.payload),
+  );
+}
+
+// Task update payload re-uses the Task type from store.ts; ipc.ts imports
+// nothing from store.ts to avoid a circular dep — callers cast the event payload.
+// The raw shape is identical to Task from store.ts.
+
+/**
+ * Subscribe to `task://update` events (full task snapshot per lifecycle change).
+ * Returns an unlisten function — call it to unsubscribe.
+ */
+export function listenTaskUpdate(
+  handler: (payload: unknown) => void,
+): Promise<UnlistenFn> {
+  return listen(TASK_UPDATE_EVENT, (event) => handler(event.payload));
+}
+
+// --- Run event payloads ---
+
+/**
+ * Payload emitted on `run://update` for each run-status transition.
+ * Mirrors `RunUpdatePayload` in lib.rs (serde camelCase).
+ */
+export interface RunUpdatePayload {
+  slug: string;
+  /** `"preparing"` | `"running"` | `"exited"` | `"killed"` | `"failed"` */
+  status: string;
+  exitCode: number | null;
+}
+
+/** Event name constant for run status updates. */
+export const RUN_UPDATE_EVENT = "run://update" as const;
+
+/**
+ * Subscribe to `run://update` events.
+ * Returns an unlisten function — call it to unsubscribe.
+ */
+export function listenRunUpdate(
+  handler: (payload: RunUpdatePayload) => void,
+): Promise<UnlistenFn> {
+  return listen<RunUpdatePayload>(RUN_UPDATE_EVENT, (event) =>
+    handler(event.payload),
+  );
+}
+
+// --- Run query payloads ---
+
+/**
+ * A single active or recently-terminal run returned by `list_running`.
+ * Mirrors `RunInfoPayload` in lib.rs (serde camelCase).
+ */
+export interface RunInfoPayload {
+  slug: string;
+  status: string;
+  exitCode: number | null;
+  elapsedMs: number;
+}
+
+/**
+ * One replayed log line returned by `get_run_logs`.
+ * Mirrors `RunLogPayload` in lib.rs (serde camelCase).
+ */
+export interface RunLogPayload {
+  stream: string;
+  line: string;
+}
+
+/**
+ * Enumerate non-terminal (preparing / running) instances. Used for
+ * hydration on AppShell mount.
+ */
+export function listRunning(): Promise<RunInfoPayload[]> {
+  return invoke<RunInfoPayload[]>("list_running");
+}
+
+/**
+ * Read a single instance's run state (any status, incl. terminal).
+ * Returns `null` when the slug is not tracked.
+ */
+export function getRunState(slug: string): Promise<RunInfoPayload | null> {
+  return invoke<RunInfoPayload | null>("get_run_state", { slug });
+}
+
+/**
+ * Replay buffered log lines for an instance.
+ * Returns `null` when the slug is not tracked.
+ */
+export function getRunLogs(slug: string): Promise<RunLogPayload[] | null> {
+  return invoke<RunLogPayload[] | null>("get_run_logs", { slug });
+}
+
+/**
+ * Read the current Download-Manager task snapshot.
+ * Returns all tasks (queued, in-progress, and recently-terminal).
+ */
+export function listTasks(): Promise<unknown[]> {
+  return invoke<unknown[]>("list_tasks");
+}
+
+/**
+ * Cancel a task by id.
+ * Idempotent; no-op for unknown or already-terminal ids.
+ */
+export function cancelTask(id: number): Promise<void> {
+  return invoke<void>("cancel_task", { id });
 }
