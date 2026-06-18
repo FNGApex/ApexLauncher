@@ -28,7 +28,7 @@ const NEOFORGE_MAVEN: &str =
 const NEOFORGE_LEGACY_MAVEN: &str =
     "https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml";
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct LoaderOption {
     /// "vanilla" | "forge" | "fabric" | "quilt" | "neoforge"

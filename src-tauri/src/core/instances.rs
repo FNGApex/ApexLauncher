@@ -21,7 +21,7 @@ use crate::core::store;
 /// Bumped when the on-disk manifest shape changes (for future migrations).
 pub const SCHEMA_VERSION: u32 = 1;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Loader {
     /// "vanilla" | "fabric" | "quilt" | "forge" | "neoforge"
@@ -29,7 +29,7 @@ pub struct Loader {
     pub version: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JavaCfg {
     pub major: Option<u32>,
@@ -37,7 +37,7 @@ pub struct JavaCfg {
     pub memory_mb: u32,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Source {
     pub provider: String,
@@ -46,7 +46,7 @@ pub struct Source {
     pub pack_version: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ModEntry {
     pub provider: String,
@@ -63,7 +63,7 @@ pub struct ModEntry {
     pub from_pack: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Instance {
     pub schema: u32,
@@ -87,7 +87,7 @@ pub struct Instance {
 }
 
 /// A jar actually present in `mc/mods/`, whether or not it's tracked in `mods[]`.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderMod {
     pub file_name: String,
@@ -99,14 +99,14 @@ pub struct FolderMod {
 }
 
 /// `get` result: the manifest plus the reconciled mods-folder listing.
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceDetail {
     pub instance: Instance,
     pub folder_mods: Vec<FolderMod>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateInstanceReq {
     pub name: String,

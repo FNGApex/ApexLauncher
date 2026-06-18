@@ -392,7 +392,7 @@ pub fn parse_cf_manifest(json: &str) -> Result<CfManifest, ModpackError> {
 
 /// A CurseForge file the user must download manually (distribution-disabled,
 /// or lacking a usable hash to verify an automated download).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CfManualFile {
     /// CurseForge project (mod) id.

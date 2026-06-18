@@ -22,7 +22,7 @@ use sha1::Digest;
 /// The engine supports SHA-1 (used by Mojang asset objects), SHA-512
 /// (used by Modrinth files), and SHA-256 (used by Adoptium/Temurin JRE
 /// checksums). CurseForge fingerprints are out of scope until Phase 5.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum ExpectedHash {
     /// SHA-1 hex digest.
@@ -38,7 +38,7 @@ pub enum ExpectedHash {
 // ---------------------------------------------------------------------------
 
 /// A single file to download.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadItem {
     /// Source URL.
@@ -52,7 +52,7 @@ pub struct DownloadItem {
 }
 
 /// An ordered list of [`DownloadItem`]s to execute as a unit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadPlan {
     pub items: Vec<DownloadItem>,
@@ -69,7 +69,7 @@ impl DownloadPlan {
 // ---------------------------------------------------------------------------
 
 /// A per-item download failure.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum DownloadError {
     /// Network or HTTP-level failure.
@@ -489,7 +489,7 @@ fn seed_hasher_from_file(
 // ---------------------------------------------------------------------------
 
 /// The outcome of a single item within an executed [`DownloadPlan`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemOutcome {
     /// The URL of the item this outcome belongs to.
@@ -499,7 +499,7 @@ pub struct ItemOutcome {
 }
 
 /// Per-item execution status returned by [`execute_plan`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ItemStatus {
     /// Downloaded and verified successfully.
@@ -515,7 +515,7 @@ pub enum ItemStatus {
 /// Every item in the plan is represented exactly once. A failed item does NOT
 /// abort the others — all items run to completion, and the caller inspects the
 /// outcomes to decide what to do next.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanResult {
     pub outcomes: Vec<ItemOutcome>,

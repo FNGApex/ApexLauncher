@@ -38,7 +38,7 @@ use crate::core::download::CancelToken;
 /// The kind of work a task performs. Serialized as a camelCase tag for the
 /// frontend. CP-4 adds `ModAdd` / `ModUpdate`; the `Synthetic` variant exists
 /// for tests + the no-real-ops contract from CP-2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskKind {
     /// Test / placeholder work with no real side effects.
@@ -57,7 +57,7 @@ pub enum TaskKind {
 ///
 /// Non-terminal: `Queued`, `Planning`, `Downloading`, `Applying`.
 /// Terminal: `Done`, `Failed`, `Cancelled`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TaskStatus {
     /// Enqueued, not yet picked up by the worker.
@@ -90,14 +90,14 @@ impl TaskStatus {
 ///
 /// `label` is the human-facing name shown as the "current child" — derived from
 /// the [`DownloadItem.dest`](crate::core::download::DownloadItem) basename.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildItem {
     pub label: String,
 }
 
 /// A snapshot of one task's full state. Cloned out of the snapshot for reads.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     /// Unique, monotonic task id (assigned at enqueue).
@@ -121,7 +121,13 @@ pub struct Task {
     /// `None` until the task reaches `Done` via that method; stays `None` for
     /// tasks that finish via `finish_done` (no result), `finish_failed`, or
     /// `finish_cancelled`. Serialized as `null` when absent.
+    ///
+    /// `#[specta(skip)]` because `serde_json::Value` is a recursive type that
+    /// specta cannot expand into a finite TypeScript type. The field is present
+    /// on the wire (only omitted when `None`) but excluded from the generated
+    /// `bindings.ts`; callers access it as `(task as any).result`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[specta(skip)]
     pub result: Option<serde_json::Value>,
 }
 

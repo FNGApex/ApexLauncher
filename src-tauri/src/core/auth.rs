@@ -617,7 +617,7 @@ fn map_oauth_error<T>(err: &str) -> Result<T, AuthError> {
 /// The refresh token and MC access token are NOT stored here: the refresh token
 /// lives in the OS keyring (via [`KeyringBackend`]); the MC access token is
 /// re-derived at launch time.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountMeta {
     /// Minecraft profile UUID (from `mc/profile`).

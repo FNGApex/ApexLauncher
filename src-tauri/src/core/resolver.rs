@@ -503,7 +503,7 @@ pub(crate) struct Logging {
 ///
 /// All `${...}` placeholders in `jvm_args` and `game_args` are left intact —
 /// substitution is slice D's responsibility.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchMeta {
     pub version_id: String,
@@ -528,7 +528,7 @@ pub struct LaunchMeta {
 }
 
 /// Returned by `resolve_vanilla`: the download plan + launch metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolveResult {
     pub plan: crate::core::download::DownloadPlan,

@@ -58,7 +58,7 @@ impl TargetOs {
 }
 
 /// A located JRE.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JavaInstallation {
     /// Java major version (e.g. 8, 17, 21).
@@ -70,7 +70,7 @@ pub struct JavaInstallation {
 }
 
 /// How a [`JavaInstallation`] was found.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum JavaSource {
     /// Detected from system paths / environment variables.

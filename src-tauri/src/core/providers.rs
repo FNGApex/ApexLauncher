@@ -60,7 +60,7 @@ pub fn cf_api_key_from(
 /// Condensed summary of a mod project, suitable for search result cards.
 ///
 /// Maps from both Modrinth `/search` hits and CF `/v1/mods/search` data entries.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSummary {
     /// Which backend provided this result.
@@ -88,7 +88,7 @@ pub struct ProjectSummary {
 }
 
 /// A specific release of a mod project.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectVersion {
     /// Which backend provided this version.
@@ -113,7 +113,7 @@ pub struct ProjectVersion {
 ///
 /// `url` is `None` when the author has disabled distribution (CF `allowModDistribution: false`
 /// or `downloadUrl: null`). The UI must surface a manual-download prompt in that case.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionFile {
     /// Direct download URL; `None` means distribution is disabled.
@@ -129,7 +129,7 @@ pub struct VersionFile {
 }
 
 /// A declared dependency of a `ProjectVersion`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Dependency {
     /// Provider-specific project id of the dependency, if known.
@@ -145,7 +145,7 @@ pub struct Dependency {
 /// Maps to provider-specific selectors:
 /// - Modrinth: `project_type` facet (`"mod"` or `"modpack"`).
 /// - CurseForge: `classId` query param (`6` for mods, `4471` for modpacks).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, specta::Type)]
 pub enum ProjectType {
     /// Standard mods (default).
     #[default]
@@ -157,7 +157,7 @@ pub enum ProjectType {
 }
 
 /// Query parameters for searching mods.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchParams {
     /// Free-text search query.
@@ -176,7 +176,7 @@ pub struct SearchParams {
 }
 
 /// Paginated search response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
     /// Matching project summaries for this page.
@@ -188,7 +188,7 @@ pub struct SearchResult {
 }
 
 /// Identifies which provider owns a result.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
     Modrinth,

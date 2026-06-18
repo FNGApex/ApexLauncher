@@ -16,7 +16,7 @@ const MANIFEST_URL: &str =
 const FLOOR: &str = "1.7.10";
 const TTL: Duration = Duration::from_secs(6 * 3600);
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct McVersion {
     pub id: String,

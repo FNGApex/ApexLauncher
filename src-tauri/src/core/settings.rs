@@ -14,7 +14,7 @@ use crate::core::store;
 /// Bumped when the on-disk settings shape changes (for future migrations).
 pub const SCHEMA_VERSION: u32 = 1;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     #[serde(default = "default_schema")]

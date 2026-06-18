@@ -27,7 +27,7 @@ use crate::core::providers::{ModProvider, ProjectVersion, ProviderHttpClient, Pr
 ///
 /// Carries everything needed to produce a `DownloadItem` (CP2) and a `ModEntry`
 /// (see `instances.rs:51-59`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannedMod {
     /// Which provider owns this mod.
@@ -53,7 +53,7 @@ pub struct PlannedMod {
 /// A resolved mod file whose URL is `None` (distribution disabled).
 ///
 /// The user must manually download the file from `page_url`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ManualMod {
     /// Which provider owns this mod.
@@ -69,7 +69,7 @@ pub struct ManualMod {
 }
 
 /// A dependency for which no compatible version could be found.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct UnresolvedDep {
     /// Provider-specific project id of the unresolvable dep.
@@ -79,7 +79,7 @@ pub struct UnresolvedDep {
 }
 
 /// An optional dependency surfaced as a suggestion.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Suggestion {
     /// Provider-specific project id.
@@ -89,7 +89,7 @@ pub struct Suggestion {
 }
 
 /// A declared-incompatible mod.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct IncompatibleWarning {
     /// Provider-specific project id of the incompatible mod.
@@ -370,7 +370,7 @@ pub fn apply_swap(
 }
 
 /// Structured result returned by the `update_mod` Tauri command.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateModResult {
     /// One of `"updated"` | `"upToDate"` | `"manual"` | `"unresolved"` | `"failed"`.
@@ -421,7 +421,7 @@ pub(crate) async fn fetch_newest_compatible(
 // ── CP2: Install executor helpers ────────────────────────────────────────────
 
 /// A single file download that failed during `add_mod`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct FailedMod {
     /// The `file_name` of the `PlannedMod` that failed.
@@ -431,7 +431,7 @@ pub struct FailedMod {
 }
 
 /// Structured result returned by the `add_mod` Tauri command.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AddModResult {
     /// `ModEntry` records for every successfully downloaded mod.

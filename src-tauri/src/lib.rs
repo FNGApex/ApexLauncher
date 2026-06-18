@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::Manager as _;
+use tauri_specta::{Builder, collect_commands};
 
 // `pub` so integration tests in `tests/` can reach the pure helpers
 // (e.g. `store::cache_subdir_path`). This is an internal app lib, not a
@@ -36,7 +37,7 @@ use core::versions::{self, McVersion};
 /// the frontend always receives a JSON-serializable `{"error": "..."}` on
 /// failure. The named variant is preserved in the `kind` field for typed
 /// handling in the UI.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct AuthCommandError {
     kind: String,
@@ -77,7 +78,7 @@ impl std::fmt::Display for AuthCommandError {
 // Err variant as the error payload to the frontend.
 
 /// Payload for the `auth://device-code` event emitted by `begin_login`.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct DeviceCodePayload {
     user_code: String,
@@ -110,6 +111,7 @@ type CancelToken = std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>;
 /// Pattern mirrors `launch_instance`: long-lived async command that emits
 /// progress events via the Tauri event channel.
 #[tauri::command]
+#[specta::specta]
 async fn begin_login(
     app: tauri::AppHandle,
     store_state: tauri::State<'_, SharedAccountStore>,
@@ -205,6 +207,7 @@ async fn begin_login(
 ///
 /// If no login is in progress, this is a no-op.
 #[tauri::command]
+#[specta::specta]
 fn cancel_login(cancel_state: tauri::State<'_, CancelToken>) {
     let mut guard = cancel_state.lock().unwrap();
     if let Some(tx) = guard.take() {
@@ -215,6 +218,7 @@ fn cancel_login(cancel_state: tauri::State<'_, CancelToken>) {
 
 /// Get the current account metadata, or `None` if not logged in.
 #[tauri::command]
+#[specta::specta]
 async fn get_account(
     store_state: tauri::State<'_, SharedAccountStore>,
 ) -> Result<Option<AccountMeta>, AuthCommandError> {
@@ -224,6 +228,7 @@ async fn get_account(
 
 /// Log out: clear `account.json` and the keyring entry.
 #[tauri::command]
+#[specta::specta]
 async fn logout(
     store_state: tauri::State<'_, SharedAccountStore>,
 ) -> Result<(), AuthCommandError> {
@@ -232,7 +237,7 @@ async fn logout(
 }
 
 /// Basic app metadata, surfaced to the UI as the Phase-0 IPC smoke test.
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct AppInfo {
     name: String,
@@ -241,6 +246,7 @@ struct AppInfo {
 }
 
 #[tauri::command]
+#[specta::specta]
 fn app_info() -> AppInfo {
     AppInfo {
         name: "Modloader".to_string(),
@@ -252,21 +258,25 @@ fn app_info() -> AppInfo {
 // --- Phase 1: instance management. Thin wrappers over `core::instances`. ---
 
 #[tauri::command]
+#[specta::specta]
 fn list_instances(app: tauri::AppHandle) -> Result<Vec<Instance>, String> {
     instances::list(&app)
 }
 
 #[tauri::command]
+#[specta::specta]
 fn create_instance(app: tauri::AppHandle, req: CreateInstanceReq) -> Result<Instance, String> {
     instances::create(&app, req)
 }
 
 #[tauri::command]
+#[specta::specta]
 fn get_instance(app: tauri::AppHandle, slug: String) -> Result<InstanceDetail, String> {
     instances::get(&app, &slug)
 }
 
 #[tauri::command]
+#[specta::specta]
 fn delete_instance(app: tauri::AppHandle, slug: String) -> Result<(), String> {
     instances::delete(&app, &slug)
 }
@@ -274,17 +284,19 @@ fn delete_instance(app: tauri::AppHandle, slug: String) -> Result<(), String> {
 // --- Phase 1: global settings + on-disk path display. ---
 
 #[tauri::command]
+#[specta::specta]
 fn get_settings(app: tauri::AppHandle) -> Result<Settings, String> {
     settings::load(&app)
 }
 
 #[tauri::command]
+#[specta::specta]
 fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<Settings, String> {
     self::settings::save(&app, settings)
 }
 
 /// Resolved on-disk locations, surfaced read-only on the Settings page.
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct AppPaths {
     data_dir: String,
@@ -292,6 +304,7 @@ struct AppPaths {
 }
 
 #[tauri::command]
+#[specta::specta]
 fn app_paths(app: tauri::AppHandle) -> Result<AppPaths, String> {
     let data = core::store::data_dir(&app)?;
     let instances = data.join("instances");
@@ -307,7 +320,7 @@ fn app_paths(app: tauri::AppHandle) -> Result<AppPaths, String> {
 ///
 /// Mirrors [`ProgressUpdate`] with serde rename so the TypeScript side
 /// receives camelCase field names.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct ProgressPayload {
     /// Source URL of the item currently downloading.
@@ -350,6 +363,7 @@ impl ProgressSink for TauriEventSink {
 /// - `concurrency` — maximum simultaneous downloads (clamped to 1..=32).
 ///   Pass `null` / omit from TS to use the default (8).
 #[tauri::command]
+#[specta::specta]
 async fn execute_download_plan(
     app: tauri::AppHandle,
     plan: DownloadPlan,
@@ -370,6 +384,7 @@ async fn execute_download_plan(
 /// libraries, natives, asset objects, asset index, logging config) into a
 /// single `DownloadPlan`, and computes `LaunchMeta` for slice D.
 #[tauri::command]
+#[specta::specta]
 async fn resolve_vanilla(
     app: tauri::AppHandle,
     version_id: String,
@@ -389,6 +404,7 @@ async fn resolve_vanilla(
 /// Probes system installs + the launcher cache first; downloads and extracts
 /// Temurin from Adoptium only on a cache miss.
 #[tauri::command]
+#[specta::specta]
 async fn ensure_java(app: tauri::AppHandle, major: u32) -> Result<JavaInstallation, String> {
     core::java::ensure_java(&app, major).await
 }
@@ -399,7 +415,7 @@ async fn ensure_java(app: tauri::AppHandle, major: u32) -> Result<JavaInstallati
 ///
 /// Mirrors the `CapturingLaunchSink` line tuple with serde rename so the
 /// TypeScript side receives camelCase field names.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct LaunchLogPayload {
     instance_id: String,
@@ -409,7 +425,7 @@ struct LaunchLogPayload {
 }
 
 /// Payload emitted on the `launch://exit` Tauri event channel.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct LaunchExitPayload {
     instance_id: String,
@@ -422,7 +438,7 @@ struct LaunchExitPayload {
 /// Fired on each run-status transition (`preparing` → `running` → terminal).
 /// Mirrors [`launch::RunInfo`]'s queryable scalars so the frontend runs slice can
 /// patch its state without a follow-up `get_run_state` round-trip.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct RunUpdatePayload {
     /// Instance slug (registry key).
@@ -473,7 +489,7 @@ impl LaunchSink for TauriLaunchSink {
 /// Run-state read payload returned by `list_running` / `get_run_state`.
 ///
 /// Mirrors [`launch::RunInfo`] with serde camelCase for the TypeScript side.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct RunInfoPayload {
     slug: String,
@@ -498,7 +514,7 @@ impl From<launch::RunInfo> for RunInfoPayload {
 /// One replayed log line returned by `get_run_logs`.
 ///
 /// Mirrors [`launch::LogLine`] with serde camelCase.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct RunLogPayload {
     /// `"stdout"` or `"stderr"`.
@@ -521,7 +537,7 @@ impl From<launch::LogLine> for RunLogPayload {
 ///
 /// Mirrors [`task_manager::TaskProgress`] with serde camelCase. Fires per child
 /// transition while a task downloads. The frontend mirror lands in CP-7.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct TaskProgressPayload {
     task_id: u64,
@@ -539,7 +555,7 @@ struct TaskProgressPayload {
 /// Mirrors [`task_manager::Task`] with serde camelCase. The status tag and
 /// child-item shapes already serialize camelCase from the core types. The
 /// frontend mirror lands in CP-7.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct TaskUpdatePayload {
     #[serde(flatten)]
@@ -576,6 +592,7 @@ impl TaskObserver for TauriTaskObserver {
 /// Read the current Download-Manager task snapshot. Survives navigation —
 /// any page can hydrate from this regardless of when it mounted.
 #[tauri::command]
+#[specta::specta]
 async fn list_tasks(manager: tauri::State<'_, TaskManager>) -> Result<Vec<Task>, String> {
     Ok(manager.list().await)
 }
@@ -584,6 +601,7 @@ async fn list_tasks(manager: tauri::State<'_, TaskManager>) -> Result<Vec<Task>,
 /// acquiring new permits) and short-circuits a still-queued task to `Cancelled`.
 /// Idempotent; a no-op for unknown or already-terminal ids.
 #[tauri::command]
+#[specta::specta]
 async fn cancel_task(manager: tauri::State<'_, TaskManager>, id: u64) -> Result<(), String> {
     manager.cancel(id).await;
     Ok(())
@@ -593,7 +611,7 @@ async fn cancel_task(manager: tauri::State<'_, TaskManager>, id: u64) -> Result<
 ///
 /// Distinct from `launch://log` — installer output is log-shaped (one line at
 /// a time from the installer's stdout/stderr), not item-progress-shaped.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct InstallLogPayload {
     /// `"stdout"` or `"stderr"`.
@@ -637,6 +655,7 @@ impl InstallSink for TauriInstallSink {
 /// runs under `tokio::spawn` and outlives this command's stack frame) can hold a
 /// clone of the Arc and still access the shared map.
 #[tauri::command]
+#[specta::specta]
 async fn launch_instance(
     app: tauri::AppHandle,
     registry_state: tauri::State<'_, Arc<RunningRegistry>>,
@@ -884,6 +903,7 @@ impl Drop for PrepFailGuard {
 ///
 /// Returns `Ok` if the signal was sent, `Err` if the instance is not running.
 #[tauri::command]
+#[specta::specta]
 fn kill_instance(
     registry_state: tauri::State<'_, Arc<RunningRegistry>>,
     slug: String,
@@ -897,6 +917,7 @@ fn kill_instance(
 /// Lets any page hydrate the running-indicator state regardless of when it
 /// mounted. Terminal entries (exited / killed / failed) are excluded.
 #[tauri::command]
+#[specta::specta]
 fn list_running(registry_state: tauri::State<'_, Arc<RunningRegistry>>) -> Vec<RunInfoPayload> {
     launch::list_running(&**registry_state)
         .into_iter()
@@ -907,6 +928,7 @@ fn list_running(registry_state: tauri::State<'_, Arc<RunningRegistry>>) -> Vec<R
 /// Read a single instance's run state (any status, incl. terminal). `None` if the
 /// slug is not tracked — lets `InstanceDetail` recover status + a missed exit code.
 #[tauri::command]
+#[specta::specta]
 fn get_run_state(
     registry_state: tauri::State<'_, Arc<RunningRegistry>>,
     slug: String,
@@ -917,6 +939,7 @@ fn get_run_state(
 /// Replay an instance's buffered log lines (works after exit; entry is retained).
 /// `None` if the slug is not tracked.
 #[tauri::command]
+#[specta::specta]
 fn get_run_logs(
     registry_state: tauri::State<'_, Arc<RunningRegistry>>,
     slug: String,
@@ -928,11 +951,13 @@ fn get_run_logs(
 // --- Version & loader metadata (Mojang / Forge / Fabric / Quilt / NeoForge). ---
 
 #[tauri::command]
+#[specta::specta]
 async fn list_minecraft_versions(app: tauri::AppHandle) -> Result<Vec<McVersion>, String> {
     versions::list_releases(&app).await
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn get_loaders(app: tauri::AppHandle, minecraft: String) -> Result<Vec<LoaderOption>, String> {
     loaders::for_mc(&app, &minecraft).await
 }
@@ -943,7 +968,7 @@ async fn get_loaders(app: tauri::AppHandle, minecraft: String) -> Result<Vec<Loa
 ///
 /// Mirrors `AuthCommandError` above. Every variant maps to a camelCase `kind`
 /// string; `"key_missing"` lets the frontend show the "API key required" state.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct ProviderCommandError {
     kind: String,
@@ -989,6 +1014,7 @@ fn unknown_provider_err(other: &str) -> ProviderCommandError {
 /// The CF key is resolved from `MODLOADER_CF_API_KEY` env or `settings.curseforge_api_key`.
 /// `project_type` selects the content class: `"mod"` (default) or `"modpack"`.
 #[tauri::command]
+#[specta::specta]
 async fn search_mods(
     app: tauri::AppHandle,
     provider: String,
@@ -1032,6 +1058,7 @@ async fn search_mods(
 ///
 /// `provider` must be `"modrinth"` or `"curseforge"`.
 #[tauri::command]
+#[specta::specta]
 async fn get_mod_versions(
     app: tauri::AppHandle,
     provider: String,
@@ -1083,6 +1110,7 @@ async fn get_mod_versions(
 /// locked instance errors without touching the queue. All download work runs
 /// inside [`ModAddJob`].
 #[tauri::command]
+#[specta::specta]
 async fn add_mod(
     app: tauri::AppHandle,
     manager: tauri::State<'_, TaskManager>,
@@ -1141,6 +1169,7 @@ async fn add_mod(
 /// and `file_name` are validated for path traversal before any FS access.
 /// Blocked when the instance is pack-locked.
 #[tauri::command]
+#[specta::specta]
 fn set_mod_enabled(
     app: tauri::AppHandle,
     slug: String,
@@ -1159,6 +1188,7 @@ fn set_mod_enabled(
 /// and `file_name` are validated for path traversal before any FS access.
 /// Blocked when the instance is pack-locked.
 #[tauri::command]
+#[specta::specta]
 fn remove_mod(app: tauri::AppHandle, slug: String, file_name: String) -> Result<(), String> {
     let instance = instances::load_manifest(&app, &slug)?;
     instances::ensure_not_locked(&instance)?;
@@ -1175,6 +1205,7 @@ fn remove_mod(app: tauri::AppHandle, slug: String, file_name: String) -> Result<
 /// `remove_mod`, `update_mod`) will return an error. `update_modpack` is
 /// deliberately left unguarded — updating the pack is how you change it.
 #[tauri::command]
+#[specta::specta]
 fn set_pack_lock(app: tauri::AppHandle, slug: String, locked: bool) -> Result<(), String> {
     instances::set_pack_lock(&app, &slug, locked)
 }
@@ -1190,6 +1221,7 @@ fn set_pack_lock(app: tauri::AppHandle, slug: String, locked: bool) -> Result<()
 /// also runs here so a bad project_id errors immediately. All download work runs
 /// inside [`ModUpdateJob`].
 #[tauri::command]
+#[specta::specta]
 async fn update_mod(
     app: tauri::AppHandle,
     manager: tauri::State<'_, TaskManager>,
@@ -1700,7 +1732,7 @@ impl TaskJob for ModUpdateJob {
 // ---------------------------------------------------------------------------
 
 /// Result returned to the frontend after a successful `.mrpack` import.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MrpackImportResult {
     /// Slug of the newly-created instance.
@@ -1968,6 +2000,7 @@ impl TaskJob for ImportMrpackJob {
 /// The task runs Plan → Download (staged) → Apply (promote + overrides + manifest).
 /// The terminal `task://update` event carries the [`MrpackImportResult`] JSON.
 #[tauri::command]
+#[specta::specta]
 async fn import_mrpack(
     app: tauri::AppHandle,
     manager: tauri::State<'_, TaskManager>,
@@ -2038,7 +2071,7 @@ async fn enqueue_import_mrpack(
 // ---------------------------------------------------------------------------
 
 /// Result returned to the frontend after a successful CurseForge `.zip` import.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CfImportResult {
     /// Slug of the newly-created instance.
@@ -2271,6 +2304,7 @@ async fn enqueue_import_cf_zip(
 
 /// Enqueue a CurseForge `.zip` import task and return its id synchronously.
 #[tauri::command]
+#[specta::specta]
 async fn import_curseforge_zip(
     app: tauri::AppHandle,
     manager: tauri::State<'_, TaskManager>,
@@ -2297,7 +2331,7 @@ async fn import_curseforge_zip(
 /// - `"manual"` — the pack's primary file has `url: None` (distribution
 ///   disabled at the pack level); no instance was created. The frontend should
 ///   open `page_url` in the browser.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ModpackInstallResult {
     /// Modrinth `.mrpack` installed successfully.
@@ -2326,6 +2360,7 @@ pub enum ModpackInstallResult {
 /// so CP-7 can detect and route the manual case without a task. This preserves
 /// the invariant that `Ok(u64)` always means "a task was enqueued."
 #[tauri::command]
+#[specta::specta]
 async fn install_modpack(
     app: tauri::AppHandle,
     manager: tauri::State<'_, TaskManager>,
@@ -2445,7 +2480,7 @@ async fn install_modpack(
 /// One struct for both providers (mrpack and CurseForge). `manual` is empty for
 /// mrpack updates and carries distribution-disabled files for CF updates, reusing
 /// the `CfManualFile` shape from slice B.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PackUpdateResult {
     /// Number of pack mods newly added (file_name absent from the old pack mods).
@@ -2672,6 +2707,7 @@ impl TaskJob for UpdateModpackJob {
 /// (before enqueue) so that errors surface immediately. The heavy FS work
 /// (plan execution, promote, overrides) runs in the task.
 #[tauri::command]
+#[specta::specta]
 async fn update_modpack(
     app: tauri::AppHandle,
     manager: tauri::State<'_, TaskManager>,
@@ -2771,6 +2807,67 @@ async fn update_modpack(
 #[path = "lib_tests.rs"]
 mod tests;
 
+// Export test — gated out on Windows because constructing the command surface
+// creates function pointers to Tauri commands which pull in WebView2 GUI DLLs,
+// crashing the Windows test binary (STATUS_ENTRYPOINT_NOT_FOUND). On Linux (with
+// GTK/WebKit installed, e.g. future CI), the test runs natively via
+// `cargo test --manifest-path src-tauri/Cargo.toml export_bindings` and exports
+// through the SAME `make_builder()` the app uses. On Windows, regenerate
+// bindings.ts by running `scripts/build.sh dev` once (the `#[cfg(debug_assertions)]`
+// block in `run()` writes the file at startup via that same builder).
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "bindings_export_tests.rs"]
+mod bindings_export_tests;
+
+/// Construct the tauri-specta Builder with all commands registered.
+///
+/// The single source-of-truth for the command surface. Every consumer routes
+/// through this one list: the invoke handler wired into the real Tauri app
+/// (`run()`), the debug-startup type export, and the Linux export test. There is
+/// exactly one `collect_commands!` — adding a command here updates all three, so
+/// the registered surface and the exported surface cannot drift.
+pub(crate) fn make_builder() -> Builder<tauri::Wry> {
+    Builder::<tauri::Wry>::new()
+        .dangerously_cast_bigints_to_number()
+        .commands(collect_commands![
+            app_info,
+            list_instances,
+            create_instance,
+            get_instance,
+            delete_instance,
+            get_settings,
+            save_settings,
+            app_paths,
+            list_minecraft_versions,
+            get_loaders,
+            execute_download_plan,
+            resolve_vanilla,
+            ensure_java,
+            launch_instance,
+            kill_instance,
+            list_running,
+            get_run_state,
+            get_run_logs,
+            list_tasks,
+            cancel_task,
+            begin_login,
+            cancel_login,
+            get_account,
+            logout,
+            search_mods,
+            get_mod_versions,
+            add_mod,
+            set_mod_enabled,
+            remove_mod,
+            update_mod,
+            set_pack_lock,
+            import_mrpack,
+            import_curseforge_zip,
+            install_modpack,
+            update_modpack,
+        ])
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // The running instance registry is the first managed state in this app.
@@ -2783,6 +2880,27 @@ pub fn run() {
 
     // Cancel token for in-flight begin_login.
     let cancel_token: CancelToken = std::sync::Mutex::new(None);
+
+    let builder = make_builder();
+
+    // In debug builds, export `src/lib/bindings.ts` at startup so the generated
+    // file stays current as commands and types evolve. This is the standard
+    // tauri-specta regeneration pattern for Windows (where the export test cannot
+    // run due to WebView2 DLL linking in the test binary). Run `scripts/build.sh
+    // dev`, wait for the app to start, then Ctrl-C; the file is written synchronously
+    // before the webview loads. The path is relative to the CWD at app launch,
+    // which is the project root when invoked via `tauri dev`.
+    #[cfg(debug_assertions)]
+    {
+        if let Err(e) = builder.export(
+            specta_typescript::Typescript::default(),
+            "../src/lib/bindings.ts",
+        ) {
+            eprintln!("[bindings] failed to export bindings.ts: {e}");
+        } else {
+            eprintln!("[bindings] exported src/lib/bindings.ts");
+        }
+    }
 
     tauri::Builder::default()
         .plugin(
@@ -2840,43 +2958,7 @@ pub fn run() {
             app.manage(task_manager);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            app_info,
-            list_instances,
-            create_instance,
-            get_instance,
-            delete_instance,
-            get_settings,
-            save_settings,
-            app_paths,
-            list_minecraft_versions,
-            get_loaders,
-            execute_download_plan,
-            resolve_vanilla,
-            ensure_java,
-            launch_instance,
-            kill_instance,
-            list_running,
-            get_run_state,
-            get_run_logs,
-            list_tasks,
-            cancel_task,
-            begin_login,
-            cancel_login,
-            get_account,
-            logout,
-            search_mods,
-            get_mod_versions,
-            add_mod,
-            set_mod_enabled,
-            remove_mod,
-            update_mod,
-            set_pack_lock,
-            import_mrpack,
-            import_curseforge_zip,
-            install_modpack,
-            update_modpack
-        ])
+        .invoke_handler(builder.invoke_handler())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

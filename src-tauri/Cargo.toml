@@ -39,7 +39,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 async-trait = "0.1"
 thiserror = "1"
-specta = "=2.0.0-rc.25"
+specta = { version = "=2.0.0-rc.25", features = ["serde_json", "function"] }
+specta-typescript = "=0.0.12"
 tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 
 [dev-dependencies]
