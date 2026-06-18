@@ -673,7 +673,8 @@ export interface UpdateModResult {
 }
 
 /**
- * Install a mod (and its required transitive deps) into an instance.
+ * Enqueue a mod-add task. Returns the task id synchronously; the terminal
+ * `AddModResult` arrives on `task://update` when status is `"done"`.
  *
  * `slug` is the instance slug (target instance, not the mod's URL slug).
  * `provider` accepts `"modrinth"` or `"curseforge"` (lowercase routing strings).
@@ -685,8 +686,8 @@ export function addMod(
   slug: string,
   mcVersion: string,
   loader: string,
-): Promise<AddModResult> {
-  return invoke<AddModResult>("add_mod", {
+): Promise<number> {
+  return invoke<number>("add_mod", {
     provider,
     projectId,
     versionId,
@@ -713,11 +714,12 @@ export function removeMod(slug: string, fileName: string): Promise<void> {
 }
 
 /**
- * Update an installed mod to its newest compatible version.
+ * Enqueue a mod-update task. Returns the task id synchronously; the terminal
+ * `UpdateModResult` arrives on `task://update` when status is `"done"`.
  * `projectId` is the provider project id stored in the mod's `ModEntry`.
  */
-export function updateMod(slug: string, projectId: string): Promise<UpdateModResult> {
-  return invoke<UpdateModResult>("update_mod", { slug, projectId });
+export function updateMod(slug: string, projectId: string): Promise<number> {
+  return invoke<number>("update_mod", { slug, projectId });
 }
 
 // --- Phase 6 slice A: mrpack import. Mirrors MrpackImportResult in lib.rs. ---

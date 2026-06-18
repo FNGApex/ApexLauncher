@@ -7,7 +7,6 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   AlertCircle,
   ArrowLeft,
@@ -38,16 +37,13 @@ import {
   setPackLock,
   updateMod,
   updateModpack,
-  type AddModResult,
   type FolderMod,
   type LaunchLogPayload,
   type LaunchExitPayload,
   type InstallLogPayload,
-  type ManualMod,
   type ModEntry,
   type ProjectSummary,
   type ProviderCommandError,
-  type UpdateModResult,
   LAUNCH_LOG_EVENT,
   LAUNCH_EXIT_EVENT,
   INSTALL_LOG_EVENT,
@@ -822,7 +818,6 @@ function ModSearchCard({
   onInstalled,
 }: ModSearchCardProps) {
   const [installing, setInstalling] = useState(false);
-  const [result, setResult] = useState<AddModResult | null>(null);
   const [installError, setInstallError] = useState<string | null>(null);
 
   // Resolve the provider routing string from the ProviderKind response value.
@@ -855,9 +850,9 @@ function ModSearchCard({
     if (!primaryVersion) return;
     setInstalling(true);
     setInstallError(null);
-    setResult(null);
     try {
-      const res = await addMod(
+      // addMod now returns a task id; result arrives via task://update (CP-9 toast).
+      await addMod(
         providerRoute,
         mod.id,
         primaryVersion.id,
@@ -865,8 +860,7 @@ function ModSearchCard({
         minecraft,
         loaderKind,
       );
-      setResult(res);
-      if (res.added.length > 0) onInstalled();
+      onInstalled();
     } catch (err) {
       setInstallError(String(err));
     } finally {
@@ -907,30 +901,28 @@ function ModSearchCard({
         </div>
 
         {/* Install button */}
-        {result ? null : (
-          <button
-            onClick={handleInstall}
-            disabled={installing || versionsQuery.isLoading || !primaryVersion || packLocked}
-            title={
-              packLocked
-                ? "Pack is locked — unlock to add mods"
-                : versionsQuery.isLoading
-                  ? "Fetching compatible versions…"
-                  : !primaryVersion
-                    ? "No compatible version found"
-                    : `Install ${primaryVersion.versionNumber}`
-            }
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/80 disabled:opacity-50"
-          >
-            {installing ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : versionsQuery.isLoading ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              "Install"
-            )}
-          </button>
-        )}
+        <button
+          onClick={handleInstall}
+          disabled={installing || versionsQuery.isLoading || !primaryVersion || packLocked}
+          title={
+            packLocked
+              ? "Pack is locked — unlock to add mods"
+              : versionsQuery.isLoading
+                ? "Fetching compatible versions…"
+                : !primaryVersion
+                  ? "No compatible version found"
+                  : `Install ${primaryVersion.versionNumber}`
+          }
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/80 disabled:opacity-50"
+        >
+          {installing ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : versionsQuery.isLoading ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            "Install"
+          )}
+        </button>
       </div>
 
       {/* Version fetch error */}
@@ -950,95 +942,11 @@ function ModSearchCard({
         </p>
       )}
 
-      {/* Install result summary */}
-      {result && (
-        <AddResultSummary result={result} onDismiss={() => setResult(null)} />
-      )}
+      {/* Install enqueued — result arrives via task://update (CP-9 toast) */}
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Add-mod result summary
-// ---------------------------------------------------------------------------
-
-interface AddResultSummaryProps {
-  result: AddModResult;
-  onDismiss: () => void;
-}
-
-function AddResultSummary({ result, onDismiss }: AddResultSummaryProps) {
-  return (
-    <div className="rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-xs">
-      <div className="space-y-2">
-        {result.added.length > 0 && (
-          <p className="text-green-400">
-            Added {result.added.length} mod{result.added.length !== 1 ? "s" : ""} successfully.
-          </p>
-        )}
-
-        {result.manual.length > 0 && (
-          <div>
-            <p className="mb-1 font-medium text-muted">Requires manual download:</p>
-            <ul className="space-y-1">
-              {result.manual.map((m) => (
-                <ManualEntry key={`${m.projectId}:${m.versionId}`} entry={m} />
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {result.unresolved.length > 0 && (
-          <div>
-            <p className="mb-0.5 font-medium text-muted">Unresolved dependencies:</p>
-            <ul className="space-y-0.5 text-muted">
-              {result.unresolved.map((u) => (
-                <li key={u.projectId}>
-                  {u.projectId} — {u.reason}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {result.failed.length > 0 && (
-          <div>
-            <p className="mb-0.5 font-medium text-danger">Failed downloads:</p>
-            <ul className="space-y-0.5 text-danger">
-              {result.failed.map((f) => (
-                <li key={f.fileName}>
-                  {f.fileName}: {f.error}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-
-      <button
-        onClick={onDismiss}
-        className="mt-2 flex items-center gap-1 text-muted hover:text-foreground"
-      >
-        <X className="size-3" />
-        Dismiss
-      </button>
-    </div>
-  );
-}
-
-function ManualEntry({ entry }: { entry: ManualMod }) {
-  return (
-    <li className="flex items-center justify-between gap-2 rounded-lg border border-border bg-surface px-3 py-1.5">
-      <span className="truncate text-muted">{entry.fileName}</span>
-      <button
-        onClick={() => openUrl(entry.pageUrl).catch(console.error)}
-        className="shrink-0 rounded px-2 py-0.5 text-xs font-medium text-primary hover:underline"
-      >
-        Open page
-      </button>
-    </li>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Installed mod row (relocated from inline page, behavior unchanged)
@@ -1053,8 +961,6 @@ interface ModRowProps {
 }
 
 function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps) {
-  const [updateResult, setUpdateResult] = useState<UpdateModResult | null>(null);
-
   const toggleMutation = useMutation({
     mutationFn: () => setModEnabled(instanceSlug, mod.fileName, mod.disabled),
     onSuccess: onMutate,
@@ -1065,14 +971,14 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
     onSuccess: onMutate,
   });
 
+  // updateMod now returns a task id; result arrives via task://update (CP-9 toast).
   const updateMutation = useMutation({
     mutationFn: () => {
       if (!entry) return Promise.reject(new Error("no mod entry"));
       return updateMod(instanceSlug, entry.projectId);
     },
-    onSuccess: (res) => {
-      setUpdateResult(res);
-      if (res.status === "updated") onMutate();
+    onSuccess: (_taskId) => {
+      // Enqueued — no synchronous result to display.
     },
   });
 
@@ -1148,11 +1054,6 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
         )}
       </div>
 
-      {/* Update result feedback */}
-      {updateResult && (
-        <UpdateResultBadge result={updateResult} onDismiss={() => setUpdateResult(null)} />
-      )}
-
       {/* Mutation errors */}
       {(toggleMutation.isError || removeMutation.isError || updateMutation.isError) && (
         <p className="text-xs text-danger">
@@ -1165,39 +1066,6 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
   );
 }
 
-interface UpdateResultBadgeProps {
-  result: UpdateModResult;
-  onDismiss: () => void;
-}
-
-function UpdateResultBadge({ result, onDismiss }: UpdateResultBadgeProps) {
-  const label = {
-    updated: "Updated to latest version.",
-    upToDate: "Already up to date.",
-    unresolved: "No compatible version found.",
-    failed: result.error ?? "Update failed.",
-    manual: "Manual download required.",
-  }[result.status] ?? result.status;
-
-  return (
-    <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-surface-2 px-2.5 py-1 text-xs">
-      <span className={result.status === "failed" ? "text-danger" : "text-muted"}>
-        {label}
-      </span>
-      {result.status === "manual" && result.pageUrl && (
-        <button
-          onClick={() => openUrl(result.pageUrl ?? "").catch(console.error)}
-          className="font-medium text-primary hover:underline"
-        >
-          Open page
-        </button>
-      )}
-      <button onClick={onDismiss} className="text-muted hover:text-foreground">
-        <X className="size-3" />
-      </button>
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Shared helpers

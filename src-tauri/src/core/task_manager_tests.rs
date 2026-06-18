@@ -424,6 +424,34 @@ fn cp3_task_kind_variants_are_distinct() {
     assert_ne!(TaskKind::PackInstall, TaskKind::PackUpdate);
 }
 
+// ---------------------------------------------------------------------------
+// CP-4 tests: ModAdd / ModUpdate kind variants
+// ---------------------------------------------------------------------------
+
+/// `ModAdd` and `ModUpdate` are distinct variants.
+#[test]
+fn cp4_task_kind_mod_variants_are_distinct() {
+    assert_ne!(TaskKind::ModAdd, TaskKind::Synthetic);
+    assert_ne!(TaskKind::ModUpdate, TaskKind::Synthetic);
+    assert_ne!(TaskKind::ModAdd, TaskKind::PackInstall);
+    assert_ne!(TaskKind::ModUpdate, TaskKind::PackUpdate);
+    assert_ne!(TaskKind::ModAdd, TaskKind::ModUpdate);
+}
+
+/// `TaskKind::ModAdd` serialises as the camelCase tag `"modAdd"` for the frontend.
+#[test]
+fn cp4_mod_add_kind_serializes_camel_case() {
+    let v = serde_json::to_value(TaskKind::ModAdd).expect("serialize");
+    assert_eq!(v, serde_json::json!("modAdd"));
+}
+
+/// `TaskKind::ModUpdate` serialises as `"modUpdate"`.
+#[test]
+fn cp4_mod_update_kind_serializes_camel_case() {
+    let v = serde_json::to_value(TaskKind::ModUpdate).expect("serialize");
+    assert_eq!(v, serde_json::json!("modUpdate"));
+}
+
 /// `TaskKind::PackInstall` serialises as the camelCase tag `"packInstall"` for the frontend.
 #[test]
 fn cp3_pack_install_kind_serializes_camel_case() {

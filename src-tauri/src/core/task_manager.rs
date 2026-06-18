@@ -47,6 +47,10 @@ pub enum TaskKind {
     PackInstall,
     /// An update to an already-installed modpack (update_modpack).
     PackUpdate,
+    /// Installing a mod (and its required transitive deps) into an instance.
+    ModAdd,
+    /// Updating a single installed mod to its newest compatible version.
+    ModUpdate,
 }
 
 /// Lifecycle status of a task. Matches the design's state diagram.

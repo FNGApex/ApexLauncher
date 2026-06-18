@@ -12,7 +12,7 @@ import type {
 // Task types — mirror task_manager.rs (serde rename_all = "camelCase")
 // ---------------------------------------------------------------------------
 
-export type TaskKind = "synthetic";
+export type TaskKind = "synthetic" | "packInstall" | "packUpdate" | "modAdd" | "modUpdate";
 
 /** Mirrors TaskStatus (#[serde(tag = "kind")]) */
 export type TaskStatus =
