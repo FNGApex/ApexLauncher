@@ -4,11 +4,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { LayoutGrid, Compass, Settings as Cog, Box, LogIn, LogOut, Loader2, X, Gamepad2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
+  events,
   beginLogin,
   cancelLogin,
   getAccount,
   logout,
-  listenDeviceCode,
   type DeviceCodePayload,
 } from "@/lib/ipc";
 import { DownloadManagerButton } from "@/components/DownloadManager";
@@ -49,8 +49,8 @@ export function Sidebar() {
 
     try {
       // Subscribe before invoking beginLogin so we never miss the event.
-      const unlisten = await listenDeviceCode((payload) => {
-        setDeviceCode(payload);
+      const unlisten = await events.authDeviceCode.listen((event) => {
+        setDeviceCode(event.payload);
         setLoginState("polling");
       });
       unlistenRef.current = unlisten;

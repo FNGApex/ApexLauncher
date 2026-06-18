@@ -1,6 +1,9 @@
 import { commands } from "@/lib/bindings";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { LoaderOption as GenLoaderOption, Task } from "@/lib/bindings";
+
+// Generated typed event surface (`events.<channel>.listen / once / emit`).
+// Re-exported so the event layer routes through `bindings.ts` like the commands.
+export { events } from "@/lib/bindings";
 
 /**
  * Thin adapter over the generated `bindings.ts`. Command wrappers route through
@@ -14,9 +17,8 @@ import type { LoaderOption as GenLoaderOption, Task } from "@/lib/bindings";
  * `getRunState`, `getRunLogs`, `cancelLogin`) already return a bare `Promise<T>`
  * and are called directly.
  *
- * NOTE: the event layer (payload interfaces, `*_EVENT` constants, `listen*`
- * helpers) is still hand-written — CP-6 migrates it to the generated `events.*`
- * surface.
+ * Events route through the generated `events.*` surface (re-exported above);
+ * subscribe with `events.<channel>.listen`. No hand-declared IPC types remain.
  */
 
 // --- Result unwrap (restores reject-on-error from the generated Result shape) ---
@@ -76,6 +78,9 @@ export type {
   PackUpdateResult,
   RunInfoPayload,
   RunLogPayload,
+  // Event payload type still referenced by name in a component (`Sidebar`);
+  // channels themselves are subscribed via the generated `events.*`.
+  DeviceCodePayload,
 } from "@/lib/bindings";
 
 import type { AccountMeta_Serialize, RunInfoPayload, RunLogPayload } from "@/lib/bindings";
@@ -193,7 +198,7 @@ export async function killInstance(slug: string): Promise<void> {
 
 /**
  * Begin the Microsoft device-code login flow. Long-lived: emits an
- * `auth://device-code` event (subscribe with `listenDeviceCode` first), then
+ * `auth://device-code` event (subscribe with `events.authDeviceCode.listen` first), then
  * polls until the user completes sign-in. Resolves with the persisted account.
  */
 export function beginLogin(): Promise<AccountMeta> {
@@ -370,138 +375,4 @@ export function listTasks(): Promise<Task[]> {
 /** Cancel a task by id. Idempotent; no-op for unknown / already-terminal ids. */
 export async function cancelTask(id: number): Promise<void> {
   await unwrap(commands.cancelTask(id));
-}
-
-// ===========================================================================
-// Event layer — hand-written; CP-6 migrates these to the generated `events.*`.
-// ===========================================================================
-
-// --- download://progress ---
-
-/** Payload emitted on the `download://progress` Tauri event channel. */
-export interface DownloadProgressPayload {
-  /** Source URL of the item currently downloading. */
-  url: string;
-  /** Bytes received so far for this item. */
-  bytesDone: number;
-  /** Total expected bytes; null when Content-Length was absent. */
-  bytesTotal: number | null;
-}
-
-// --- install://log ---
-
-/**
- * Payload emitted on the `install://log` channel during NeoForge / Forge
- * headless installer runs. Distinct from `launch://log` (installer output is
- * log-shaped, one line at a time). No `instanceId`: only one installer at a time.
- */
-export interface InstallLogPayload {
-  /** `"stdout"` or `"stderr"`. */
-  stream: string;
-  line: string;
-}
-
-/** Event name constant for the install log channel. */
-export const INSTALL_LOG_EVENT = "install://log" as const;
-
-/** Subscribe to the `install://log` event. Returns an unlisten function. */
-export function listenInstallLog(
-  handler: (payload: InstallLogPayload) => void,
-): Promise<UnlistenFn> {
-  return listen<InstallLogPayload>(INSTALL_LOG_EVENT, (event) => handler(event.payload));
-}
-
-// --- launch://log + launch://exit ---
-
-/** Payload emitted on the `launch://log` Tauri event channel. */
-export interface LaunchLogPayload {
-  /** Slug of the instance emitting this line. */
-  instanceId: string;
-  /** `"stdout"` or `"stderr"`. */
-  stream: string;
-  line: string;
-}
-
-/** Payload emitted on the `launch://exit` Tauri event channel. */
-export interface LaunchExitPayload {
-  /** Slug of the instance that exited. */
-  instanceId: string;
-  /** Process exit code; null if the code could not be determined. */
-  code: number | null;
-}
-
-/** Event name constants for the launch channel. */
-export const LAUNCH_LOG_EVENT = "launch://log" as const;
-export const LAUNCH_EXIT_EVENT = "launch://exit" as const;
-
-// --- auth://device-code ---
-
-/** Payload emitted on the `auth://device-code` channel during `beginLogin`. */
-export interface DeviceCodePayload {
-  userCode: string;
-  verificationUri: string;
-}
-
-/** Event name constant for the auth device-code channel. */
-export const AUTH_DEVICE_CODE_EVENT = "auth://device-code" as const;
-
-/** Subscribe to the `auth://device-code` event. Returns an unlisten function. */
-export function listenDeviceCode(
-  handler: (payload: DeviceCodePayload) => void,
-): Promise<UnlistenFn> {
-  return listen<DeviceCodePayload>(AUTH_DEVICE_CODE_EVENT, (event) => handler(event.payload));
-}
-
-// --- task://progress + task://update ---
-
-/** Progress update emitted on `task://progress` while a task downloads. */
-export interface TaskProgressPayload {
-  taskId: number;
-  currentChild: string | null;
-  done: number;
-  total: number;
-  bytes: number;
-}
-
-/** Event name constant for task progress. */
-export const TASK_PROGRESS_EVENT = "task://progress" as const;
-
-/** Event name constant for task status/lifecycle updates. */
-export const TASK_UPDATE_EVENT = "task://update" as const;
-
-/** Subscribe to `task://progress` events. Returns an unlisten function. */
-export function listenTaskProgress(
-  handler: (payload: TaskProgressPayload) => void,
-): Promise<UnlistenFn> {
-  return listen<TaskProgressPayload>(TASK_PROGRESS_EVENT, (event) => handler(event.payload));
-}
-
-/**
- * Subscribe to `task://update` events (full task snapshot per lifecycle change).
- * The payload is structurally a `Task`; callers (AppShell) cast to the store type.
- */
-export function listenTaskUpdate(
-  handler: (payload: unknown) => void,
-): Promise<UnlistenFn> {
-  return listen(TASK_UPDATE_EVENT, (event) => handler(event.payload));
-}
-
-// --- run://update ---
-
-/** Payload emitted on `run://update` for each run-status transition. */
-export interface RunUpdatePayload {
-  slug: string;
-  /** `"preparing"` | `"running"` | `"exited"` | `"killed"` | `"failed"` */
-  status: string;
-  exitCode: number | null;
-}
-
-/** Event name constant for run status updates. */
-export const RUN_UPDATE_EVENT = "run://update" as const;
-
-/** Subscribe to `run://update` events. Returns an unlisten function. */
-export function listenRunUpdate(
-  handler: (payload: RunUpdatePayload) => void,
-): Promise<UnlistenFn> {
-  return listen<RunUpdatePayload>(RUN_UPDATE_EVENT, (event) => handler(event.payload));
 }

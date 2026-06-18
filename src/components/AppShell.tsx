@@ -3,23 +3,14 @@ import { Outlet } from "react-router-dom";
 import { Sidebar } from "@/components/Sidebar";
 import { Toasts } from "@/components/Toasts";
 import {
-  LAUNCH_LOG_EVENT,
-  LAUNCH_EXIT_EVENT,
-  INSTALL_LOG_EVENT,
-  listenTaskUpdate,
-  listenTaskProgress,
-  listenRunUpdate,
+  events,
   listRunning,
   listTasks,
   getRunLogs,
-  type RunUpdatePayload,
   type RunInfoPayload,
   type RunLogPayload,
-  type TaskProgressPayload,
 } from "@/lib/ipc";
 import { useAppStore, type Task, type RunState, type RunLogLine } from "@/lib/store";
-import { listen } from "@tauri-apps/api/event";
-import type { LaunchLogPayload, LaunchExitPayload, InstallLogPayload } from "@/lib/ipc";
 
 /** Top-level chrome: fixed sidebar + scrollable content area.
  *
@@ -45,27 +36,27 @@ export function AppShell() {
     }
 
     // Subscribe to task lifecycle events.
-    listenTaskUpdate((raw) => {
-      // The payload shape matches Task from store.ts exactly.
-      upsertTask(raw as Task);
+    events.taskUpdate.listen((event) => {
+      // The deserialized payload is a Task (store re-exports the generated type).
+      upsertTask(event.payload as Task);
     }).then((fn) => {
       if (cancelled) fn();
       else reg(fn);
     }).catch(console.error);
 
-    listenTaskProgress((payload: TaskProgressPayload) => {
-      patchTaskProgress(payload);
+    events.taskProgress.listen((event) => {
+      patchTaskProgress(event.payload);
     }).then((fn) => {
       if (cancelled) fn();
       else reg(fn);
     }).catch(console.error);
 
     // Subscribe to run lifecycle events.
-    listenRunUpdate((payload: RunUpdatePayload) => {
+    events.runUpdate.listen((event) => {
       upsertRun({
-        slug: payload.slug,
-        status: payload.status,
-        exitCode: payload.exitCode,
+        slug: event.payload.slug,
+        status: event.payload.status,
+        exitCode: event.payload.exitCode,
       });
     }).then((fn) => {
       if (cancelled) fn();
@@ -73,7 +64,7 @@ export function AppShell() {
     }).catch(console.error);
 
     // Subscribe to log events and buffer into the runs slice.
-    listen<LaunchLogPayload>(LAUNCH_LOG_EVENT, (event) => {
+    events.launchLog.listen((event) => {
       const { instanceId, stream, line } = event.payload;
       appendLog(instanceId, { stream, line });
     }).then((fn) => {
@@ -81,7 +72,7 @@ export function AppShell() {
       else reg(fn);
     }).catch(console.error);
 
-    listen<LaunchExitPayload>(LAUNCH_EXIT_EVENT, (event) => {
+    events.launchExit.listen((event) => {
       const { instanceId, code } = event.payload;
       appendLog(instanceId, { stream: "launcher", line: `process exited (code ${code ?? "unknown"})` });
     }).then((fn) => {
@@ -90,7 +81,7 @@ export function AppShell() {
     }).catch(console.error);
 
     // install://log has no instanceId; attribute to whichever run is Preparing.
-    listen<InstallLogPayload>(INSTALL_LOG_EVENT, (event) => {
+    events.installLog.listen((event) => {
       const { stream, line } = event.payload;
       const runs = useAppStore.getState().runs;
       const preparingSlug = [...runs.values()].find((r) => r.status === "preparing")?.slug;
