@@ -12,10 +12,11 @@ Serial FIFO `TaskManager` (Approach C) that runs tasks one at a time in enqueue 
 
 ## Artifacts
 
-- `src/lib/store.ts` — `Task`, `TaskStatus`, `TaskKind`, `ChildItem`, `TaskProgressUpdate`, `TaskResult` TS types mirroring `task_manager.rs`; `TasksSlice` (`tasks: Map<number, Task>`, `upsertTask`, `patchTaskProgress`) and `RunsSlice` composed into `useAppStore`
-- `src/lib/ipc.ts` — `TaskProgressPayload`, `TASK_PROGRESS_EVENT`, `TASK_UPDATE_EVENT`, `listenTaskProgress`, `listenTaskUpdate`, `listTasks`, `cancelTask`
+- `src/lib/bindings.ts` (generated) — `Task`, `TaskStatus`, `TaskKind`, `ChildItem`, `TaskResult`, `TaskProgressPayload`, `TaskUpdatePayload` generated from Rust via tauri-specta; `events.taskProgress` + `events.taskUpdate` typed listeners. This is the authoritative type source — do not hand-edit.
+- `src/lib/store.ts` — re-exports `Task`/`TaskKind`/`TaskStatus`/`ChildItem`/`TaskResult` straight from `bindings.ts` (no hand-declared task types); `RunState` composed as `RunUpdatePayload & { elapsedMs?: number | null }`; `TasksSlice` (`tasks: Map<number, Task>`, `upsertTask`, `patchTaskProgress`) and `RunsSlice` composed into `useAppStore`
+- `src/lib/ipc.ts` — thin adapter: `listTasks` / `cancelTask` wrappers routing through `commands.*`; no hand-declared task type interfaces
 - `src/components/DownloadManager.tsx` — `DownloadManagerButton` + `DownloadManagerPanel` + `TaskRow` + `StatusBadge`; reads tasks from `useAppStore(s => s.tasks)`; calls `cancelTask` for active tasks
-- `src/components/AppShell.tsx` — subscribes to `task://progress` + `task://update` events; hydrates store via `listTasks()` on mount
+- `src/components/AppShell.tsx` — subscribes to `task://progress` + `task://update` via `events.taskProgress.listen` / `events.taskUpdate.listen` (generated surface); hydrates store via `listTasks()` on mount
 
 ## Docs
 
