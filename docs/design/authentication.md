@@ -36,7 +36,7 @@ plaintext.
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Azure client_id | **Own registered Azure app** (`modloader`, consumers tenant) as `DEFAULT_MS_CLIENT_ID`, env-overridable via `MODLOADER_MS_CLIENT_ID` | Original choice (official launcher id, "no per-user Azure registration") failed in practice: that id lives only in login.live.com (redirect flow) and the AAD v2.0 device-code endpoint rejects it (AADSTS700016). See docs/design/auth-client-id-blocker.md. Mojang approval of the new id pending (`login_with_xbox` 403s until then). |
+| Azure client_id | **Own registered Azure app** (`modloader`, consumers tenant) as `DEFAULT_MS_CLIENT_ID`, env-overridable via `MODLOADER_MS_CLIENT_ID` | Original choice (official launcher id, "no per-user Azure registration") failed in practice: that id lives only in login.live.com (redirect flow) and the AAD v2.0 device-code endpoint rejects it (AADSTS700016). See docs/design/auth-client-id-blocker.md. Azure app approved 2026-06-11; `login_with_xbox` succeeds. |
 | Offline mode | **Kept** behind a setting | Preserves the no-account dev/test + cracked-server path. |
 | Token storage | `keyring` crate for the refresh-token secret; `accounts.json` for non-secret metadata | ARCHITECTURE.md §7 already commits to `keyring`; metadata needs listing without unlocking the keychain. |
 | HTTP client | Hand-rolled chain over existing `reqwest` | Consistent with `download.rs` / `java.rs` / `meta.rs` — no all-in-one MC-auth crate is maintained. |

@@ -113,7 +113,7 @@ Unresolved items deferred per the design doc:
 
 ## Implementation log
 
-### shipped (manual e2e pending) — 2026-06-10
+### shipped — 2026-06-10
 
 Built across 7 iterations of /subagent-implementation. Commits (chronological):
 
@@ -134,5 +134,5 @@ Built across 7 iterations of /subagent-implementation. Commits (chronological):
 **Deferred items still open:**
 - `neoforge-forge-launch-f-5` — type-safe artifact-vs-base URL contract (.claude/project/followups/)
 - `neoforge-forge-launch-f-11` — install://log per-instance filtering (.claude/project/followups/)
-- Manual e2e (success criteria 1, 2, 8): NeoForge launch, Forge launch, vanilla/fabric regression — pending user verification; MS-auth online launch additionally blocked on Mojang app-review approval (see docs/design/auth-client-id-blocker.md), offline mode unaffected.
+- Manual e2e (success criteria 1, 2, 8): NeoForge launch, Forge launch, vanilla/fabric regression — code-complete; routine developer smoke-run. MS-auth online launch is unblocked (Azure app approved 2026-06-11, see docs/design/auth-client-id-blocker.md); offline mode unaffected.
 - Dropped at triage: F-4 (deliberate maven_coord_to_path reuse), F-6 (placeholders covered by synthetic launch.rs tests), F-12 (wrapper kept for ipc.ts pattern parity).

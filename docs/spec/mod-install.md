@@ -5,7 +5,8 @@
 Install a mod from a provider into an instance with automatic required-dependency
 resolution; enable/disable, update, and remove installed mods; degrade
 distribution-disabled files to a manual-download prompt. Modrinth path fully functional
-with no API key; CurseForge rides the same code path, gated only by the pending key.
+with no API key; CurseForge rides the same code path, using the available CF API key
+(env / `settings.curseforge_api_key` / baked tier).
 
 ## Non-goals
 

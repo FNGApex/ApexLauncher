@@ -9,8 +9,8 @@ let the user enable/disable/update/remove them. CurseForge authors can disable
 distribution (`allowModDistribution:false`); those mods must degrade to an "open the
 project page and drop the file in manually" prompt instead of failing.
 
-Build the **Modrinth path first** (no API key). CurseForge rides the same code path; it
-only needs the pending API key to start returning data. Nothing in slice B is
+Build the **Modrinth path first** (no API key). CurseForge rides the same code path with
+the available CF API key (env / `settings.curseforge_api_key` / baked tier). Nothing in slice B is
 Modrinth-specific by design — the `ModProvider` trait and normalized types already unify
 both backends.
 
@@ -127,7 +127,7 @@ gates its data.
   accepts `https://modrinth.com/mod/{id}`; CF's canonical page is slug-based
   (`/minecraft/mc-mods/{slug}`) — id-based CF URLs are not guaranteed to resolve. Acceptable
   for slice B (Modrinth-first; CF distribution-disabled is rarer and the top-level add always
-  has a slug); revisit when CF data is live. Tracked as a follow-up rather than a blocker.
+  has a slug). Tracked as a follow-up.
 - **"Newest compatible" tie-break.** Relying on provider return order (newest-first). If a
   provider ever returns unordered results, add an explicit date sort. No evidence either
   provider does today.

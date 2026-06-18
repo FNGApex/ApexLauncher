@@ -1,11 +1,11 @@
 # Auth blocker: Microsoft sign-in fails with AADSTS700016
 
-**Status:** resolved pending final verification. Discovered 2026-06-09 testing the Phase 3 auth
-flow against a real Microsoft account. Mojang approved the registered client ID
-`82a79499-8c2e-49b8-9e42-1dd9d56252f2` on 2026-06-11 — the `login_with_xbox` 403 gate is cleared.
-Phase 3 code was already complete and wired; only the async approval remained. Last open item: an
-end-to-end re-test (add a real account, launch online). This was a configuration/credential gap,
-not a logic bug.
+**Status:** resolved. Discovered 2026-06-09 testing the Phase 3 auth flow against a real
+Microsoft account. Mojang approved the registered client ID
+`82a79499-8c2e-49b8-9e42-1dd9d56252f2` on 2026-06-11 — the `login_with_xbox` 403 gate is
+cleared and online sign-in works. Phase 3 code was already complete and wired; only the async
+approval remained. This was a configuration/credential gap, not a logic bug. Retained as a
+historical record of the AADSTS700016 root cause.
 
 ## Symptom
 

@@ -189,4 +189,4 @@ Suite: 226 → 293 Rust tests; `npm run build` clean throughout.
 
 **Deferred items still open:**
 - none deferred. Dropped at triage (reason: premature at current scale, revisit if Browse shows latency in manual verify): F-7 reqwest client per command call, F-10 IntersectionObserver re-attach churn, F-11 error/loading branch order.
-- Open verification gates (not findings): manual UI verify in `npm run tauri dev` (debounce, infinite scroll, All-tab columns, CF key-missing state) and live CF testing once the CurseForge API key arrives (external gate, console.curseforge.com).
+- Verification: manual UI verify in `npm run tauri dev` (debounce, infinite scroll, All-tab columns, CF key-missing state). The CurseForge API key is available (env / `settings.curseforge_api_key` / baked tier), so live CF testing is unblocked — see the curseforge-live-testing notes.
