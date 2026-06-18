@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::Manager as _;
-use tauri_specta::{Builder, collect_commands};
+use tauri_specta::{Builder, collect_commands, collect_events};
 
 // `pub` so integration tests in `tests/` can reach the pure helpers
 // (e.g. `store::cache_subdir_path`). This is an internal app lib, not a
@@ -78,8 +78,9 @@ impl std::fmt::Display for AuthCommandError {
 // Err variant as the error payload to the frontend.
 
 /// Payload for the `auth://device-code` event emitted by `begin_login`.
-#[derive(Clone, Serialize, specta::Type)]
+#[derive(Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
 #[serde(rename_all = "camelCase")]
+#[tauri_specta(event_name = "auth://device-code")]
 struct DeviceCodePayload {
     user_code: String,
     verification_uri: String,
@@ -320,8 +321,9 @@ fn app_paths(app: tauri::AppHandle) -> Result<AppPaths, String> {
 ///
 /// Mirrors [`ProgressUpdate`] with serde rename so the TypeScript side
 /// receives camelCase field names.
-#[derive(Clone, Serialize, specta::Type)]
+#[derive(Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
 #[serde(rename_all = "camelCase")]
+#[tauri_specta(event_name = "download://progress")]
 struct ProgressPayload {
     /// Source URL of the item currently downloading.
     url: String,
@@ -415,8 +417,9 @@ async fn ensure_java(app: tauri::AppHandle, major: u32) -> Result<JavaInstallati
 ///
 /// Mirrors the `CapturingLaunchSink` line tuple with serde rename so the
 /// TypeScript side receives camelCase field names.
-#[derive(Clone, Serialize, specta::Type)]
+#[derive(Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
 #[serde(rename_all = "camelCase")]
+#[tauri_specta(event_name = "launch://log")]
 struct LaunchLogPayload {
     instance_id: String,
     /// `"stdout"` or `"stderr"`.
@@ -425,8 +428,9 @@ struct LaunchLogPayload {
 }
 
 /// Payload emitted on the `launch://exit` Tauri event channel.
-#[derive(Clone, Serialize, specta::Type)]
+#[derive(Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
 #[serde(rename_all = "camelCase")]
+#[tauri_specta(event_name = "launch://exit")]
 struct LaunchExitPayload {
     instance_id: String,
     /// Process exit code; `null` if the code could not be determined.
@@ -438,8 +442,9 @@ struct LaunchExitPayload {
 /// Fired on each run-status transition (`preparing` → `running` → terminal).
 /// Mirrors [`launch::RunInfo`]'s queryable scalars so the frontend runs slice can
 /// patch its state without a follow-up `get_run_state` round-trip.
-#[derive(Clone, Serialize, specta::Type)]
+#[derive(Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
 #[serde(rename_all = "camelCase")]
+#[tauri_specta(event_name = "run://update")]
 struct RunUpdatePayload {
     /// Instance slug (registry key).
     slug: String,
@@ -537,8 +542,9 @@ impl From<launch::LogLine> for RunLogPayload {
 ///
 /// Mirrors [`task_manager::TaskProgress`] with serde camelCase. Fires per child
 /// transition while a task downloads. The frontend mirror lands in CP-7.
-#[derive(Clone, Serialize, specta::Type)]
+#[derive(Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
 #[serde(rename_all = "camelCase")]
+#[tauri_specta(event_name = "task://progress")]
 struct TaskProgressPayload {
     task_id: u64,
     /// Label of the child currently in flight; `null` between children.
@@ -555,8 +561,9 @@ struct TaskProgressPayload {
 /// Mirrors [`task_manager::Task`] with serde camelCase. The status tag and
 /// child-item shapes already serialize camelCase from the core types. The
 /// frontend mirror lands in CP-7.
-#[derive(Clone, Serialize, specta::Type)]
+#[derive(Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
 #[serde(rename_all = "camelCase")]
+#[tauri_specta(event_name = "task://update")]
 struct TaskUpdatePayload {
     #[serde(flatten)]
     task: Task,
@@ -611,8 +618,9 @@ async fn cancel_task(manager: tauri::State<'_, TaskManager>, id: u64) -> Result<
 ///
 /// Distinct from `launch://log` — installer output is log-shaped (one line at
 /// a time from the installer's stdout/stderr), not item-progress-shaped.
-#[derive(Clone, Serialize, specta::Type)]
+#[derive(Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
 #[serde(rename_all = "camelCase")]
+#[tauri_specta(event_name = "install://log")]
 struct InstallLogPayload {
     /// `"stdout"` or `"stderr"`.
     stream: String,
@@ -1732,7 +1740,7 @@ impl TaskJob for ModUpdateJob {
 // ---------------------------------------------------------------------------
 
 /// Result returned to the frontend after a successful `.mrpack` import.
-#[derive(Debug, Serialize, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MrpackImportResult {
     /// Slug of the newly-created instance.
@@ -2071,7 +2079,7 @@ async fn enqueue_import_mrpack(
 // ---------------------------------------------------------------------------
 
 /// Result returned to the frontend after a successful CurseForge `.zip` import.
-#[derive(Debug, Serialize, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CfImportResult {
     /// Slug of the newly-created instance.
@@ -2331,7 +2339,7 @@ async fn import_curseforge_zip(
 /// - `"manual"` — the pack's primary file has `url: None` (distribution
 ///   disabled at the pack level); no instance was created. The frontend should
 ///   open `page_url` in the browser.
-#[derive(Debug, Serialize, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ModpackInstallResult {
     /// Modrinth `.mrpack` installed successfully.
@@ -2480,7 +2488,7 @@ async fn install_modpack(
 /// One struct for both providers (mrpack and CurseForge). `manual` is empty for
 /// mrpack updates and carries distribution-disabled files for CF updates, reusing
 /// the `CfManualFile` shape from slice B.
-#[derive(Debug, Serialize, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PackUpdateResult {
     /// Number of pack mods newly added (file_name absent from the old pack mods).
@@ -2819,6 +2827,33 @@ mod tests;
 #[path = "bindings_export_tests.rs"]
 mod bindings_export_tests;
 
+/// Typed union of all terminal task results.
+///
+/// Carried by `Task.result` (via specta type override) and surfaced in the
+/// generated `bindings.ts` so the frontend can read `task.result` as a typed
+/// union rather than `any`. The runtime field in `Task` remains
+/// `Option<serde_json::Value>` (see `task_manager.rs`) and `finish_done_with_result`
+/// continues to accept `serde_json::Value`; this enum drives the TS type only.
+///
+/// Wire shapes of the 6 variants match what `serde_json::to_value(&result)` writes
+/// for each corresponding result struct — no format change.
+#[derive(Debug, Serialize, Deserialize, specta::Type)]
+#[serde(untagged)]
+pub enum TaskResult {
+    /// Result of `import_mrpack` / `install_modpack` (mrpack branch).
+    MrpackImport(MrpackImportResult),
+    /// Result of `import_curseforge_zip` / `install_modpack` (CF branch).
+    CfImport(CfImportResult),
+    /// Result of `install_modpack` (typed tagged union with `kind` field).
+    ModpackInstall(ModpackInstallResult),
+    /// Result of `update_modpack`.
+    PackUpdate(PackUpdateResult),
+    /// Result of `add_mod`.
+    AddMod(AddModResult),
+    /// Result of `update_mod`.
+    UpdateMod(UpdateModResult),
+}
+
 /// Construct the tauri-specta Builder with all commands registered.
 ///
 /// The single source-of-truth for the command surface. Every consumer routes
@@ -2866,6 +2901,16 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             install_modpack,
             update_modpack,
         ])
+        .events(collect_events![
+            DeviceCodePayload,
+            ProgressPayload,
+            LaunchLogPayload,
+            LaunchExitPayload,
+            RunUpdatePayload,
+            TaskProgressPayload,
+            TaskUpdatePayload,
+            InstallLogPayload,
+        ])
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2902,6 +2947,11 @@ pub fn run() {
         }
     }
 
+    // Clone the builder so `mount_events` (setup closure) and `invoke_handler`
+    // (chained after setup) can each own a copy. Builder::clone is cheap —
+    // it clones the shared command list Arc and the BuilderConfiguration.
+    let builder_for_setup = builder.clone();
+
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -2928,7 +2978,10 @@ pub fn run() {
         .manage(registry)
         .manage(prep_semaphore)
         .manage(cancel_token)
-        .setup(|app| {
+        .setup(move |app| {
+            // Mount typed event registry so Event::listen / Event::emit resolve
+            // channel names at runtime (required when collect_events! is used).
+            builder_for_setup.mount_events(app);
             // Initialize the account store now that the AppHandle is available,
             // so the real on-disk path can be resolved.
             //
