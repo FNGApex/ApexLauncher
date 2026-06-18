@@ -1,201 +1,384 @@
-import { invoke } from "@tauri-apps/api/core";
+import { commands } from "@/lib/bindings";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { LoaderOption as GenLoaderOption, Task } from "@/lib/bindings";
 
 /**
- * Typed wrappers over Tauri commands. Keep every `invoke` call behind a named
- * function here so the command surface is discoverable and the arg/return types
- * live in one place. Later phases will generate these from Rust (specta/ts-rs).
+ * Thin adapter over the generated `bindings.ts`. Command wrappers route through
+ * the generated `commands.*` surface and preserve the throw-on-error +
+ * positional / `?? null` ergonomics that call sites depend on. Generated DTOs are
+ * re-exported below under the names components import.
+ *
+ * Generated fallible commands return a `{ status: "ok" | "error" }` Result rather
+ * than rejecting; `unwrap` collapses that back to the historical "resolve data /
+ * reject error" contract. The 5 infallible commands (`appInfo`, `listRunning`,
+ * `getRunState`, `getRunLogs`, `cancelLogin`) already return a bare `Promise<T>`
+ * and are called directly.
+ *
+ * NOTE: the event layer (payload interfaces, `*_EVENT` constants, `listen*`
+ * helpers) is still hand-written — CP-6 migrates it to the generated `events.*`
+ * surface.
  */
 
-export interface AppInfo {
-  name: string;
-  version: string;
-  tauriVersion: string;
+// --- Result unwrap (restores reject-on-error from the generated Result shape) ---
+
+type CmdResult<T> = { status: "ok"; data: T } | { status: "error"; error: unknown };
+
+async function unwrap<T>(p: Promise<CmdResult<T>>): Promise<T> {
+  const r = await p;
+  if (r.status === "error") throw r.error;
+  return r.data;
 }
 
-export function getAppInfo(): Promise<AppInfo> {
-  return invoke<AppInfo>("app_info");
-}
+// --- Re-exported generated DTOs (replace the former hand-declared interfaces) ---
 
-// --- Phase 1: instances. Mirrors `src-tauri/src/core/instances.rs`. ---
+export type {
+  AppInfo,
+  Loader,
+  JavaCfg,
+  ModEntry,
+  Instance,
+  FolderMod,
+  InstanceDetail,
+  CreateInstanceReq,
+  Settings,
+  AppPaths,
+  McVersion,
+  DownloadItem,
+  DownloadPlan,
+  ExpectedHash,
+  ItemStatus,
+  ItemOutcome,
+  PlanResult,
+  LaunchMeta,
+  ResolveResult,
+  JavaInstallation,
+  JavaSource,
+  AuthCommandError,
+  ProviderKind,
+  ProjectType,
+  ProjectSummary,
+  VersionFile,
+  Dependency,
+  ProjectVersion,
+  SearchResult,
+  ProviderCommandError,
+  ManualMod,
+  UnresolvedDep,
+  Suggestion,
+  IncompatibleWarning,
+  FailedMod,
+  AddModResult,
+  UpdateModResult,
+  MrpackImportResult,
+  CfManualFile,
+  CfImportResult,
+  ModpackInstallResult,
+  PackUpdateResult,
+  RunInfoPayload,
+  RunLogPayload,
+} from "@/lib/bindings";
 
+import type { AccountMeta_Serialize, RunInfoPayload, RunLogPayload } from "@/lib/bindings";
+
+/**
+ * Persisted account metadata exposed to the frontend. The generated `AccountMeta`
+ * union carries a malformed serde-alias arm (`{ mc_token_expires }`) that only
+ * exists for loading legacy `account.json` on the Rust side and never reaches the
+ * webview — the wire shape is always the serialize form, so we surface that.
+ */
+export type AccountMeta = AccountMeta_Serialize;
+
+/**
+ * Loader discriminant. The Rust enum is erased to a bare `string` in the
+ * generated bindings (specta drops the variant set on `Loader.kind`), so the
+ * narrow union stays frontend-owned. `LoaderOption` is re-narrowed over the
+ * generated shape so loader pickers keep their exhaustive typing.
+ */
 export type LoaderKind = "vanilla" | "fabric" | "quilt" | "forge" | "neoforge";
 
-export interface Loader {
-  kind: LoaderKind;
-  version: string | null;
-}
-
-export interface JavaCfg {
-  major: number | null;
-  argsOverride: string | null;
-  memoryMb: number;
-}
-
-export interface InstanceSource {
-  provider: string;
-  projectId: string;
-  fileId: string;
-  packVersion: string;
-}
-
-export interface ModEntry {
-  provider: string;
-  projectId: string;
-  versionId: string;
-  fileName: string;
-  hashes: Record<string, string>;
-  enabled: boolean;
-  side: string;
-  /** `true` when written by a pack importer; `false` (default) for user-added mods. */
-  fromPack?: boolean;
-}
-
-export interface Instance {
-  schema: number;
-  id: string;
-  name: string;
-  slug: string;
-  icon: string | null;
-  minecraft: string;
-  loader: Loader;
-  java: JavaCfg;
-  source: InstanceSource | null;
-  /** When `true`, mod-mutation commands are blocked by the backend. */
-  packLocked?: boolean;
-  mods: ModEntry[];
-  created: string;
-  lastPlayed: string | null;
-  totalPlaytimeSec: number;
-}
-
-/** A jar present in `mc/mods/`, whether or not it's tracked in `mods[]`. */
-export interface FolderMod {
-  fileName: string;
-  disabled: boolean;
-  sizeBytes: number;
-  managed: boolean;
-}
-
-export interface InstanceDetail {
-  instance: Instance;
-  folderMods: FolderMod[];
-}
-
-export interface CreateInstanceReq {
-  name: string;
-  minecraft: string;
-  loader: Loader;
-}
-
-export function listInstances(): Promise<Instance[]> {
-  return invoke<Instance[]>("list_instances");
-}
-
-export function createInstance(req: CreateInstanceReq): Promise<Instance> {
-  return invoke<Instance>("create_instance", { req });
-}
-
-export function getInstance(slug: string): Promise<InstanceDetail> {
-  return invoke<InstanceDetail>("get_instance", { slug });
-}
-
-export function deleteInstance(slug: string): Promise<void> {
-  return invoke<void>("delete_instance", { slug });
-}
-
-// --- Phase 1: global settings. Mirrors `src-tauri/src/core/settings.rs`. ---
-
-export interface Settings {
-  schema: number;
-  defaultMemoryMb: number;
-  defaultJavaArgs: string;
-  curseforgeApiKey: string | null;
-}
-
-export interface AppPaths {
-  dataDir: string;
-  instancesDir: string;
-}
-
-export function getSettings(): Promise<Settings> {
-  return invoke<Settings>("get_settings");
-}
-
-export function saveSettings(settings: Settings): Promise<Settings> {
-  return invoke<Settings>("save_settings", { settings });
-}
-
-export function getAppPaths(): Promise<AppPaths> {
-  return invoke<AppPaths>("app_paths");
-}
-
-// --- Version & loader metadata. Mirrors core/versions.rs + core/loaders.rs. ---
-
-export interface McVersion {
-  id: string;
-  releaseTime: string;
-}
-
 /** A loader available for a given MC version, with its builds (newest first). */
-export interface LoaderOption {
-  kind: LoaderKind;
-  versions: string[];
+export type LoaderOption = Omit<GenLoaderOption, "kind"> & { kind: LoaderKind };
+
+// --- Phase 0: app metadata ---
+
+export function getAppInfo() {
+  return commands.appInfo();
 }
+
+// --- Phase 1: instances ---
+
+export function listInstances() {
+  return unwrap(commands.listInstances());
+}
+
+export function createInstance(req: Parameters<typeof commands.createInstance>[0]) {
+  return unwrap(commands.createInstance(req));
+}
+
+export function getInstance(slug: string) {
+  return unwrap(commands.getInstance(slug));
+}
+
+export async function deleteInstance(slug: string): Promise<void> {
+  await unwrap(commands.deleteInstance(slug));
+}
+
+// --- Phase 1: global settings ---
+
+export function getSettings() {
+  return unwrap(commands.getSettings());
+}
+
+export function saveSettings(settings: Parameters<typeof commands.saveSettings>[0]) {
+  return unwrap(commands.saveSettings(settings));
+}
+
+export function getAppPaths() {
+  return unwrap(commands.appPaths());
+}
+
+// --- Version & loader metadata ---
 
 /** Stable Minecraft releases, newest first, down to 1.7.10. */
-export function listMinecraftVersions(): Promise<McVersion[]> {
-  return invoke<McVersion[]>("list_minecraft_versions");
+export function listMinecraftVersions() {
+  return unwrap(commands.listMinecraftVersions());
 }
 
 /** Loaders (incl. vanilla) available for `minecraft`, each with its build list. */
-export function getLoaders(minecraft: string): Promise<LoaderOption[]> {
-  return invoke<LoaderOption[]>("get_loaders", { minecraft });
+export async function getLoaders(minecraft: string): Promise<LoaderOption[]> {
+  // The generated `kind` is `string`; the values are valid `LoaderKind` at runtime.
+  return (await unwrap(commands.getLoaders(minecraft))) as LoaderOption[];
 }
 
-// --- Phase 2: download engine. Mirrors core/download.rs. ---
+// --- Phase 2: download engine ---
 
-/** A single file to download as part of a plan. */
-export interface DownloadItem {
-  url: string;
-  /** Absolute destination path on disk. */
-  dest: string;
-  /** Expected hash for verification; null disables hash-checking (not recommended). */
-  expectedHash:
-    | { type: "sha1"; value: string }
-    | { type: "sha256"; value: string }
-    | { type: "sha512"; value: string }
-    | null;
-  /** Expected file size in bytes; null if unknown. */
-  size: number | null;
+/**
+ * Execute a DownloadPlan concurrently. Progress rides the `download://progress`
+ * event channel. `concurrency` defaults to 8 (null) when omitted.
+ */
+export function executeDownloadPlan(
+  plan: Parameters<typeof commands.executeDownloadPlan>[0],
+  concurrency?: number | null,
+) {
+  return unwrap(commands.executeDownloadPlan(plan, concurrency ?? null));
 }
 
-/** An ordered list of items to download as a unit. */
-export interface DownloadPlan {
-  items: DownloadItem[];
+// --- Phase 2: vanilla resolver ---
+
+/** Resolve a vanilla Minecraft version into a DownloadPlan + LaunchMeta. */
+export function resolveVanilla(versionId: string) {
+  return unwrap(commands.resolveVanilla(versionId));
 }
 
-/** Per-item outcome status returned by executeDownloadPlan. */
-export type ItemStatus =
-  | { kind: "ok" }
-  | { kind: "skipped" }
-  | { kind: "failed"; error: string };
+// --- Phase 2, slice C: Java manager ---
 
-/** The outcome of a single item within an executed plan. */
-export interface ItemOutcome {
-  url: string;
-  status: ItemStatus;
+/** Detect or provision a JRE for the given Java major version. */
+export function ensureJava(major: number) {
+  return unwrap(commands.ensureJava(major));
 }
 
-/** Aggregated result returned by executeDownloadPlan. */
-export interface PlanResult {
-  outcomes: ItemOutcome[];
+// --- Phase 2, slice D: vanilla launch ---
+
+/** Launch a vanilla Minecraft instance. Streams output as `launch://log` events. */
+export async function launchInstance(slug: string): Promise<void> {
+  await unwrap(commands.launchInstance(slug));
+}
+
+/** Stop (kill) a running Minecraft instance. */
+export async function killInstance(slug: string): Promise<void> {
+  await unwrap(commands.killInstance(slug));
+}
+
+// --- Phase 3: Microsoft authentication ---
+
+/**
+ * Begin the Microsoft device-code login flow. Long-lived: emits an
+ * `auth://device-code` event (subscribe with `listenDeviceCode` first), then
+ * polls until the user completes sign-in. Resolves with the persisted account.
+ */
+export function beginLogin(): Promise<AccountMeta> {
+  return unwrap(commands.beginLogin());
+}
+
+/** Cancel an in-flight `beginLogin`. No-op if no login is in progress. */
+export function cancelLogin() {
+  return commands.cancelLogin();
+}
+
+/** Return the persisted account, or null when not logged in. */
+export function getAccount(): Promise<AccountMeta | null> {
+  return unwrap(commands.getAccount());
+}
+
+/** Log out: clears the persisted account and OS keyring entry. */
+export async function logout(): Promise<void> {
+  await unwrap(commands.logout());
+}
+
+// --- Phase 5: provider browse ---
+
+/**
+ * Search mods on the given provider. `provider` is a lowercase routing string
+ * (`"modrinth"` / `"curseforge"`), distinct from the `ProviderKind` response
+ * casing (`"curseForge"`). `projectType` selects content class.
+ */
+export function searchMods(
+  provider: "modrinth" | "curseforge",
+  query: string,
+  mcVersion: string | null,
+  loader: string | null,
+  offset: number,
+  limit: number,
+  projectType: "mod" | "modpack" = "mod",
+) {
+  return unwrap(
+    commands.searchMods(provider, query, mcVersion, loader, offset, limit, projectType),
+  );
+}
+
+/** Fetch all versions of a mod project compatible with the given MC version + loader. */
+export function getModVersions(
+  provider: "modrinth" | "curseforge",
+  projectId: string,
+  mcVersion: string | null,
+  loader: string | null,
+) {
+  return unwrap(commands.getModVersions(provider, projectId, mcVersion, loader));
+}
+
+// --- Phase 5 slice B: mod install ---
+
+/**
+ * Enqueue a mod-add task. Returns the task id synchronously; the terminal
+ * `AddModResult` arrives on `task://update` when status is `"done"`.
+ * `slug` is the target instance slug. `provider` is a lowercase routing string.
+ */
+export function addMod(
+  provider: "modrinth" | "curseforge",
+  projectId: string,
+  versionId: string,
+  slug: string,
+  mcVersion: string,
+  loader: string,
+) {
+  return unwrap(commands.addMod(provider, projectId, versionId, slug, mcVersion, loader));
+}
+
+/** Enable or disable an installed mod by toggling the `.disabled` suffix on its file. */
+export async function setModEnabled(
+  slug: string,
+  fileName: string,
+  enabled: boolean,
+): Promise<void> {
+  await unwrap(commands.setModEnabled(slug, fileName, enabled));
+}
+
+/** Remove an installed mod: deletes its file and drops its manifest entry. */
+export async function removeMod(slug: string, fileName: string): Promise<void> {
+  await unwrap(commands.removeMod(slug, fileName));
 }
 
 /**
- * Payload emitted on the `download://progress` Tauri event channel.
- * Subscribe with `listen("download://progress", handler)`.
+ * Enqueue a mod-update task. Returns the task id synchronously; the terminal
+ * `UpdateModResult` arrives on `task://update` when status is `"done"`.
  */
+export function updateMod(slug: string, projectId: string) {
+  return unwrap(commands.updateMod(slug, projectId));
+}
+
+// --- Phase 6 slice A: mrpack import ---
+
+/**
+ * Import a local `.mrpack` file into a new instance. Enqueues a task and resolves
+ * to the task id; the terminal `MrpackImportResult` rides `task://update`.
+ */
+export function importMrpack(mrpackPath: string, nameOverride?: string) {
+  return unwrap(commands.importMrpack(mrpackPath, nameOverride ?? null));
+}
+
+// --- Phase 6 slice B: CurseForge .zip import ---
+
+/**
+ * Import a local CurseForge modpack `.zip` into a new instance. Enqueues a task
+ * and resolves to the task id; the terminal `CfImportResult` rides `task://update`.
+ */
+export function importCurseforgeZip(cfZipPath: string, nameOverride?: string) {
+  return unwrap(commands.importCurseforgeZip(cfZipPath, nameOverride ?? null));
+}
+
+// --- Phase 6 slice C: Browse → one-click install ---
+
+/**
+ * Install a modpack from a Browse `ProjectSummary` in one click. Enqueues a task
+ * and resolves to the task id; the terminal `ModpackInstallResult` rides
+ * `task://update`. `provider` is the wire value from `ProjectSummary.provider`.
+ */
+export function installModpack(
+  provider: string,
+  projectId: string,
+  pageUrl?: string,
+  versionId?: string,
+) {
+  return unwrap(
+    commands.installModpack(provider, projectId, pageUrl ?? null, versionId ?? null),
+  );
+}
+
+// --- Phase 6 slice D: pack update + Pack Lock ---
+
+/**
+ * Update an installed modpack to a newer (or user-chosen) version. Enqueues a
+ * task and resolves to the task id; the terminal `PackUpdateResult` rides
+ * `task://update`. Requires the instance to have a recorded `source`.
+ */
+export function updateModpack(slug: string, versionId?: string) {
+  return unwrap(commands.updateModpack(slug, versionId ?? null));
+}
+
+/**
+ * Toggle the Pack Lock on an instance. When locked, the backend rejects all
+ * mod-mutation commands (add_mod, set_mod_enabled, remove_mod, update_mod).
+ */
+export async function setPackLock(slug: string, locked: boolean): Promise<void> {
+  await unwrap(commands.setPackLock(slug, locked));
+}
+
+// --- Run query commands ---
+
+/** Enumerate non-terminal (preparing / running) instances. Used on AppShell mount. */
+export function listRunning() {
+  return commands.listRunning();
+}
+
+/** Read a single instance's run state (any status). Returns `null` when untracked. */
+export function getRunState(slug: string): Promise<RunInfoPayload | null> {
+  // `commands.getRunState` returns an anonymous inline struct (specta inlines the
+  // `Option<T>` return); it is structurally identical to `RunInfoPayload`.
+  return commands.getRunState(slug);
+}
+
+/** Replay buffered log lines for an instance. Returns `null` when untracked. */
+export function getRunLogs(slug: string): Promise<RunLogPayload[] | null> {
+  return commands.getRunLogs(slug);
+}
+
+/** Read the current Download-Manager task snapshot (all tasks, any status). */
+export function listTasks(): Promise<Task[]> {
+  return unwrap(commands.listTasks());
+}
+
+/** Cancel a task by id. Idempotent; no-op for unknown / already-terminal ids. */
+export async function cancelTask(id: number): Promise<void> {
+  await unwrap(commands.cancelTask(id));
+}
+
+// ===========================================================================
+// Event layer — hand-written; CP-6 migrates these to the generated `events.*`.
+// ===========================================================================
+
+// --- download://progress ---
+
+/** Payload emitted on the `download://progress` Tauri event channel. */
 export interface DownloadProgressPayload {
   /** Source URL of the item currently downloading. */
   url: string;
@@ -205,104 +388,12 @@ export interface DownloadProgressPayload {
   bytesTotal: number | null;
 }
 
-/**
- * Execute a DownloadPlan concurrently.
- *
- * Progress is emitted on the `download://progress` event channel —
- * subscribe with `listen("download://progress", handler)` to receive
- * DownloadProgressPayload updates.
- *
- * @param plan       The files to download.
- * @param concurrency Max simultaneous downloads (1–32). Defaults to 8 when null.
- */
-export function executeDownloadPlan(
-  plan: DownloadPlan,
-  concurrency?: number | null,
-): Promise<PlanResult> {
-  return invoke<PlanResult>("execute_download_plan", { plan, concurrency: concurrency ?? null });
-}
-
-// --- Phase 2: vanilla resolver. Mirrors core/resolver.rs LaunchMeta + ResolveResult. ---
+// --- install://log ---
 
 /**
- * Metadata slice D (launch) needs to build the JVM argv.
- * All `${...}` placeholders are left intact — substitution is slice D's job.
- */
-export interface LaunchMeta {
-  versionId: string;
-  /** The Mojang manifest `type` field: `"release"`, `"snapshot"`, etc. */
-  versionType: string;
-  mainClass: string;
-  /** JVM arg templates (OS-filtered modern entries). Empty for legacy manifests. */
-  jvmArgs: string[];
-  /** Game arg templates (modern entries or legacy whitespace-split). */
-  gameArgs: string[];
-  assetIndexId: string;
-  assetsLegacy: boolean;
-  javaMajor: number;
-  /** Ordered classpath dest paths: all libs + client jar last. */
-  classpath: string[];
-  /** Native jar dest paths — slice D extracts before launch. */
-  natives: string[];
-  /** Path to the logging config file; null when absent in the manifest. */
-  loggingConfig: string | null;
-}
-
-/** Returned by resolveVanilla: the download plan + launch metadata. */
-export interface ResolveResult {
-  plan: DownloadPlan;
-  launch: LaunchMeta;
-}
-
-/**
- * Resolve a vanilla Minecraft version into a DownloadPlan + LaunchMeta.
- *
- * Fetches and caches the per-version manifest and asset index (no live HTTP
- * in tests — the backend handles caching). Returns every file needed before
- * launch plus the metadata required to build the JVM argv.
- */
-export function resolveVanilla(versionId: string): Promise<ResolveResult> {
-  return invoke<ResolveResult>("resolve_vanilla", { versionId });
-}
-
-// --- Phase 2, slice C: Java manager. Mirrors core/java.rs. ---
-
-/** How a JavaInstallation was found. */
-export type JavaSource = "detected" | "downloaded";
-
-/**
- * A located JRE: the Java major version and the absolute path to the
- * `java` / `java.exe` executable.
- */
-export interface JavaInstallation {
-  major: number;
-  /** Absolute path to `java` / `java.exe`. */
-  path: string;
-  /** Whether this JRE was found on the system or downloaded by the launcher. */
-  source: JavaSource;
-}
-
-/**
- * Detect or provision a JRE for the given Java major version.
- *
- * Probes system installs and the launcher cache first. Downloads and extracts
- * Temurin from Adoptium only on a cache miss.
- */
-export function ensureJava(major: number): Promise<JavaInstallation> {
-  return invoke<JavaInstallation>("ensure_java", { major });
-}
-
-// --- Phase 4, slice B: NeoForge/Forge install progress. Mirrors lib.rs InstallLogPayload. ---
-
-/**
- * Payload emitted on the `install://log` Tauri event channel during
- * NeoForge / Forge headless installer runs.
- *
- * Distinct from `launch://log` — installer output is log-shaped (one line
- * at a time from the installer's stdout/stderr), not item-progress-shaped.
- * No `instanceId` field: only one installer runs at a time.
- *
- * Subscribe with `listen(INSTALL_LOG_EVENT, handler)`.
+ * Payload emitted on the `install://log` channel during NeoForge / Forge
+ * headless installer runs. Distinct from `launch://log` (installer output is
+ * log-shaped, one line at a time). No `instanceId`: only one installer at a time.
  */
 export interface InstallLogPayload {
   /** `"stdout"` or `"stderr"`. */
@@ -313,25 +404,16 @@ export interface InstallLogPayload {
 /** Event name constant for the install log channel. */
 export const INSTALL_LOG_EVENT = "install://log" as const;
 
-/**
- * Subscribe to the `install://log` event.
- * Returns an unlisten function — call it to unsubscribe.
- * Pattern mirrors `listenDeviceCode`.
- */
+/** Subscribe to the `install://log` event. Returns an unlisten function. */
 export function listenInstallLog(
   handler: (payload: InstallLogPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<InstallLogPayload>(INSTALL_LOG_EVENT, (event) =>
-    handler(event.payload),
-  );
+  return listen<InstallLogPayload>(INSTALL_LOG_EVENT, (event) => handler(event.payload));
 }
 
-// --- Phase 2, slice D: vanilla launch. Mirrors lib.rs LaunchLogPayload/LaunchExitPayload. ---
+// --- launch://log + launch://exit ---
 
-/**
- * Payload emitted on the `launch://log` Tauri event channel.
- * Subscribe with `listen("launch://log", handler)`.
- */
+/** Payload emitted on the `launch://log` Tauri event channel. */
 export interface LaunchLogPayload {
   /** Slug of the instance emitting this line. */
   instanceId: string;
@@ -340,10 +422,7 @@ export interface LaunchLogPayload {
   line: string;
 }
 
-/**
- * Payload emitted on the `launch://exit` Tauri event channel.
- * Subscribe with `listen("launch://exit", handler)`.
- */
+/** Payload emitted on the `launch://exit` Tauri event channel. */
 export interface LaunchExitPayload {
   /** Slug of the instance that exited. */
   instanceId: string;
@@ -355,559 +434,27 @@ export interface LaunchExitPayload {
 export const LAUNCH_LOG_EVENT = "launch://log" as const;
 export const LAUNCH_EXIT_EVENT = "launch://exit" as const;
 
-/**
- * Launch a vanilla Minecraft instance.
- *
- * Returns promptly; the child runs under a background task that streams
- * stdout+stderr as `launch://log` events and records playtime on exit.
- */
-export function launchInstance(slug: string): Promise<void> {
-  return invoke<void>("launch_instance", { slug });
-}
+// --- auth://device-code ---
 
-/**
- * Stop (kill) a running Minecraft instance.
- *
- * Returns Ok if the signal was sent, Err if the instance is not running.
- */
-export function killInstance(slug: string): Promise<void> {
-  return invoke<void>("kill_instance", { slug });
-}
-
-// --- Phase 3: Microsoft authentication. Mirrors core/auth.rs AccountMeta + lib.rs AuthCommandError. ---
-
-/**
- * Persisted account metadata (no secrets). Mirrors `AccountMeta` in `core/auth.rs`.
- * The MC access token and refresh token are never exposed to the frontend.
- */
-export interface AccountMeta {
-  id: string;
-  username: string;
-  xuid: string;
-  /** Unix timestamp (seconds) when the MC token expires; null when unknown. */
-  mcTokenExpires: number | null;
-}
-
-/**
- * Payload emitted on the `auth://device-code` event channel during `beginLogin`.
- * Subscribe with `listenDeviceCode(handler)` before awaiting `beginLogin()`.
- */
+/** Payload emitted on the `auth://device-code` channel during `beginLogin`. */
 export interface DeviceCodePayload {
   userCode: string;
   verificationUri: string;
 }
 
-/**
- * Error shape returned by auth commands when the Tauri command returns Err.
- * `kind` is one of the `AuthCommandError` kind strings from lib.rs.
- */
-export interface AuthCommandError {
-  kind: string;
-  message: string;
-}
-
 /** Event name constant for the auth device-code channel. */
 export const AUTH_DEVICE_CODE_EVENT = "auth://device-code" as const;
 
-/**
- * Subscribe to the `auth://device-code` event.
- * Returns an unlisten function — call it to unsubscribe.
- * Mirror of how `launch://log` is subscribed in InstanceDetail.tsx.
- */
+/** Subscribe to the `auth://device-code` event. Returns an unlisten function. */
 export function listenDeviceCode(
   handler: (payload: DeviceCodePayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<DeviceCodePayload>(AUTH_DEVICE_CODE_EVENT, (event) =>
-    handler(event.payload),
-  );
+  return listen<DeviceCodePayload>(AUTH_DEVICE_CODE_EVENT, (event) => handler(event.payload));
 }
 
-/**
- * Begin the Microsoft device-code login flow.
- *
- * This command is long-lived: it opens the device-code request, emits an
- * `auth://device-code` event (subscribe with `listenDeviceCode` before calling
- * this), then polls Microsoft until the user completes sign-in or the code expires.
- * On success, the new account is persisted and returned.
- */
-export function beginLogin(): Promise<AccountMeta> {
-  return invoke<AccountMeta>("begin_login");
-}
+// --- task://progress + task://update ---
 
-/**
- * Cancel an in-flight `beginLogin`. No-op if no login is in progress.
- */
-export function cancelLogin(): Promise<void> {
-  return invoke<void>("cancel_login");
-}
-
-/** Return the persisted account, or null when not logged in. */
-export function getAccount(): Promise<AccountMeta | null> {
-  return invoke<AccountMeta | null>("get_account");
-}
-
-/** Log out: clears the persisted account and OS keyring entry. */
-export function logout(): Promise<void> {
-  return invoke<void>("logout");
-}
-
-// --- Phase 5: provider browse. Mirrors core/providers.rs normalized types. ---
-
-/**
- * Which backend owns a search result or version.
- * Matches the `ProviderKind` Rust enum serialized as camelCase strings.
- *
- * NOTE: these are RESPONSE values ("curseForge" camelCase), not the lowercase
- * routing params accepted by `searchMods`/`getModVersions` ("curseforge").
- * Keep the two usages distinct — the routing params are plain strings, not this type.
- */
-export type ProviderKind = "modrinth" | "curseForge";
-
-/**
- * Which project class to search for. Mirrors `ProjectType` in `core/providers.rs`.
- * Serialized as `"mod"` or `"modpack"` over IPC.
- */
-export type ProjectType = "mod" | "modpack";
-
-/**
- * Condensed summary of a mod project, as returned by `searchMods`.
- * Mirrors `ProjectSummary` in `core/providers.rs`.
- */
-export interface ProjectSummary {
-  provider: ProviderKind;
-  id: string;
-  slug: string;
-  name: string;
-  summary: string;
-  downloads: number;
-  iconUrl: string | null;
-  categories: string[];
-  /**
-   * Provider project page URL.
-   * Modrinth: `https://modrinth.com/{project_type}/{slug}`.
-   * CurseForge: `links.websiteUrl` from the search row; `null` when absent.
-   */
-  pageUrl: string | null;
-}
-
-/**
- * A single downloadable file within a `ProjectVersion`.
- * `url` is `null` when the author has disabled distribution (CF `allowModDistribution: false`).
- * Mirrors `VersionFile` in `core/providers.rs`.
- */
-export interface VersionFile {
-  url: string | null;
-  fileName: string;
-  size: number | null;
-  hashes: Record<string, string>;
-  primary: boolean;
-}
-
-/**
- * A declared dependency of a `ProjectVersion`.
- * Mirrors `Dependency` in `core/providers.rs`.
- */
-export interface Dependency {
-  projectId: string | null;
-  versionId: string | null;
-  dependencyType: string;
-}
-
-/**
- * A specific release of a mod project.
- * Mirrors `ProjectVersion` in `core/providers.rs`.
- */
-export interface ProjectVersion {
-  provider: ProviderKind;
-  id: string;
-  name: string;
-  versionNumber: string;
-  gameVersions: string[];
-  loaders: string[];
-  files: VersionFile[];
-  dependencies: Dependency[];
-}
-
-/**
- * Paginated search response returned by `searchMods`.
- * Mirrors `SearchResult` in `core/providers.rs`.
- */
-export interface SearchResult {
-  hits: ProjectSummary[];
-  offset: number;
-  total: number;
-}
-
-/**
- * Error shape returned by provider commands when the Tauri command returns Err.
- * `kind` is one of: `"key_missing"`, `"http_status"`, `"bad_response"`, `"unknown_provider"`.
- * Mirrors `ProviderCommandError` in `lib.rs`.
- */
-export interface ProviderCommandError {
-  kind: string;
-  message: string;
-}
-
-/**
- * Search mods on the given provider.
- *
- * `provider` accepts `"modrinth"` or `"curseforge"` (lowercase routing strings,
- * distinct from the `ProviderKind` response value casing e.g. `"curseForge"`).
- * `projectType` selects the content class: `"mod"` (default) or `"modpack"`.
- * Returns a paginated `SearchResult` with `hits`, `offset`, and `total` for
- * infinite scroll. CF key absence surfaces as a rejected promise with
- * `kind: "key_missing"`.
- */
-export function searchMods(
-  provider: "modrinth" | "curseforge",
-  query: string,
-  mcVersion: string | null,
-  loader: string | null,
-  offset: number,
-  limit: number,
-  projectType: ProjectType = "mod",
-): Promise<SearchResult> {
-  return invoke<SearchResult>("search_mods", {
-    provider,
-    query,
-    mcVersion,
-    loader,
-    offset,
-    limit,
-    projectType,
-  });
-}
-
-/**
- * Fetch all versions of a mod project compatible with the given MC version + loader.
- *
- * `provider` accepts `"modrinth"` or `"curseforge"` (lowercase routing strings,
- * distinct from the `ProviderKind` response value casing e.g. `"curseForge"`).
- */
-export function getModVersions(
-  provider: "modrinth" | "curseforge",
-  projectId: string,
-  mcVersion: string | null,
-  loader: string | null,
-): Promise<ProjectVersion[]> {
-  return invoke<ProjectVersion[]>("get_mod_versions", {
-    provider,
-    projectId,
-    mcVersion,
-    loader,
-  });
-}
-
-// --- Phase 5 slice B: mod install. Mirrors core/mod_install.rs. ---
-
-/**
- * A resolved mod whose distribution is disabled — must be downloaded manually.
- * Mirrors `ManualMod` in `core/mod_install.rs`.
- */
-export interface ManualMod {
-  provider: ProviderKind;
-  projectId: string;
-  versionId: string;
-  fileName: string;
-  pageUrl: string;
-}
-
-/**
- * A dependency for which no compatible version could be found.
- * Mirrors `UnresolvedDep` in `core/mod_install.rs`.
- */
-export interface UnresolvedDep {
-  projectId: string;
-  reason: string;
-}
-
-/**
- * An optional dependency surfaced as a suggestion (not auto-installed).
- * Mirrors `Suggestion` in `core/mod_install.rs`.
- */
-export interface Suggestion {
-  projectId: string;
-  versionId: string | null;
-}
-
-/**
- * A declared-incompatible mod.
- * Mirrors `IncompatibleWarning` in `core/mod_install.rs`.
- */
-export interface IncompatibleWarning {
-  projectId: string;
-}
-
-/**
- * A mod that had a URL but whose download failed at runtime.
- * Mirrors `FailedMod` in `core/mod_install.rs`.
- */
-export interface FailedMod {
-  fileName: string;
-  error: string;
-}
-
-/**
- * Structured result returned by the `add_mod` command.
- * Mirrors `AddModResult` in `core/mod_install.rs`.
- */
-export interface AddModResult {
-  added: ModEntry[];
-  manual: ManualMod[];
-  unresolved: UnresolvedDep[];
-  suggestions: Suggestion[];
-  warnings: IncompatibleWarning[];
-  failed: FailedMod[];
-}
-
-/**
- * Structured result returned by the `update_mod` command.
- * `status` is one of: `"updated"` | `"upToDate"` | `"manual"` | `"unresolved"` | `"failed"`.
- * Mirrors `UpdateModResult` in `core/mod_install.rs`.
- */
-export interface UpdateModResult {
-  status: string;
-  entry: ModEntry | null;
-  pageUrl: string | null;
-  error: string | null;
-}
-
-/**
- * Enqueue a mod-add task. Returns the task id synchronously; the terminal
- * `AddModResult` arrives on `task://update` when status is `"done"`.
- *
- * `slug` is the instance slug (target instance, not the mod's URL slug).
- * `provider` accepts `"modrinth"` or `"curseforge"` (lowercase routing strings).
- */
-export function addMod(
-  provider: "modrinth" | "curseforge",
-  projectId: string,
-  versionId: string,
-  slug: string,
-  mcVersion: string,
-  loader: string,
-): Promise<number> {
-  return invoke<number>("add_mod", {
-    provider,
-    projectId,
-    versionId,
-    slug,
-    mcVersion,
-    loader,
-  });
-}
-
-/**
- * Enable or disable an installed mod by toggling the `.disabled` suffix on its file.
- * `fileName` is the base `.jar` name (no `.disabled` suffix).
- */
-export function setModEnabled(slug: string, fileName: string, enabled: boolean): Promise<void> {
-  return invoke<void>("set_mod_enabled", { slug, fileName, enabled });
-}
-
-/**
- * Remove an installed mod: deletes its file and drops its manifest entry.
- * `fileName` is the base `.jar` name (no `.disabled` suffix).
- */
-export function removeMod(slug: string, fileName: string): Promise<void> {
-  return invoke<void>("remove_mod", { slug, fileName });
-}
-
-/**
- * Enqueue a mod-update task. Returns the task id synchronously; the terminal
- * `UpdateModResult` arrives on `task://update` when status is `"done"`.
- * `projectId` is the provider project id stored in the mod's `ModEntry`.
- */
-export function updateMod(slug: string, projectId: string): Promise<number> {
-  return invoke<number>("update_mod", { slug, projectId });
-}
-
-// --- Phase 6 slice A: mrpack import. Mirrors MrpackImportResult in lib.rs. ---
-
-/**
- * Result returned by the `import_mrpack` command.
- * Mirrors `MrpackImportResult` in `src-tauri/src/lib.rs` (serde camelCase).
- */
-export interface MrpackImportResult {
-  /** Slug of the newly created instance. */
-  slug: string;
-  /** Display name from the pack manifest. */
-  name: string;
-  /** Number of mod files successfully downloaded. */
-  installed: number;
-  /** Number of mod files that failed to download. */
-  failed: number;
-  /** Number of mod files skipped (e.g. server-only, env unsupported). */
-  skipped: number;
-  /** File names of the failed downloads, if any. */
-  failedFiles: string[];
-}
-
-/**
- * Import a local `.mrpack` file into a new instance.
- *
- * Enqueues a Download Manager task and resolves to the task id synchronously;
- * the terminal {@link MrpackImportResult} rides the `task://update` event
- * (carried on `Task.result`) keyed by that id.
- *
- * `mrpackPath` is the absolute path to the `.mrpack` file on disk.
- * `nameOverride` optionally overrides the pack's `name` field for the instance name.
- */
-export function importMrpack(
-  mrpackPath: string,
-  nameOverride?: string,
-): Promise<number> {
-  return invoke<number>("import_mrpack", {
-    mrpackPath,
-    nameOverride: nameOverride ?? null,
-  });
-}
-
-// --- Phase 6 slice B: CurseForge .zip import. Mirrors CfImportResult in lib.rs. ---
-
-/**
- * A CurseForge file the user must download manually (distribution-disabled,
- * or resolved without a usable hash).
- * Mirrors `CfManualFile` in `src-tauri/src/core/modpack.rs` (serde camelCase).
- */
-export interface CfManualFile {
-  projectId: number;
-  fileId: number;
-  fileName: string;
-  pageUrl: string;
-}
-
-/**
- * Result returned by the `import_curseforge_zip` command.
- * Mirrors `CfImportResult` in `src-tauri/src/lib.rs` (serde camelCase).
- */
-export interface CfImportResult {
-  /** Slug of the newly created instance. */
-  slug: string;
-  /** Display name from the pack manifest. */
-  name: string;
-  /** Number of mod files successfully downloaded. */
-  installed: number;
-  /** Number of mod files that failed (download or resolution failure). */
-  failed: number;
-  /** Files the user must download manually (distribution-disabled, or no usable hash). */
-  manual: CfManualFile[];
-}
-
-/**
- * Import a local CurseForge modpack `.zip` into a new instance.
- *
- * Enqueues a Download Manager task and resolves to the task id synchronously;
- * the terminal {@link CfImportResult} rides the `task://update` event
- * (carried on `Task.result`) keyed by that id.
- *
- * `cfZipPath` is the absolute path to the `.zip` file on disk.
- * `nameOverride` optionally overrides the pack's `name` field for the instance name.
- */
-export function importCurseforgeZip(
-  cfZipPath: string,
-  nameOverride?: string,
-): Promise<number> {
-  return invoke<number>("import_curseforge_zip", {
-    cfZipPath,
-    nameOverride: nameOverride ?? null,
-  });
-}
-
-// --- Phase 6 slice C: Browse → one-click install. Mirrors ModpackInstallResult in lib.rs. ---
-
-/**
- * Tagged result returned by `install_modpack`.
- * Mirrors `ModpackInstallResult` in `src-tauri/src/lib.rs`
- * (`#[serde(tag = "kind", rename_all = "camelCase")]`).
- *
- * - `"mrpack"` — Modrinth pack installed; fields from `MrpackImportResult`.
- * - `"curseforge"` — CurseForge pack installed; fields from `CfImportResult` (may carry `manual[]`).
- * - `"manual"` — pack file is not distributable; open `pageUrl` in browser, no instance created.
- */
-export type ModpackInstallResult =
-  | ({ kind: "mrpack" } & MrpackImportResult)
-  | ({ kind: "curseforge" } & CfImportResult)
-  | { kind: "manual"; pageUrl: string; fileName: string };
-
-/**
- * Install a modpack from a Browse `ProjectSummary` in one click.
- *
- * `provider` is the wire value from `ProjectSummary.provider` (e.g. `"modrinth"`, `"curseforge"`).
- * `projectId` is the provider's project id.
- * `pageUrl` is the project's page URL, echoed back in the `"manual"` variant.
- * `versionId` optionally pins the version to install; omit or pass `undefined` for latest.
- *
- * Enqueues a Download Manager task and resolves to the task id synchronously;
- * the terminal {@link ModpackInstallResult} rides the `task://update` event
- * (carried on `Task.result`) keyed by that id.
- */
-export function installModpack(
-  provider: string,
-  projectId: string,
-  pageUrl?: string,
-  versionId?: string,
-): Promise<number> {
-  return invoke<number>("install_modpack", {
-    provider,
-    projectId,
-    pageUrl: pageUrl ?? null,
-    versionId: versionId ?? null,
-  });
-}
-
-// --- Phase 6 slice D: pack update + Pack Lock. ---
-
-/**
- * Aggregated result returned by `update_modpack`.
- * Mirrors `PackUpdateResult` in `src-tauri/src/lib.rs` (serde camelCase).
- * `manual` is empty for mrpack updates; carries distribution-disabled files for CF updates.
- */
-export interface PackUpdateResult {
-  added: number;
-  removed: number;
-  kept: number;
-  failed: number;
-  manual: CfManualFile[];
-}
-
-/**
- * Update an installed modpack to a newer (or user-chosen) version.
- *
- * `slug` is the instance slug. `versionId` pins the target version; omit for latest.
- * Requires the instance to have a `source` recorded (i.e. installed via Browse).
- *
- * Enqueues a Download Manager task and resolves to the task id synchronously;
- * the terminal {@link PackUpdateResult} rides the `task://update` event
- * (carried on `Task.result`) keyed by that id.
- */
-export function updateModpack(slug: string, versionId?: string): Promise<number> {
-  return invoke<number>("update_modpack", {
-    slug,
-    versionId: versionId ?? null,
-  });
-}
-
-/**
- * Toggle the Pack Lock on an instance.
- *
- * When `locked` is `true`, the backend rejects all mod-mutation commands
- * (add_mod, set_mod_enabled, remove_mod, update_mod) for this instance.
- */
-export function setPackLock(slug: string, locked: boolean): Promise<void> {
-  return invoke<void>("set_pack_lock", { slug, locked });
-}
-
-// ---------------------------------------------------------------------------
-// CP-7: task/run command + event wrappers. Mirrors lib.rs task+run payloads.
-// ---------------------------------------------------------------------------
-
-// --- Task event payloads ---
-
-/**
- * Progress update emitted on `task://progress` while a task downloads.
- * Mirrors `TaskProgressPayload` in lib.rs (serde camelCase).
- */
+/** Progress update emitted on `task://progress` while a task downloads. */
 export interface TaskProgressPayload {
   taskId: number;
   currentChild: string | null;
@@ -922,25 +469,16 @@ export const TASK_PROGRESS_EVENT = "task://progress" as const;
 /** Event name constant for task status/lifecycle updates. */
 export const TASK_UPDATE_EVENT = "task://update" as const;
 
-/**
- * Subscribe to `task://progress` events.
- * Returns an unlisten function — call it to unsubscribe.
- */
+/** Subscribe to `task://progress` events. Returns an unlisten function. */
 export function listenTaskProgress(
   handler: (payload: TaskProgressPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<TaskProgressPayload>(TASK_PROGRESS_EVENT, (event) =>
-    handler(event.payload),
-  );
+  return listen<TaskProgressPayload>(TASK_PROGRESS_EVENT, (event) => handler(event.payload));
 }
-
-// Task update payload re-uses the Task type from store.ts; ipc.ts imports
-// nothing from store.ts to avoid a circular dep — callers cast the event payload.
-// The raw shape is identical to Task from store.ts.
 
 /**
  * Subscribe to `task://update` events (full task snapshot per lifecycle change).
- * Returns an unlisten function — call it to unsubscribe.
+ * The payload is structurally a `Task`; callers (AppShell) cast to the store type.
  */
 export function listenTaskUpdate(
   handler: (payload: unknown) => void,
@@ -948,12 +486,9 @@ export function listenTaskUpdate(
   return listen(TASK_UPDATE_EVENT, (event) => handler(event.payload));
 }
 
-// --- Run event payloads ---
+// --- run://update ---
 
-/**
- * Payload emitted on `run://update` for each run-status transition.
- * Mirrors `RunUpdatePayload` in lib.rs (serde camelCase).
- */
+/** Payload emitted on `run://update` for each run-status transition. */
 export interface RunUpdatePayload {
   slug: string;
   /** `"preparing"` | `"running"` | `"exited"` | `"killed"` | `"failed"` */
@@ -964,76 +499,9 @@ export interface RunUpdatePayload {
 /** Event name constant for run status updates. */
 export const RUN_UPDATE_EVENT = "run://update" as const;
 
-/**
- * Subscribe to `run://update` events.
- * Returns an unlisten function — call it to unsubscribe.
- */
+/** Subscribe to `run://update` events. Returns an unlisten function. */
 export function listenRunUpdate(
   handler: (payload: RunUpdatePayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<RunUpdatePayload>(RUN_UPDATE_EVENT, (event) =>
-    handler(event.payload),
-  );
-}
-
-// --- Run query payloads ---
-
-/**
- * A single active or recently-terminal run returned by `list_running`.
- * Mirrors `RunInfoPayload` in lib.rs (serde camelCase).
- */
-export interface RunInfoPayload {
-  slug: string;
-  status: string;
-  exitCode: number | null;
-  elapsedMs: number;
-}
-
-/**
- * One replayed log line returned by `get_run_logs`.
- * Mirrors `RunLogPayload` in lib.rs (serde camelCase).
- */
-export interface RunLogPayload {
-  stream: string;
-  line: string;
-}
-
-/**
- * Enumerate non-terminal (preparing / running) instances. Used for
- * hydration on AppShell mount.
- */
-export function listRunning(): Promise<RunInfoPayload[]> {
-  return invoke<RunInfoPayload[]>("list_running");
-}
-
-/**
- * Read a single instance's run state (any status, incl. terminal).
- * Returns `null` when the slug is not tracked.
- */
-export function getRunState(slug: string): Promise<RunInfoPayload | null> {
-  return invoke<RunInfoPayload | null>("get_run_state", { slug });
-}
-
-/**
- * Replay buffered log lines for an instance.
- * Returns `null` when the slug is not tracked.
- */
-export function getRunLogs(slug: string): Promise<RunLogPayload[] | null> {
-  return invoke<RunLogPayload[] | null>("get_run_logs", { slug });
-}
-
-/**
- * Read the current Download-Manager task snapshot.
- * Returns all tasks (queued, in-progress, and recently-terminal).
- */
-export function listTasks(): Promise<unknown[]> {
-  return invoke<unknown[]>("list_tasks");
-}
-
-/**
- * Cancel a task by id.
- * Idempotent; no-op for unknown or already-terminal ids.
- */
-export function cancelTask(id: number): Promise<void> {
-  return invoke<void>("cancel_task", { id });
+  return listen<RunUpdatePayload>(RUN_UPDATE_EVENT, (event) => handler(event.payload));
 }

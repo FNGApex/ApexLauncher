@@ -62,7 +62,7 @@ rc.25. Confirmed at CP-1.)
 | 2 | **Builder swap + command derives + export.** ✅ DONE. Swapped `tauri::generate_handler!` for the tauri-specta `Builder` via a single-source `make_builder()` (`collect_commands![34 cmds]` → `invoke_handler(builder.invoke_handler())`). `#[derive(specta::Type)]` on the IPC DTOs, `#[specta::specta]` on all 34 commands, `.dangerously_cast_bigints_to_number()` so u64 task ids → `number`. Export via the `#[cfg(debug_assertions)]` `builder.export()` block in `run()` (regen on Windows `scripts/build.sh dev`) + a Linux-only test through the *same* builder. Generated `src/lib/bindings.ts` (805 lines). camelCase parity ✓, `kind`-tagged unions ✓. **Deferred:** `Task.result: Option<serde_json::Value>` is `#[specta(skip)]` (type-erased) → typed result union is CP-3; `getRunState`/`AccountMeta` nominal split artifacts → CP-5. | `src-tauri/src/lib.rs`, `src-tauri/src/core/*.rs`, `bindings_export_tests.rs`, `src/lib/bindings.ts` | `scripts/build.sh check` + `test` (521 pass); regen via `scripts/build.sh dev` | `bindings.ts` has all 34 typed `commands.*`; camelCase matches `ipc.ts`; u64→number; build green |
 | 3 | **Events + typed `TaskResult`.** ✅ DONE. Add `#[derive(specta::Type, tauri_specta::Event)]` to the 8 event payload types (`TaskProgressPayload`, `TaskUpdatePayload`, `RunUpdatePayload`, `LaunchLogPayload`, `LaunchExitPayload`, `InstallLogPayload`, `ProgressPayload`/download, `DeviceCodePayload`); populate `collect_events![...]`; switch the Tauri*Sink emitters to the generated `Event::emit` where it keeps the exact channel name (else keep `app.emit` with the channel literal + the generated payload type). **Also (folded from CP-2 review):** replace the `Task.result: Option<serde_json::Value>` carrier with a typed `TaskResult` enum (variants: the 6 result types `MrpackImportResult`/`CfImportResult`/`ModpackInstallResult`/`PackUpdateResult`/`AddModResult`/`UpdateModResult`), so `derive(specta::Type)` on those types becomes reachable, the `taskUpdate` payload carries a typed union (success criterion), and the `#[specta(skip)]` + `Task_Serialize|Task_Deserialize` split are retired. Regenerate via `scripts/build.sh dev`. | `src-tauri/src/lib.rs`, `src-tauri/src/core/task_manager.rs`, generated `src/lib/bindings.ts` | `scripts/build.sh check` + `test` | `events.*` typed listeners for all 8 channels; channel names unchanged; `TaskResult` union reachable on the taskUpdate payload; no `(task as any).result` needed; tests green |
 | 4 | **Migrate `store.ts` to generated types.** ✅ DONE. Delete the hand-declared `Task`, `TaskKind`, `TaskStatus`, `ChildItem`, `TaskResult`, `TaskProgressUpdate`, `RunState`, `RunLogLine` decls; re-import the equivalents from `bindings.ts`. Keep all slices/reducers. Adapt field-name diffs if any (expect none — both camelCase). | `src/lib/store.ts` | `scripts/build.sh check` | `tsc` green with store types sourced from `bindings.ts`; reducers unchanged |
-| 5 | **Convert `ipc.ts` to an adapter (commands).** Replace the hand-written `invoke<…>(...)` wrappers with calls into generated `commands.*`, preserving the existing exported function names + positional/`?? null` ergonomics that call sites depend on. Delete the now-redundant hand-declared command arg/return interfaces; re-export generated DTOs that components import by name. **Absorb the CP-2 nominal-split artifacts here:** `getRunState` returns an anonymous inline struct while `listRunning` returns named `RunInfoPayload` (specta inlines `Option<T>` returns); and `AccountMeta`/`Task` come through as `_Serialize|_Deserialize` unions (serde `alias`/asymmetry). The adapter normalizes these to the names call sites use (re-export aliases or thin wrappers) so consumers compile unchanged. | `src/lib/ipc.ts` | `scripts/build.sh check` | All command wrappers route through generated `commands`; no hand-declared command DTOs remain; routes/components compile unchanged |
+| 5 | **Convert `ipc.ts` to an adapter (commands).** ✅ DONE. Replace the hand-written `invoke<…>(...)` wrappers with calls into generated `commands.*`, preserving the existing exported function names + positional/`?? null` ergonomics that call sites depend on. Delete the now-redundant hand-declared command arg/return interfaces; re-export generated DTOs that components import by name. **Absorb the CP-2 nominal-split artifacts here:** `getRunState` returns an anonymous inline struct while `listRunning` returns named `RunInfoPayload` (specta inlines `Option<T>` returns); and `AccountMeta`/`Task` come through as `_Serialize|_Deserialize` unions (serde `alias`/asymmetry). The adapter normalizes these to the names call sites use (re-export aliases or thin wrappers) so consumers compile unchanged. | `src/lib/ipc.ts` | `scripts/build.sh check` | All command wrappers route through generated `commands`; no hand-declared command DTOs remain; routes/components compile unchanged |
 | 6 | **Convert `ipc.ts` event helpers + final sweep.** Replace `listenDeviceCode`/`listenInstallLog`/`listenTaskProgress`/`listenRunUpdate`/`listenTaskUpdate` and the `*_EVENT` name constants with the generated `events.*.listen` surface (or thin re-exports preserving the old names for `AppShell`). Delete every remaining hand-declared IPC interface/payload type in `ipc.ts`. Confirm no orphaned type decls anywhere. | `src/lib/ipc.ts`, `src/components/AppShell.tsx` (if listener call shape changes) | `scripts/build.sh check` then `scripts/build.sh test` | Zero hand-declared IPC types remain; AppShell subscriptions use generated events; full check + test green |
 
 ## Risks
@@ -77,6 +77,35 @@ rc.25. Confirmed at CP-1.)
 | rc crate yanked/broken later | low | Generated `bindings.ts` is committed → frontend build never depends on the crate resolving; only regeneration does |
 
 ## Change log
+
+### 2026-06-18 — CP-5 done
+
+`ipc.ts` rewritten as a thin adapter over generated `commands.*`. Every command
+wrapper now routes through the generated surface; all hand-declared command DTOs
+deleted and re-exported from `bindings.ts` under the names call sites import.
+Exported function names, positional args, and `?? null` ergonomics preserved — no
+route/component changed shape. Key adaptations:
+
+- **`unwrap` helper** restores the historical reject-on-error contract: generated
+  fallible commands return a `{ status: "ok" | "error" }` Result (they don't reject
+  for non-`Error` payloads), so `unwrap` re-throws the `error` arm. The 5 infallible
+  commands (`appInfo`/`listRunning`/`getRunState`/`getRunLogs`/`cancelLogin`) return a
+  bare `Promise<T>` and are called directly.
+- **`LoaderKind` stays frontend-owned** — specta erases the enum to `string` on
+  `Loader.kind`, so the narrow union is kept and `LoaderOption` is re-narrowed over the
+  generated shape (`getLoaders` casts). All other `*.kind` consumers (`labelLoader`,
+  the `loaderKind: string` props, `Home`) already accept `string`.
+- **Nominal-split artifacts absorbed (CP-2 carryover):** `getRunState`'s anonymous
+  inline-struct return is annotated back to the named `RunInfoPayload | null`;
+  `AccountMeta` is normalized to `AccountMeta_Serialize` (the generated union's
+  serde-alias arm `{ mc_token_expires }` is malformed and never reaches the webview —
+  the wire shape is always the serialize form); `InstanceSource` (generated as `Source`,
+  unused by any component) dropped from the surface.
+- **Event layer untouched** — payload interfaces, `*_EVENT` constants, and `listen*`
+  helpers remain hand-written; CP-6 migrates them to generated `events.*`.
+
+`scripts/build.sh check` green (`cargo check` + `tsc --noEmit`); Rust untouched (tests
+unchanged at 521 — full suite runs at CP-6).
 
 ### 2026-06-18 — CP-4 done
 
