@@ -380,7 +380,12 @@ impl TaskManager {
         let worker_snapshot = Arc::clone(&snapshot);
         let worker_cancels = Arc::clone(&cancels);
         let worker_observer = Arc::clone(&observer);
-        tokio::spawn(async move {
+        // `tauri::async_runtime::spawn`, not `tokio::spawn`: `new` is called from
+        // Tauri's synchronous `.setup()` hook at startup, where no Tokio runtime
+        // is entered on the current thread. Tauri's async_runtime spawns onto its
+        // own managed runtime regardless of the caller's context, so the worker
+        // starts whether `new` runs in `.setup()` or inside an async command.
+        tauri::async_runtime::spawn(async move {
             worker_loop(rx, worker_snapshot, worker_cancels, worker_observer).await;
         });
 

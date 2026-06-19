@@ -159,6 +159,18 @@ fn running_count(snap: &[Task]) -> usize {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Regression: `TaskManager::new` must construct cleanly when called from a
+/// *synchronous* context with no Tokio runtime entered on the current thread.
+/// That is exactly app startup — `new` runs inside Tauri's `.setup()` hook,
+/// which is not an async command, so the worker spawn cannot rely on a current
+/// Tokio reactor. A plain `#[test]` (no `#[tokio::test]`) reproduces that
+/// context; before the fix the inner `tokio::spawn` panicked with "there is no
+/// reactor running, must be called from the context of a Tokio 1.x runtime".
+#[test]
+fn new_constructs_outside_tokio_runtime() {
+    let _mgr = TaskManager::new(Arc::new(NoOpObserver));
+}
+
 /// enqueue inserts a `Queued` entry synchronously and `list` returns it.
 #[tokio::test]
 async fn enqueue_inserts_queued_and_list_reads_snapshot() {
