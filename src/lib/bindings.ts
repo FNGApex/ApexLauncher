@@ -536,7 +536,17 @@ export type ItemStatus =
 export type JavaCfg = {
 	major: number | null,
 	argsOverride: string | null,
+	/**  Max heap (`-Xmx`). Also used as the instance's global-default value at create time. */
 	memoryMb: number,
+	/**  Min heap (`-Xms`). `None` = omit `-Xms` entirely (§8 Q5). */
+	minMemoryMb?: number | null,
+	/**  Custom java binary path. `None` = auto-provision via `ensure_java(major)`. */
+	pathOverride?: string | null,
+	/**
+	 *  When `true`, this instance's saved Java/RAM override is used; when `false`,
+	 *  the global default from `Settings` is used. Old manifests load as `false`.
+	 */
+	usePackSettings?: boolean,
 };
 
 /**  A located JRE. */
@@ -830,6 +840,16 @@ export type ProviderCommandError = {
 /**  Identifies which provider owns a result. */
 export type ProviderKind = "modrinth" | "curseForge";
 
+/**
+ *  Pack-recommended Java/memory hint embedded in the instance source.
+ *  All fields are optional so a partial recommendation is valid.
+ *  Currently always `None` — providers don't expose it yet (design §5).
+ */
+export type RecommendedJava = {
+	memoryMb: number | null,
+	javaArgs: string | null,
+};
+
 /**  Returned by `resolve_vanilla`: the download plan + launch metadata. */
 export type ResolveResult = {
 	plan: DownloadPlan,
@@ -911,6 +931,8 @@ export type Source = {
 	projectId: string,
 	fileId: string,
 	packVersion: string,
+	/**  Pack-recommended Java/RAM hint. Always `None` today — plumbing only. */
+	recommended?: RecommendedJava | null,
 };
 
 /**  An optional dependency surfaced as a suggestion. */
