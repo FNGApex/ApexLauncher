@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, NavLink, Outlet } from "react-router-dom";
 import {
   useInfiniteQuery,
   useMutation,
@@ -18,7 +18,6 @@ import {
   Play,
   RefreshCw,
   Search,
-  Settings2,
   Square,
   Trash2,
   Unlock,
@@ -37,19 +36,30 @@ import {
   updateMod,
   updateModpack,
   type FolderMod,
+  type Instance,
   type ModEntry,
   type ProjectSummary,
   type ProviderCommandError,
 } from "@/lib/ipc";
 import { useAppStore } from "@/lib/store";
-import { SlideOver } from "@/components/SlideOver";
 import { ProviderBadge } from "@/components/ProviderBadge";
 
 const PAGE_LIMIT = 20;
 const DEBOUNCE_MS = 400;
 
 // ---------------------------------------------------------------------------
-// Root page component
+// Outlet context type — consumed by the four tab components
+// ---------------------------------------------------------------------------
+
+export type InstanceTabContext = {
+  slug: string;
+  instance: Instance;
+  folderMods: FolderMod[];
+  invalidate: () => void;
+};
+
+// ---------------------------------------------------------------------------
+// Root shell component
 // ---------------------------------------------------------------------------
 
 export function InstanceDetail() {
@@ -72,7 +82,6 @@ export function InstanceDetail() {
 
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
-  const [slideOverOpen, setSlideOverOpen] = useState(false);
   const consoleRef = useRef<HTMLPreElement>(null);
 
   // Auto-scroll console to bottom when new log lines arrive.
@@ -120,8 +129,12 @@ export function InstanceDetail() {
     qc.invalidateQueries({ queryKey: ["instance", slug] });
   }
 
+  const tabBase =
+    "rounded-md px-4 py-1.5 text-sm font-medium transition-colors text-muted hover:text-foreground";
+  const tabActive = "bg-surface-2 text-foreground";
+
   return (
-    <div className="px-8 py-7">
+    <div className="flex flex-col px-8 py-7">
       <Link
         to="/instances"
         className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted hover:text-foreground"
@@ -136,14 +149,24 @@ export function InstanceDetail() {
         <p className="text-sm text-danger">{String(error)}</p>
       ) : data ? (
         <>
-          <header className="mb-6 flex items-start justify-between gap-4">
+          {/* ----------------------------------------------------------------
+              Header — persistent across all tab switches
+          ---------------------------------------------------------------- */}
+          <header className="mb-4 flex items-start justify-between gap-4">
             <div>
               <h1 className="text-2xl font-semibold">{data.instance.name}</h1>
-              <p className="text-sm text-muted">
-                {labelLoader(data.instance.loader.kind)}
-                {data.instance.loader.version ? ` ${data.instance.loader.version}` : ""} ·
-                Minecraft {data.instance.minecraft}
-              </p>
+              <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                <p className="text-sm text-muted">
+                  {labelLoader(data.instance.loader.kind)}
+                  {data.instance.loader.version ? ` ${data.instance.loader.version}` : ""} ·
+                  Minecraft {data.instance.minecraft}
+                </p>
+                {data.instance.source && (
+                  <span className="inline-flex items-center rounded-full border border-border bg-surface px-2 py-0.5 text-xs text-muted">
+                    Pack v{data.instance.source.packVersion}
+                  </span>
+                )}
+              </div>
             </div>
 
             <div className="flex shrink-0 items-center gap-3">
@@ -180,27 +203,64 @@ export function InstanceDetail() {
             </p>
           )}
 
-          <dl className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <Stat label="Memory" value={`${data.instance.java.memoryMb} MB`} />
-            <Stat
-              label="Java"
-              value={data.instance.java.major ? `Java ${data.instance.java.major}` : "Auto"}
-            />
-            <Stat label="Managed mods" value={`${data.instance.mods.length}`} />
-            <Stat label="Created" value={formatDate(data.instance.created)} />
-          </dl>
+          {/* ----------------------------------------------------------------
+              Tab bar
+          ---------------------------------------------------------------- */}
+          <nav className="mb-6 flex gap-1 rounded-lg border border-border bg-surface p-1 self-start">
+            <NavLink
+              to="info"
+              className={({ isActive }) =>
+                tabBase + (isActive ? " " + tabActive : "")
+              }
+            >
+              Info
+            </NavLink>
+            <NavLink
+              to="modlist"
+              className={({ isActive }) =>
+                tabBase + (isActive ? " " + tabActive : "")
+              }
+            >
+              Mods
+            </NavLink>
+            <NavLink
+              to="tech"
+              className={({ isActive }) =>
+                tabBase + (isActive ? " " + tabActive : "")
+              }
+            >
+              Tech Info
+            </NavLink>
+            <NavLink
+              to="java"
+              className={({ isActive }) =>
+                tabBase + (isActive ? " " + tabActive : "")
+              }
+            >
+              Java
+            </NavLink>
+          </nav>
 
-          <dl className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-2">
-            <Stat
-              label="Last played"
-              value={data.instance.lastPlayed ? formatDate(data.instance.lastPlayed) : "Never"}
+          {/* ----------------------------------------------------------------
+              Tab outlet — receives the instance context
+          ---------------------------------------------------------------- */}
+          <div className="mb-8">
+            <Outlet
+              context={
+                {
+                  slug: slug!,
+                  instance: data.instance,
+                  folderMods: data.folderMods,
+                  invalidate,
+                } satisfies InstanceTabContext
+              }
             />
-            <Stat
-              label="Total playtime"
-              value={formatPlaytime(data.instance.totalPlaytimeSec)}
-            />
-          </dl>
+          </div>
 
+          {/* ----------------------------------------------------------------
+              Console — persistent chrome, shown when the instance is running
+              or has accumulated log lines
+          ---------------------------------------------------------------- */}
           {(running || (runLogLines && runLogLines.length > 0)) && (
             <section className="mb-8">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-muted">
@@ -216,63 +276,6 @@ export function InstanceDetail() {
               </pre>
             </section>
           )}
-
-          {/* Pack source + Update + Pack Lock (only when installed via Browse) */}
-          {data.instance.source && (
-            <PackSourcePanel
-              slug={slug!}
-              source={data.instance.source}
-              packLocked={data.instance.packLocked ?? false}
-              provider={data.instance.source.provider}
-              projectId={data.instance.source.projectId}
-              onMutate={invalidate}
-            />
-          )}
-
-          {/* Mods summary + Manage installs button */}
-          <section>
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h2 className="flex items-center gap-2 text-sm font-semibold text-muted">
-                  <Package className="size-4" />
-                  Mods
-                </h2>
-                <p className="mt-0.5 text-xs text-muted">
-                  {data.folderMods.length === 0
-                    ? "No mods installed"
-                    : `${data.folderMods.length} file${data.folderMods.length !== 1 ? "s" : ""}` +
-                      (data.instance.mods.length > 0
-                        ? ` · ${data.instance.mods.length} managed`
-                        : "")}
-                </p>
-              </div>
-              <button
-                onClick={() => setSlideOverOpen(true)}
-                className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-4 py-2 text-sm font-medium text-foreground hover:bg-surface-2"
-              >
-                <Settings2 className="size-4" />
-                Manage installs
-              </button>
-            </div>
-          </section>
-
-          {/* Slide-over: manage installs */}
-          <SlideOver
-            open={slideOverOpen}
-            onClose={() => setSlideOverOpen(false)}
-            title="Manage installs"
-            widthClass="w-full max-w-2xl"
-          >
-            <ManageInstallsPanel
-              instanceSlug={slug!}
-              minecraft={data.instance.minecraft}
-              loaderKind={data.instance.loader.kind}
-              folderMods={data.folderMods}
-              modEntries={data.instance.mods}
-              packLocked={data.instance.packLocked ?? false}
-              onMutate={invalidate}
-            />
-          </SlideOver>
         </>
       ) : null}
     </div>
@@ -280,7 +283,8 @@ export function InstanceDetail() {
 }
 
 // ---------------------------------------------------------------------------
-// Pack source panel — shown when instance was installed via Browse
+// Pack source panel — shown in InfoTab when instance was installed via Browse
+// Exported so InfoTab can import it.
 // ---------------------------------------------------------------------------
 
 interface PackSourcePanelProps {
@@ -292,7 +296,7 @@ interface PackSourcePanelProps {
   onMutate: () => void;
 }
 
-function PackSourcePanel({
+export function PackSourcePanel({
   slug,
   source,
   packLocked,
@@ -433,7 +437,8 @@ function PackSourcePanel({
 }
 
 // ---------------------------------------------------------------------------
-// Manage installs panel (slide-over body)
+// Manage installs panel (full-page tab body for ModlistTab)
+// Exported so ModlistTab can import it.
 // ---------------------------------------------------------------------------
 
 type ManageTab = "installed" | "add";
@@ -448,7 +453,7 @@ interface ManageInstallsPanelProps {
   onMutate: () => void;
 }
 
-function ManageInstallsPanel({
+export function ManageInstallsPanel({
   instanceSlug,
   minecraft,
   loaderKind,
@@ -1024,10 +1029,10 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
 
 
 // ---------------------------------------------------------------------------
-// Shared helpers
+// Shared helpers — exported so tab files can import them
 // ---------------------------------------------------------------------------
 
-function Stat({ label, value }: { label: string; value: string }) {
+export function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-border bg-surface px-4 py-3">
       <dt className="text-xs text-muted">{label}</dt>
@@ -1036,11 +1041,11 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function labelLoader(kind: string): string {
+export function labelLoader(kind: string): string {
   return kind === "vanilla" ? "Vanilla" : kind[0].toUpperCase() + kind.slice(1);
 }
 
-function formatDate(iso: string): string {
+export function formatDate(iso: string): string {
   const d = new Date(iso);
   return isNaN(d.getTime()) ? "—" : d.toLocaleDateString();
 }
@@ -1066,7 +1071,7 @@ function isProviderCommandError(v: unknown): v is ProviderCommandError {
 }
 
 /** Convert total seconds to a human-readable string. 0 → "0m". */
-function formatPlaytime(totalSec: number): string {
+export function formatPlaytime(totalSec: number): string {
   if (totalSec === 0) return "0m";
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
