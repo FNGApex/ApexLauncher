@@ -1,5 +1,19 @@
 # Handoff — Phase 7a Installers · Windows leg (MSI + NSIS)
 
+> ✅ **COMPLETE (2026-06-19).** IP-1→IP-4 implemented and verified on Windows — MSI + NSIS both
+> build, install, launch, and uninstall cleanly (commits cb44c9a, c659739). The remaining
+> notes below are kept for the record. macOS and Linux get their own handoffs (`ip-f-mac`,
+> `ip-f-linux`).
+>
+> **Two things future legs must know:**
+> 1. `scripts/apex-build.bat` now self-sources the MSVC dev env via `vcvarsall.bat` (direct-probed
+>    from known VS2022 install paths) so `rc.exe` is on PATH. The Windows builder needs the VS2022
+>    "Desktop development with C++" workload (MSVC v143 + Windows SDK) installed.
+> 2. The IP-4 smoke test uncovered a **startup panic** (`TaskManager::new` ran `tokio::spawn` in
+>    Tauri's `.setup()` with no runtime) that crashed the release app on launch; fixed in cb44c9a
+>    (`tauri::async_runtime::spawn`). Lesson: `cargo test` can't catch startup-context bugs —
+>    actually launch a built bundle before declaring a leg done.
+
 > For a fresh Claude Code session running **natively on Windows**. Windows is the only locally
 > buildable target this slice; macOS and Linux get their own handoffs (`ip-f-mac`, `ip-f-linux`).
 

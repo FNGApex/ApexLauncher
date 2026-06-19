@@ -114,6 +114,9 @@ Retires the standing `ipc.ts`/`store.ts` hand-mirror drift risk (CP-1→6, merge
 
 ## Phase 7 — Polish & ship — 🚧 Active
 - [ ] Instance icons, themes (dark/light), skin/cape preview, import from other launchers.
+- [~] **Installers (Phase 7a).** Windows MSI + NSIS done + verified (IP-1→IP-4, unsigned) —
+  see `docs/spec/phase7-installers.md`. macOS DMG + Linux AppImage/tarball config landed but
+  build on their own hosts (`ip-f-mac` / `ip-f-linux`); IP-8 README docs pending.
 - [ ] Cross-platform CI builds (GitHub Actions: win/mac/linux), signing, auto-update. Switch
   reqwest `native-tls` → `rustls-tls` before CI to drop the OpenSSL build dependency.
 - [ ] Error reporting, crash log parsing/help.

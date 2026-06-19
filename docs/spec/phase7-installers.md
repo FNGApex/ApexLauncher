@@ -1,6 +1,9 @@
 # Phase 7a — Installers / distributable packaging (spec)
 
-Status: proposed (not implemented). Design: `docs/design/phase7-installers.md`.
+Status: **Windows leg (IP-1→IP-4) implemented + verified on Windows** (commits cb44c9a,
+c659739). macOS/Linux bundle config blocks landed (IP-5/IP-7) but artifacts build later on
+their own hosts (`ip-f-mac` / `ip-f-linux`); IP-6 tarball-wrap step and IP-8 docs not started.
+Design: `docs/design/phase7-installers.md`.
 
 Contract: configure the Tauri v2 bundler + build entrypoint to emit shippable artifacts per
 target. Each checkpoint is independently shippable. Gates respect host reality: **Windows MSI/NSIS
@@ -46,6 +49,17 @@ is verified by `check`; mac/Linux artifact production + smoke-test are deferred 
 
 ## Change log
 
+- 2026-06-19 — **Windows leg shipped + verified.** IP-1 (per-platform bundle config), IP-2
+  (`bundle <fmt...>` build mode in `build.sh` + `apex-build.bat` forwarding `--bundles`), IP-3
+  (MSI), IP-4 (NSIS) all done. Both installers build, install, launch (app window confirmed),
+  and uninstall cleanly on Windows. `apex-build.bat` now self-sources the MSVC dev env
+  (`vcvarsall.bat`, direct-probed) so `rc.exe` (needed by `tauri-winres`) is on PATH — the
+  native build no longer requires a Developer shell. Empirically confirmed space-separated
+  `--bundles msi nsis` works with the installed tauri-cli. **Startup-panic bug uncovered by the
+  IP-4 smoke test and fixed separately** (commit cb44c9a): `TaskManager::new` called
+  `tokio::spawn` from Tauri's synchronous `.setup()` hook (no runtime entered) → release app
+  exited 101 on launch; switched to `tauri::async_runtime::spawn` + added a plain-`#[test]`
+  regression. Remaining: IP-5/IP-6/IP-7 mac/Linux artifact builds (config present), IP-8 docs.
 - 2026-06-18 — Open questions resolved (human): both MSI + NSIS; macOS DMG unsigned (no Apple
   Developer ID); Linux AppImage + tarball, deb/rpm deferred; glibc floor Ubuntu 22.04 / Debian 12;
   no local mac/Linux host → IP-5/6/7 gate on config + `check` this slice, artifact build/test
