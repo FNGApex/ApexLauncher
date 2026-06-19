@@ -81,8 +81,14 @@ scripts/build.sh check               # cargo check + tsc --noEmit (fast typechec
 scripts/build.sh test                # full Rust test suite (default mode)
 scripts/build.sh test core::download # forward a cargo test filter
 scripts/build.sh build               # real installable bundle for smoke testing (tauri build)
+scripts/build.sh bundle msi nsis     # build only the named installer format(s) (--bundles)
 scripts/build.sh dev                 # dev window, HMR
 ```
+
+> **Native Windows build prereq:** the bundler needs the VS2022 "Desktop development with C++"
+> workload (MSVC v143 + Windows SDK — provides `rc.exe` for `tauri-winres`). `apex-build.bat`
+> self-sources `vcvarsall.bat` so any shell works, not just a Developer prompt. MSI also needs
+> the VBSCRIPT optional Windows feature. See `docs/spec/phase7-installers.md`.
 
 **On WSL (this machine):** the script mirrors the source tree onto the **native Windows
 filesystem** at `C:\Users\drgor\Documents\GitHub\ApexLauncher` (via rsync `--delete`, excluding
