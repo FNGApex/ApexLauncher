@@ -2461,6 +2461,7 @@ async fn install_modpack(
         project_id: project_id.clone(),
         file_id: resolved.version_id.clone(),
         pack_version: resolved.version_name.clone(),
+        recommended: None,
     };
     let name_override: Option<String> = if resolved.version_name.is_empty() {
         None

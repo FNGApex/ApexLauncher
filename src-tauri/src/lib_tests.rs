@@ -205,6 +205,7 @@ fn d1_source_built_from_resolved_pack_file_fields() {
         project_id: project_id.clone(),
         file_id: resolved.version_id.clone(),
         pack_version: resolved.version_name.clone(),
+        recommended: None,
     };
 
     assert_eq!(source.provider, "modrinth");
@@ -316,7 +317,7 @@ fn d4_ensure_not_locked_ok_when_unlocked() {
         icon: None,
         minecraft: "1.20.1".into(),
         loader: instances::Loader { kind: "vanilla".into(), version: None },
-        java: instances::JavaCfg { major: None, args_override: None, memory_mb: 2048 },
+        java: instances::JavaCfg { major: None, args_override: None, memory_mb: 2048, min_memory_mb: None, path_override: None, use_pack_settings: false },
         source: None,
         pack_locked: false,
         mods: vec![],
@@ -339,7 +340,7 @@ fn d4_ensure_not_locked_err_when_locked() {
         icon: None,
         minecraft: "1.20.1".into(),
         loader: instances::Loader { kind: "vanilla".into(), version: None },
-        java: instances::JavaCfg { major: None, args_override: None, memory_mb: 2048 },
+        java: instances::JavaCfg { major: None, args_override: None, memory_mb: 2048, min_memory_mb: None, path_override: None, use_pack_settings: false },
         source: None,
         pack_locked: true,
         mods: vec![],
@@ -376,7 +377,7 @@ fn d4_update_modpack_unguarded_contract() {
         icon: None,
         minecraft: "1.20.1".into(),
         loader: instances::Loader { kind: "vanilla".into(), version: None },
-        java: instances::JavaCfg { major: None, args_override: None, memory_mb: 2048 },
+        java: instances::JavaCfg { major: None, args_override: None, memory_mb: 2048, min_memory_mb: None, path_override: None, use_pack_settings: false },
         source: None,
         pack_locked: true,
         mods: vec![],

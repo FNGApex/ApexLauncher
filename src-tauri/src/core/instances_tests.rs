@@ -26,6 +26,9 @@ fn stub_instance(mods: Vec<ModEntry>) -> Instance {
             major: None,
             args_override: None,
             memory_mb: 2048,
+            min_memory_mb: None,
+            path_override: None,
+            use_pack_settings: false,
         },
         source: None,
         pack_locked: false,
@@ -366,5 +369,85 @@ fn d1_old_manifest_deserializes_with_default_false_fields() {
     assert!(
         !inst.mods[0].from_pack,
         "fromPack must default to false when absent from old manifest"
+    );
+}
+
+// -----------------------------------------------------------------------
+// A-1: old manifest round-trip (new JavaCfg + Source fields backward compat)
+// -----------------------------------------------------------------------
+
+/// An old `instance.json` that lacks the new `JavaCfg` fields (`minMemoryMb`,
+/// `pathOverride`, `usePackSettings`) and the new `Source.recommended` field must
+/// deserialize with all new fields at their zero/None defaults. Confirms no schema
+/// bump is needed (A-1 spec).
+#[test]
+fn a1_old_manifest_new_java_cfg_fields_default() {
+    let json = r#"{
+        "schema": 1,
+        "id": "old-id-2",
+        "name": "Old Instance",
+        "slug": "old-instance-2",
+        "icon": null,
+        "minecraft": "1.20.1",
+        "loader": { "kind": "vanilla", "version": null },
+        "java": { "major": null, "argsOverride": null, "memoryMb": 2048 },
+        "source": null,
+        "mods": [],
+        "created": "2024-01-01T00:00:00Z",
+        "lastPlayed": null,
+        "totalPlaytimeSec": 0
+    }"#;
+
+    let inst: Instance = serde_json::from_str(json).expect("old manifest must deserialize");
+
+    assert_eq!(
+        inst.java.min_memory_mb, None,
+        "minMemoryMb must default to None when absent"
+    );
+    assert_eq!(
+        inst.java.path_override, None,
+        "pathOverride must default to None when absent"
+    );
+    assert!(
+        !inst.java.use_pack_settings,
+        "usePackSettings must default to false when absent"
+    );
+    assert!(
+        inst.source.is_none(),
+        "source must remain None (no recommended field involved)"
+    );
+}
+
+/// Old manifest with a `source` object that lacks `recommended` must deserialize
+/// with `recommended == None`.
+#[test]
+fn a1_old_source_without_recommended_defaults_to_none() {
+    let json = r#"{
+        "schema": 1,
+        "id": "old-id-3",
+        "name": "Old Pack",
+        "slug": "old-pack",
+        "icon": null,
+        "minecraft": "1.20.1",
+        "loader": { "kind": "fabric", "version": "0.15.0" },
+        "java": { "major": null, "argsOverride": null, "memoryMb": 4096 },
+        "source": {
+            "provider": "modrinth",
+            "projectId": "proj-abc",
+            "fileId": "file-xyz",
+            "packVersion": "1.0.0"
+        },
+        "mods": [],
+        "created": "2024-01-01T00:00:00Z",
+        "lastPlayed": null,
+        "totalPlaytimeSec": 0
+    }"#;
+
+    let inst: Instance = serde_json::from_str(json).expect("old manifest with source must deserialize");
+
+    let source = inst.source.expect("source must be Some");
+    assert_eq!(
+        source.recommended, None,
+        "recommended must default to None when absent from old source"
     );
 }

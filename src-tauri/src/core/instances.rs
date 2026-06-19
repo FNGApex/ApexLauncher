@@ -34,7 +34,28 @@ pub struct Loader {
 pub struct JavaCfg {
     pub major: Option<u32>,
     pub args_override: Option<String>,
+    /// Max heap (`-Xmx`). Also used as the instance's global-default value at create time.
     pub memory_mb: u32,
+    /// Min heap (`-Xms`). `None` = omit `-Xms` entirely (§8 Q5).
+    #[serde(default)]
+    pub min_memory_mb: Option<u32>,
+    /// Custom java binary path. `None` = auto-provision via `ensure_java(major)`.
+    #[serde(default)]
+    pub path_override: Option<String>,
+    /// When `true`, this instance's saved Java/RAM override is used; when `false`,
+    /// the global default from `Settings` is used. Old manifests load as `false`.
+    #[serde(default)]
+    pub use_pack_settings: bool,
+}
+
+/// Pack-recommended Java/memory hint embedded in the instance source.
+/// All fields are optional so a partial recommendation is valid.
+/// Currently always `None` — providers don't expose it yet (design §5).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RecommendedJava {
+    pub memory_mb: Option<u32>,
+    pub java_args: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
@@ -44,6 +65,9 @@ pub struct Source {
     pub project_id: String,
     pub file_id: String,
     pub pack_version: String,
+    /// Pack-recommended Java/RAM hint. Always `None` today — plumbing only.
+    #[serde(default)]
+    pub recommended: Option<RecommendedJava>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
@@ -165,6 +189,9 @@ pub fn create(app: &AppHandle, req: CreateInstanceReq) -> Result<Instance, Strin
             major: None,
             args_override: None,
             memory_mb: default_memory_mb,
+            min_memory_mb: None,
+            path_override: None,
+            use_pack_settings: false,
         },
         source: None,
         pack_locked: false,
