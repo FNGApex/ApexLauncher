@@ -804,10 +804,35 @@ async fn launch_instance(
         ));
     }
 
-    // --- 5. Ensure Java (reuse from installer step if forge/neoforge). ---
+    // --- 5. Resolve effective Java config + ensure Java binary. ---
+    // Load settings once here; reused at step 8 for offline_mode (avoids a
+    // second settings::load call). `effective` captures per-instance overrides
+    // (RAM, extra args, optional java_path) resolved against global defaults.
+    let app_settings = settings::load(&app).unwrap_or_default();
+    let effective = core::java_resolve::resolve_effective_java(&inst, &app_settings);
+
+    // Java binary selection:
+    //   - If the forge/neoforge installer already provisioned a JRE, reuse it
+    //     (the installer itself needed a real provisioned JRE, so we keep it).
+    //   - Else if the user supplied an explicit path override, use it directly
+    //     and skip the ensure_java provisioning step.
+    //   - Else fall through to ensure_java (auto-provision Temurin as before).
     let java_inst = match java_inst_opt {
         Some(j) => j,
-        None => core::java::ensure_java(&app, launch_meta.java_major).await?,
+        None => {
+            if effective.java_path.is_some() {
+                // Path override set — no provisioning needed.
+                // Construct a minimal JavaInstallation so the path is available;
+                // it is only used for `.path` (checked by grep in CLAUDE.md).
+                core::java::JavaInstallation {
+                    path: effective.java_path.clone().unwrap(),
+                    major: launch_meta.java_major,
+                    source: core::java::JavaSource::Detected,
+                }
+            } else {
+                core::java::ensure_java(&app, launch_meta.java_major).await?
+            }
+        }
     };
 
     // --- 6. Resolve paths. ---
@@ -832,12 +857,10 @@ async fn launch_instance(
     launch::extract_natives(&launch_meta.natives, &paths.natives_directory)?;
 
     // --- 8. Resolve launch identity. ---
-    // Load settings to check the offline-mode toggle, then delegate to the
-    // seam-injectable resolver. The MC token is never cached (CP3 decision), so
-    // the resolver always performs a full MS refresh → Xbox chain when an active
-    // account is present. Lock is held for the duration of the async call; the
-    // resolver drops no sub-locks internally — single lock site here.
-    let app_settings = settings::load(&app).unwrap_or_default();
+    // The MC token is never cached (CP3 decision), so the resolver always performs
+    // a full MS refresh → Xbox chain when an active account is present. Lock is
+    // held for the duration of the async call; the resolver drops no sub-locks
+    // internally — single lock site here. app_settings loaded at step 5.
     let http = auth::ReqwestAuthClient(reqwest::Client::new());
     let identity = {
         let mut store_guard = store_state.lock().await;
@@ -847,14 +870,17 @@ async fn launch_instance(
     };
 
     // --- 8b. Build argv. ---
-    let argv = launch::build_argv(&launch_meta, &paths, &identity)
+    let argv = launch::build_argv(&launch_meta, &paths, &identity, &effective)
         .map_err(|e| format!("argv assembly failed: {e}"))?;
 
     // --- 9. Spawn — transition `Preparing` → `Running`. The prep permit is held
     //        until spawn returns, then dropped so the next launch's prep can begin
     //        while this pack runs. Never wait on the pack's exit. ---
     let game_dir = paths.game_directory.clone();
-    let java_path = java_inst.path.clone();
+    // When a path_override is set, it wins for the launch binary (even if the
+    // installer also ran — the installer needed a provisioned JRE, but the user
+    // wants their own binary for the actual game launch).
+    let java_path = effective.java_path.clone().unwrap_or_else(|| java_inst.path.clone());
 
     // Clone the Arc so the monitor task owns its own reference.
     // State<Arc<…>> auto-derefs to Arc<…>, so &*registry_state is &Arc<…>.
