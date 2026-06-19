@@ -154,6 +154,14 @@ export const commands = {
 	 */
 	getModVersions: (provider: string, projectId: string, mcVersion: string | null, loader: string | null) => typedError<ProjectVersion[], ProviderCommandError>(__TAURI_INVOKE("get_mod_versions", { provider, projectId, mcVersion, loader })),
 	/**
+	 *  Fetch rich project info (title, long description, icon) for the Info tab.
+	 * 
+	 *  `provider` must be `"modrinth"` or `"curseforge"` (case-sensitive).
+	 *  Modrinth returns Markdown (`body_is_html: false`); CurseForge returns HTML
+	 *  (`body_is_html: true`). The CF key is resolved exactly like `search_mods`.
+	 */
+	getPackInfo: (provider: string, projectId: string) => typedError<PackInfo, ProviderCommandError>(__TAURI_INVOKE("get_pack_info", { provider, projectId })),
+	/**
 	 *  Install a mod (and its required transitive dependencies) into an instance.
 	 * 
 	 *  # Flow
@@ -713,6 +721,24 @@ export type MrpackImportResult = {
 	skipped: number,
 	/**  File paths of any downloads that failed (empty on full success). */
 	failedFiles: string[],
+};
+
+/**
+ *  Rich project info for the Info tab — title, long description, and icon.
+ * 
+ *  Returned by `ModProvider::get_project`. The `description` field carries the
+ *  full body: Markdown for Modrinth (`body_is_html: false`) or HTML for
+ *  CurseForge (`body_is_html: true`).
+ */
+export type PackInfo = {
+	/**  Display name of the project. */
+	title: string,
+	/**  Full long description (Markdown or HTML depending on `body_is_html`). */
+	description: string,
+	/**  Icon URL, if available. */
+	iconUrl: string | null,
+	/**  `true` if `description` is HTML (CurseForge); `false` if Markdown (Modrinth). */
+	bodyIsHtml: boolean,
 };
 
 /**
