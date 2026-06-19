@@ -7,6 +7,7 @@ import {
   saveSettings,
   type Settings as SettingsModel,
 } from "@/lib/ipc";
+import { Toggle } from "@/components/Toggle";
 
 export function Settings() {
   const qc = useQueryClient();
@@ -110,6 +111,23 @@ export function Settings() {
             </span>
           </SettingRow>
         )}
+      </div>
+
+      <div className="mt-8 space-y-4">
+        <div>
+          <h2 className="text-base font-semibold">Behavior</h2>
+          <p className="text-xs text-muted">UI defaults applied on first launch.</p>
+        </div>
+
+        <SettingRow
+          title="Start with sidebar collapsed"
+          desc="On first launch (before any manual toggle), open the sidebar in compact icon-only mode."
+        >
+          <Toggle
+            checked={form.sidebarStartCollapsed ?? false}
+            onChange={(v) => setForm({ ...form, sidebarStartCollapsed: v })}
+          />
+        </SettingRow>
       </div>
 
       <div className="mt-8 space-y-4">

@@ -34,6 +34,11 @@ pub struct Settings {
     /// Preserves existing offline behavior for users with no account configured.
     #[serde(default = "default_offline_mode")]
     pub offline_mode: bool,
+    /// When true, the sidebar starts collapsed on first launch (before the user has
+    /// manually toggled it). The live collapsed state is persisted in localStorage
+    /// (`apex-ui`); this setting is the initial seed applied on first run only.
+    #[serde(default = "default_sidebar_collapsed")]
+    pub sidebar_start_collapsed: bool,
 }
 
 fn default_schema() -> u32 {
@@ -48,6 +53,9 @@ fn default_java_args() -> String {
 fn default_offline_mode() -> bool {
     false
 }
+fn default_sidebar_collapsed() -> bool {
+    false
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -57,9 +65,14 @@ impl Default for Settings {
             default_java_args: default_java_args(),
             curseforge_api_key: None,
             offline_mode: false,
+            sidebar_start_collapsed: false,
         }
     }
 }
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;
 
 /// Load settings, returning defaults if the file doesn't exist yet.
 pub fn load(app: &AppHandle) -> Result<Settings, String> {

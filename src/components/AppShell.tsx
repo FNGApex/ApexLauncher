@@ -7,10 +7,11 @@ import {
   listRunning,
   listTasks,
   getRunLogs,
+  getSettings,
   type RunInfoPayload,
   type RunLogPayload,
 } from "@/lib/ipc";
-import { useAppStore, type Task, type RunState, type RunLogLine } from "@/lib/store";
+import { useAppStore, useUiStore, type Task, type RunState, type RunLogLine } from "@/lib/store";
 
 /** Top-level chrome: fixed sidebar + scrollable content area.
  *
@@ -23,6 +24,23 @@ export function AppShell() {
   const upsertRun = useAppStore((s) => s.upsertRun);
   const appendLog = useAppStore((s) => s.appendLog);
   const setLogs = useAppStore((s) => s.setLogs);
+
+  // First-run sidebar seed: if the user has never manually toggled the sidebar
+  // (i.e. the "apex-ui" key doesn't exist in localStorage yet), apply the
+  // backend Setting's `sidebarStartCollapsed` default so users who configured
+  // "start collapsed" get that behaviour before their first manual toggle.
+  useEffect(() => {
+    if (localStorage.getItem("apex-ui") !== null) return;
+    getSettings()
+      .then((settings) => {
+        if (localStorage.getItem("apex-ui") !== null) return; // race guard
+        useUiStore.getState().setSidebarCollapsed(settings.sidebarStartCollapsed ?? false);
+      })
+      .catch(() => {
+        // Best-effort — non-critical. Default (expanded) is fine.
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

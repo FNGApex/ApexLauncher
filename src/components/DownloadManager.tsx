@@ -5,6 +5,7 @@
 
 import { useState } from "react";
 import { X, Download, XCircle, CheckCircle2, AlertCircle, Clock, Loader2 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { useAppStore, type Task, type TaskStatus } from "@/lib/store";
 import { cancelTask } from "@/lib/ipc";
 
@@ -12,7 +13,10 @@ import { cancelTask } from "@/lib/ipc";
 // Public entry: trigger button + panel (mounted inside Sidebar)
 // ---------------------------------------------------------------------------
 
-export function DownloadManagerButton() {
+/** `collapsed` renders an icon-only trigger (for the collapsed sidebar) while
+ *  keeping the same open-state and the same `fixed` panel (which is anchored to
+ *  the viewport, so it opens correctly regardless of sidebar width). */
+export function DownloadManagerButton({ collapsed = false }: { collapsed?: boolean }) {
   const [open, setOpen] = useState(false);
   const tasks = useAppStore((s) => s.tasks);
   const activeCount = [...tasks.values()].filter((t) => isActive(t.status)).length;
@@ -21,7 +25,11 @@ export function DownloadManagerButton() {
     <>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="relative flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-muted hover:bg-surface-2 hover:text-foreground transition-colors"
+        title={collapsed ? "Downloads" : undefined}
+        className={cn(
+          "relative flex w-full items-center rounded-lg py-1.5 text-sm text-muted hover:bg-surface-2 hover:text-foreground transition-colors",
+          collapsed ? "justify-center px-0" : "gap-2 px-2",
+        )}
         aria-label="Toggle Download Manager"
       >
         {activeCount > 0 ? (
@@ -29,12 +37,15 @@ export function DownloadManagerButton() {
         ) : (
           <Download className="size-4 shrink-0" />
         )}
-        <span className="flex-1 text-left">Downloads</span>
-        {activeCount > 0 && (
-          <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none text-primary-foreground">
-            {activeCount}
-          </span>
-        )}
+        {!collapsed && <span className="flex-1 text-left">Downloads</span>}
+        {activeCount > 0 &&
+          (collapsed ? (
+            <span className="absolute right-1 top-1 size-2 rounded-full bg-primary" />
+          ) : (
+            <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none text-primary-foreground">
+              {activeCount}
+            </span>
+          ))}
       </button>
 
       {open && <DownloadManagerPanel onClose={() => setOpen(false)} />}

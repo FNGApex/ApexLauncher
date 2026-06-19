@@ -975,6 +975,12 @@ export type Settings = {
 	 *  Preserves existing offline behavior for users with no account configured.
 	 */
 	offlineMode?: boolean,
+	/**
+	 *  When true, the sidebar starts collapsed on first launch (before the user has
+	 *  manually toggled it). The live collapsed state is persisted in localStorage
+	 *  (`apex-ui`); this setting is the initial seed applied on first run only.
+	 */
+	sidebarStartCollapsed?: boolean,
 };
 
 export type Source = {
