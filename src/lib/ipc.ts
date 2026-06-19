@@ -76,6 +76,7 @@ export type {
   CfImportResult,
   ModpackInstallResult,
   PackUpdateResult,
+  PackInfo,
   RunInfoPayload,
   RunLogPayload,
   // Event payload type still referenced by name in a component (`Sidebar`);
@@ -249,6 +250,11 @@ export function getModVersions(
   loader: string | null,
 ) {
   return unwrap(commands.getModVersions(provider, projectId, mcVersion, loader));
+}
+
+/** Fetch the title, icon, and long description for a pack project. */
+export function getPackInfo(provider: "modrinth" | "curseforge", projectId: string) {
+  return unwrap(commands.getPackInfo(provider, projectId));
 }
 
 // --- Phase 5 slice B: mod install ---
