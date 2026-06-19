@@ -17,16 +17,18 @@
 # Usage:
 #   scripts/build.sh [check|test|build|dev] [extra args...]
 #
-#   check   cargo check + tsc --noEmit (fast typecheck, both sides)
-#   test    cargo test (extra args are forwarded as a test filter)   [default]
-#   build   produce a real installable bundle for smoke testing (tauri build)
-#   dev     launch the dev window (HMR)
+#   check         cargo check + tsc --noEmit (fast typecheck, both sides)
+#   test          cargo test (extra args are forwarded as a test filter)   [default]
+#   build         produce a real installable bundle for smoke testing (tauri build)
+#   bundle <fmt>  build only the named installer format(s) (tauri build --bundles ...)
+#   dev           launch the dev window (HMR)
 #
 # Examples:
 #   scripts/build.sh                       # run the full Rust test suite
 #   scripts/build.sh test core::download   # run only matching tests
 #   scripts/build.sh check                 # quick typecheck before committing
-#   scripts/build.sh build                 # bundle the app
+#   scripts/build.sh build                 # bundle the app (all targets)
+#   scripts/build.sh bundle msi nsis       # build just the MSI + NSIS installers
 #
 set -euo pipefail
 
@@ -86,12 +88,21 @@ run_native() {
       npm run tauri build
       echo "[build] bundle: src-tauri/target/release/bundle"
       ;;
+    bundle)
+      ensure_node
+      if [ ${#EXTRA[@]} -eq 0 ]; then
+        npm run tauri build
+      else
+        npm run tauri build -- --bundles "${EXTRA[@]}"
+      fi
+      echo "[build] bundle: src-tauri/target/release/bundle"
+      ;;
     dev)
       ensure_node
       npm run tauri dev
       ;;
     *)
-      echo "[build] unknown mode '$MODE' (use: check|test|build|dev)" >&2
+      echo "[build] unknown mode '$MODE' (use: check|test|build|bundle|dev)" >&2
       exit 2
       ;;
   esac
