@@ -1282,6 +1282,51 @@ fn set_pack_lock(app: tauri::AppHandle, slug: String, locked: bool) -> Result<()
 }
 
 // ---------------------------------------------------------------------------
+// D-3: Java tab — set per-instance Java config + validate a Java path
+// ---------------------------------------------------------------------------
+
+/// Persist a `JavaCfg` override to an instance's manifest.
+///
+/// When `cfg.use_pack_settings` is `true` the launcher uses this instance's own
+/// Java/memory settings at launch; when `false` it falls back to the global
+/// default from `Settings`. Resolution is handled by `resolve_effective_java`
+/// (WS-A) — this command only persists the user's choice.
+#[tauri::command]
+#[specta::specta]
+fn set_instance_java(
+    app: tauri::AppHandle,
+    slug: String,
+    java: crate::core::instances::JavaCfg,
+) -> Result<(), String> {
+    instances::set_instance_java(&app, &slug, java)
+}
+
+/// Probe a Java binary by running `<path> -version` and parsing its stderr.
+///
+/// Returns a [`JavaProbe`] with the major version and full version string on
+/// success, or a human-readable `Err` when the binary cannot be spawned or its
+/// output doesn't contain a recognisable `java version "…"` line.
+#[tauri::command]
+#[specta::specta]
+async fn validate_java_path(path: String) -> Result<crate::core::java::JavaProbe, String> {
+    use tokio::process::Command;
+
+    let output = Command::new(&path)
+        .arg("-version")
+        .output()
+        .await
+        .map_err(|e| format!("failed to spawn '{path}': {e}"))?;
+
+    // `java -version` writes to stderr on all JVM vendors.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let (major, version) = crate::core::java::parse_java_version_output(&stderr)
+        .ok_or_else(|| format!("could not parse java version from output of '{path}'"))?;
+
+    Ok(crate::core::java::JavaProbe { major, version })
+}
+
+// ---------------------------------------------------------------------------
 // CP4: Update a single installed mod
 // ---------------------------------------------------------------------------
 
@@ -2961,6 +3006,8 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             remove_mod,
             update_mod,
             set_pack_lock,
+            set_instance_java,
+            validate_java_path,
             import_mrpack,
             import_curseforge_zip,
             install_modpack,

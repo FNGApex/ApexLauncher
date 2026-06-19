@@ -777,3 +777,39 @@ async fn ensure_java_core_misses_then_provisions() {
     assert_eq!(result.path, fake_java);
     assert!(matches!(result.source, JavaSource::Downloaded));
 }
+
+// ------------------------------------------------------------------
+// parse_java_version_output (D-3)
+// ------------------------------------------------------------------
+
+#[test]
+fn parse_java_version_output_modern_openjdk() {
+    // OpenJDK 21 — typical stderr from `java -version`
+    let stderr =
+        "openjdk version \"21.0.1\" 2023-10-17\nOpenJDK Runtime Environment Temurin-21.0.1+12 (build 21.0.1+12)\n";
+    let result = parse_java_version_output(stderr);
+    assert_eq!(result, Some((21, "21.0.1".to_string())));
+}
+
+#[test]
+fn parse_java_version_output_legacy_java8() {
+    // Oracle/OpenJDK 8 legacy 1.x scheme
+    let stderr =
+        "java version \"1.8.0_392\"\nJava(TM) SE Runtime Environment (build 1.8.0_392-b08)\n";
+    let result = parse_java_version_output(stderr);
+    assert_eq!(result, Some((8, "1.8.0_392".to_string())));
+}
+
+#[test]
+fn parse_java_version_output_garbage_returns_none() {
+    let result = parse_java_version_output("not a java binary\ncould not launch\n");
+    assert_eq!(result, None);
+}
+
+#[test]
+fn parse_java_version_output_java17() {
+    let stderr =
+        "openjdk version \"17.0.8\" 2023-07-18\nOpenJDK Runtime Environment (build 17.0.8+7)\n";
+    let result = parse_java_version_output(stderr);
+    assert_eq!(result, Some((17, "17.0.8".to_string())));
+}

@@ -418,6 +418,80 @@ fn a1_old_manifest_new_java_cfg_fields_default() {
     );
 }
 
+// -----------------------------------------------------------------------
+// D-3: set_instance_java round-trip
+// -----------------------------------------------------------------------
+
+/// `set_instance_java_on_disk` persists every field of `JavaCfg` and they
+/// survive a manifest round-trip (read back from disk with the new values).
+#[test]
+fn set_instance_java_round_trips_on_disk() {
+    let tmp = TempDir::new().unwrap();
+
+    // Write a baseline manifest with default java settings.
+    let inst = stub_instance(vec![]);
+    let manifest_path = write_inst(tmp.path(), &inst);
+
+    let new_java = JavaCfg {
+        major: Some(21),
+        args_override: Some("-XX:+UseG1GC".to_string()),
+        memory_mb: 4096,
+        min_memory_mb: Some(512),
+        path_override: Some("/usr/lib/jvm/java-21/bin/java".to_string()),
+        use_pack_settings: true,
+    };
+
+    set_instance_java_on_disk(&manifest_path, new_java.clone()).unwrap();
+
+    let reloaded = read_manifest_pub(&manifest_path).unwrap();
+    assert_eq!(reloaded.java.major, Some(21));
+    assert_eq!(reloaded.java.args_override.as_deref(), Some("-XX:+UseG1GC"));
+    assert_eq!(reloaded.java.memory_mb, 4096);
+    assert_eq!(reloaded.java.min_memory_mb, Some(512));
+    assert_eq!(
+        reloaded.java.path_override.as_deref(),
+        Some("/usr/lib/jvm/java-21/bin/java")
+    );
+    assert!(reloaded.java.use_pack_settings);
+}
+
+/// Verify that setting `min_memory_mb` to `None` and `path_override` to `None`
+/// also persists correctly (the "clear" case).
+#[test]
+fn set_instance_java_clears_optional_fields() {
+    let tmp = TempDir::new().unwrap();
+    // Start with all fields set.
+    let mut inst = stub_instance(vec![]);
+    inst.java = JavaCfg {
+        major: Some(17),
+        args_override: Some("-Xmx4g".to_string()),
+        memory_mb: 4096,
+        min_memory_mb: Some(1024),
+        path_override: Some("/some/path/java".to_string()),
+        use_pack_settings: true,
+    };
+    let manifest_path = write_inst(tmp.path(), &inst);
+
+    // Clear the optional fields.
+    let cleared = JavaCfg {
+        major: None,
+        args_override: None,
+        memory_mb: 2048,
+        min_memory_mb: None,
+        path_override: None,
+        use_pack_settings: false,
+    };
+    set_instance_java_on_disk(&manifest_path, cleared).unwrap();
+
+    let reloaded = read_manifest_pub(&manifest_path).unwrap();
+    assert_eq!(reloaded.java.major, None);
+    assert_eq!(reloaded.java.args_override, None);
+    assert_eq!(reloaded.java.memory_mb, 2048);
+    assert_eq!(reloaded.java.min_memory_mb, None);
+    assert_eq!(reloaded.java.path_override, None);
+    assert!(!reloaded.java.use_pack_settings);
+}
+
 /// Old manifest with a `source` object that lacks `recommended` must deserialize
 /// with `recommended == None`.
 #[test]

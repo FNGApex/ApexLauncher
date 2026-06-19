@@ -420,6 +420,29 @@ pub fn validate_mod_file_name(name: &str) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Java settings operations (D-3)
+// ---------------------------------------------------------------------------
+
+/// Persist `java = cfg` to the manifest at `manifest_path`.
+///
+/// Pure-path helper; call via [`set_instance_java`] for normal use.
+pub fn set_instance_java_on_disk(manifest_path: &Path, cfg: JavaCfg) -> Result<(), String> {
+    let mut inst = read_manifest(manifest_path)?;
+    inst.java = cfg;
+    write_manifest(manifest_path, &inst)
+}
+
+/// AppHandle-aware wrapper for [`set_instance_java_on_disk`].
+pub fn set_instance_java(app: &AppHandle, slug: &str, cfg: JavaCfg) -> Result<(), String> {
+    let slug = validate_slug(slug)?;
+    let path = store::instances_dir(app)?.join(&slug).join("instance.json");
+    if !path.is_file() {
+        return Err(format!("Instance '{slug}' not found"));
+    }
+    set_instance_java_on_disk(&path, cfg)
+}
+
+// ---------------------------------------------------------------------------
 // Pack Lock operations (D4)
 // ---------------------------------------------------------------------------
 

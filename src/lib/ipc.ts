@@ -79,6 +79,7 @@ export type {
   PackInfo,
   RunInfoPayload,
   RunLogPayload,
+  JavaProbe,
   // Event payload type still referenced by name in a component (`Sidebar`);
   // channels themselves are subscribed via the generated `events.*`.
   DeviceCodePayload,
@@ -352,6 +353,29 @@ export function updateModpack(slug: string, versionId?: string) {
  */
 export async function setPackLock(slug: string, locked: boolean): Promise<void> {
   await unwrap(commands.setPackLock(slug, locked));
+}
+
+// --- D-3: Per-instance Java settings ---
+
+/**
+ * Persist a JavaCfg override to an instance's manifest. When
+ * `java.usePackSettings` is `true` the launcher uses these per-instance
+ * settings at launch; when `false` it falls back to the global default.
+ */
+export async function setInstanceJava(
+  slug: string,
+  java: Parameters<typeof commands.setInstanceJava>[1],
+): Promise<void> {
+  await unwrap(commands.setInstanceJava(slug, java));
+}
+
+/**
+ * Probe a Java binary by running `<path> -version` and parsing its stderr.
+ * Resolves with a `JavaProbe` (`major` + `version`) on success, or rejects with
+ * a human-readable message when the binary cannot be spawned or parsed.
+ */
+export function validateJavaPath(path: string) {
+  return unwrap(commands.validateJavaPath(path));
 }
 
 // --- Run query commands ---

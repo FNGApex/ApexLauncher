@@ -218,6 +218,23 @@ export const commands = {
 	 */
 	setPackLock: (slug: string, locked: boolean) => typedError<null, string>(__TAURI_INVOKE("set_pack_lock", { slug, locked })),
 	/**
+	 *  Persist a `JavaCfg` override to an instance's manifest.
+	 * 
+	 *  When `cfg.use_pack_settings` is `true` the launcher uses this instance's own
+	 *  Java/memory settings at launch; when `false` it falls back to the global
+	 *  default from `Settings`. Resolution is handled by `resolve_effective_java`
+	 *  (WS-A) — this command only persists the user's choice.
+	 */
+	setInstanceJava: (slug: string, java: JavaCfg) => typedError<null, string>(__TAURI_INVOKE("set_instance_java", { slug, java })),
+	/**
+	 *  Probe a Java binary by running `<path> -version` and parsing its stderr.
+	 * 
+	 *  Returns a [`JavaProbe`] with the major version and full version string on
+	 *  success, or a human-readable `Err` when the binary cannot be spawned or its
+	 *  output doesn't contain a recognisable `java version "…"` line.
+	 */
+	validateJavaPath: (path: string) => typedError<JavaProbe, string>(__TAURI_INVOKE("validate_java_path", { path })),
+	/**
 	 *  Enqueue an `.mrpack` import task and return its id synchronously.
 	 * 
 	 *  The task runs Plan → Download (staged) → Apply (promote + overrides + manifest).
@@ -565,6 +582,14 @@ export type JavaInstallation = {
 	path: string,
 	/**  How this installation was discovered. */
 	source: JavaSource,
+};
+
+/**  Result of probing a Java binary by running `java -version`. */
+export type JavaProbe = {
+	/**  Major version number (e.g. 8, 17, 21). */
+	major: number,
+	/**  Full version string as emitted by `java -version` (e.g. `"21.0.1"`). */
+	version: string,
 };
 
 /**  How a [`JavaInstallation`] was found. */
