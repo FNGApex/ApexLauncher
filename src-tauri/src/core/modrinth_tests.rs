@@ -424,6 +424,77 @@ async fn get_versions_returns_provider_error_on_non_200() {
     );
 }
 
+// ── get_project: fixture → PackInfo ───────────────────────────────────────
+
+const MODRINTH_PROJECT_FIXTURE: &str = include_str!("fixtures/modrinth_project_sodium.json");
+
+#[tokio::test]
+async fn get_project_maps_fixture_to_pack_info() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECT_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let info = provider.get_project(&client, "AANobbMI").await.unwrap();
+
+    assert_eq!(info.title, "Sodium");
+    assert!(
+        info.description.contains("# Sodium"),
+        "description should be the Markdown body, got: {:?}",
+        &info.description[..50.min(info.description.len())]
+    );
+    assert_eq!(
+        info.icon_url,
+        Some("https://cdn.modrinth.com/data/AANobbMI/icon.png".to_string())
+    );
+    assert!(!info.body_is_html, "Modrinth body is Markdown, not HTML");
+}
+
+#[tokio::test]
+async fn get_project_url_targets_project_endpoint() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECT_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    provider.get_project(&client, "AANobbMI").await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 1);
+    assert!(
+        urls[0].ends_with("/v2/project/AANobbMI"),
+        "unexpected url: {}",
+        urls[0]
+    );
+}
+
+#[tokio::test]
+async fn get_project_request_carries_user_agent_header() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECT_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    provider.get_project(&client, "AANobbMI").await.unwrap();
+
+    let all_headers = client.captured_headers().await;
+    let headers = &all_headers[0];
+    let has_ua = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("User-Agent") && v.contains("modloader/"));
+    assert!(has_ua, "User-Agent header missing or wrong: {:?}", headers);
+}
+
+#[tokio::test]
+async fn get_project_returns_http_error_on_non_200() {
+    let client = CapturingMockClient::new(vec![MockResp(404, "not found".to_string())]);
+    let provider = ModrinthProvider;
+
+    let err = provider
+        .get_project(&client, "INVALID")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 404, .. }),
+        "expected HttpStatus(404), got {:?}",
+        err
+    );
+}
+
 // ── project_type selector: facet switching ────────────────────────────────
 
 #[test]

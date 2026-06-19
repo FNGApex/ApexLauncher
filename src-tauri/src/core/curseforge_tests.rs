@@ -671,6 +671,193 @@ async fn get_file_returns_http_error_on_404() {
     );
 }
 
+// ── get_project: fixture → PackInfo ───────────────────────────────────────
+
+const CF_MOD_FIXTURE: &str = include_str!("fixtures/cf_mod_jei.json");
+const CF_MOD_DESCRIPTION_FIXTURE: &str = include_str!("fixtures/cf_mod_jei_description.json");
+
+/// URL-routing mock: returns different bodies depending on whether the URL
+/// contains "/description". This tests the two-call CF get_project flow.
+struct RoutingMockClient {
+    mod_body: String,
+    desc_body: String,
+    captured: Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>,
+}
+
+impl RoutingMockClient {
+    fn new(mod_body: impl Into<String>, desc_body: impl Into<String>) -> Self {
+        Self {
+            mod_body: mod_body.into(),
+            desc_body: desc_body.into(),
+            captured: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn captured_urls(&self) -> Vec<String> {
+        self.captured
+            .lock()
+            .await
+            .iter()
+            .map(|(url, _)| url.clone())
+            .collect()
+    }
+
+    async fn captured_headers(&self) -> Vec<Vec<(String, String)>> {
+        self.captured
+            .lock()
+            .await
+            .iter()
+            .map(|(_, headers)| headers.clone())
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderHttpClient for RoutingMockClient {
+    async fn get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<(u16, String), reqwest::Error> {
+        {
+            let mut cap = self.captured.lock().await;
+            cap.push((
+                url.to_string(),
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+        }
+        let body = if url.contains("/description") {
+            self.desc_body.clone()
+        } else {
+            self.mod_body.clone()
+        };
+        Ok((200, body))
+    }
+}
+
+#[tokio::test]
+async fn get_project_maps_fixture_to_pack_info() {
+    let client = RoutingMockClient::new(CF_MOD_FIXTURE, CF_MOD_DESCRIPTION_FIXTURE);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let info = provider.get_project(&client, "238222").await.unwrap();
+
+    assert_eq!(info.title, "Just Enough Items (JEI)");
+    assert!(
+        info.description.contains("<h1>Just Enough Items</h1>"),
+        "description should be HTML body, got: {:?}",
+        &info.description[..80.min(info.description.len())]
+    );
+    assert_eq!(
+        info.icon_url,
+        Some("https://media.forgecdn.net/avatars/29/69/636346904411966716.png".to_string())
+    );
+    assert!(info.body_is_html, "CurseForge body is HTML");
+}
+
+#[tokio::test]
+async fn get_project_makes_two_requests_mod_then_description() {
+    let client = RoutingMockClient::new(CF_MOD_FIXTURE, CF_MOD_DESCRIPTION_FIXTURE);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    provider.get_project(&client, "238222").await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 2, "expected exactly 2 HTTP calls, got {:?}", urls);
+    // First call: mod metadata
+    assert!(
+        urls[0].ends_with("/v1/mods/238222"),
+        "first URL should be mod endpoint: {}",
+        urls[0]
+    );
+    // Second call: description
+    assert!(
+        urls[1].ends_with("/v1/mods/238222/description"),
+        "second URL should be description endpoint: {}",
+        urls[1]
+    );
+}
+
+#[tokio::test]
+async fn get_project_carries_api_key_on_both_requests() {
+    let client = RoutingMockClient::new(CF_MOD_FIXTURE, CF_MOD_DESCRIPTION_FIXTURE);
+    let provider = CurseForgeProvider::new(Some("test-cf-key".to_string()));
+
+    provider.get_project(&client, "238222").await.unwrap();
+
+    let all_headers = client.captured_headers().await;
+    for (i, headers) in all_headers.iter().enumerate() {
+        let has_key = headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("x-api-key") && v == "test-cf-key");
+        assert!(
+            has_key,
+            "x-api-key missing on request {}: {:?}",
+            i, headers
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_project_key_absent_returns_key_missing_without_http() {
+    let client = CapturingMockClient::new(vec![]);
+    let provider = CurseForgeProvider::new(None);
+
+    let err = provider
+        .get_project(&client, "238222")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::KeyMissing),
+        "expected KeyMissing, got {:?}",
+        err
+    );
+    assert_eq!(client.request_count().await, 0);
+}
+
+#[tokio::test]
+async fn get_project_returns_http_error_on_non_200_mod_endpoint() {
+    let client = CapturingMockClient::new(vec![MockResp(404, "Not Found".to_string())]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let err = provider
+        .get_project(&client, "999999")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 404, .. }),
+        "expected HttpStatus(404), got {:?}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn get_project_returns_http_error_on_non_200_description_endpoint() {
+    // First call (mod metadata) succeeds with a valid body; second call
+    // (description) returns 404 — exercises the second-call error branch.
+    let client = CapturingMockClient::new(vec![
+        MockResp(200, CF_MOD_FIXTURE.to_string()),
+        MockResp(404, "Not Found".to_string()),
+    ]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let err = provider
+        .get_project(&client, "238222")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 404, .. }),
+        "expected HttpStatus(404) from description call, got {:?}",
+        err
+    );
+}
+
 // ── search: HTTP error propagation ────────────────────────────────────────
 
 #[tokio::test]

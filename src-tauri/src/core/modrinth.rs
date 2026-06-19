@@ -14,7 +14,7 @@
 use serde::Deserialize;
 
 use crate::core::providers::{
-    Dependency, ModProvider, MrSearchResponse, ProjectType, ProjectVersion, ProviderError,
+    Dependency, ModProvider, MrSearchResponse, PackInfo, ProjectType, ProjectVersion, ProviderError,
     ProviderHttpClient, ProviderKind, SearchParams, SearchResult, VersionFile,
 };
 
@@ -151,6 +151,18 @@ impl MrVersion {
     }
 }
 
+/// Raw Modrinth `/v2/project/{id}` response (subset of fields needed for `PackInfo`).
+///
+/// The `body` field carries the full Markdown long description.
+/// The `description` field is only the short summary — we use `body`.
+#[derive(Debug, Deserialize)]
+struct MrProject {
+    title: String,
+    /// Full Markdown long description (NOT the short `description` field).
+    body: String,
+    icon_url: Option<String>,
+}
+
 // ── ModrinthProvider ───────────────────────────────────────────────────────────
 
 /// Modrinth implementation of `ModProvider`.
@@ -209,6 +221,11 @@ impl ModrinthProvider {
         } else {
             format!("{}?{}", base, parts.join("&"))
         }
+    }
+
+    /// Build the Modrinth `/v2/project/{id}` URL.
+    fn build_project_url(project_id: &str) -> String {
+        format!("{}/project/{}", BASE_URL, project_id)
     }
 }
 
@@ -277,6 +294,32 @@ impl ModProvider for ModrinthProvider {
             .collect();
 
         Ok(versions)
+    }
+
+    async fn get_project(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackInfo, ProviderError> {
+        let url = Self::build_project_url(project_id);
+        let (status, body) = client
+            .get(&url, &[("User-Agent", USER_AGENT)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw: MrProject =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        Ok(PackInfo {
+            title: raw.title,
+            description: raw.body,
+            icon_url: raw.icon_url,
+            body_is_html: false,
+        })
     }
 }
 

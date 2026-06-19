@@ -79,6 +79,14 @@ impl crate::core::providers::ModProvider for MockProvider {
         q.pop_front()
             .expect("MockProvider: no more canned version lists")
     }
+
+    async fn get_project(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _project_id: &str,
+    ) -> Result<crate::core::providers::PackInfo, ProviderError> {
+        unimplemented!("get_project not used by mod installer")
+    }
 }
 
 // ── Fixture helpers ───────────────────────────────────────────────────────

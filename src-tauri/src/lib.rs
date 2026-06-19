@@ -21,8 +21,8 @@ use core::mod_install::{AddModResult, UpdateModResult};
 use core::modpack;
 use core::modrinth::ModrinthProvider;
 use core::providers::{
-    self, cf_api_key_from, ModProvider, ProjectType, ProviderError, ReqwestProviderClient,
-    SearchParams, SearchResult, ProjectVersion,
+    self, cf_api_key_from, ModProvider, PackInfo, ProjectType, ProviderError,
+    ReqwestProviderClient, SearchParams, SearchResult, ProjectVersion,
 };
 use core::settings::{self, Settings};
 use core::task_manager::{ChildItem, Task, TaskJob, TaskKind, TaskManager, TaskObserver, TaskProgress, TaskSpec};
@@ -1118,6 +1118,43 @@ async fn get_mod_versions(
             );
             let p = CurseForgeProvider::new(key);
             p.get_versions(&http, &project_id, mc_version.as_deref(), loader.as_deref())
+                .await
+                .map_err(ProviderCommandError::from)
+        }
+        other => Err(unknown_provider_err(other)),
+    }
+}
+
+/// Fetch rich project info (title, long description, icon) for the Info tab.
+///
+/// `provider` must be `"modrinth"` or `"curseforge"` (case-sensitive).
+/// Modrinth returns Markdown (`body_is_html: false`); CurseForge returns HTML
+/// (`body_is_html: true`). The CF key is resolved exactly like `search_mods`.
+#[tauri::command]
+#[specta::specta]
+async fn get_pack_info(
+    app: tauri::AppHandle,
+    provider: String,
+    project_id: String,
+) -> Result<PackInfo, ProviderCommandError> {
+    let http = ReqwestProviderClient(reqwest::Client::new());
+
+    match provider.as_str() {
+        "modrinth" => {
+            let p = ModrinthProvider;
+            p.get_project(&http, &project_id)
+                .await
+                .map_err(ProviderCommandError::from)
+        }
+        "curseforge" => {
+            let settings = settings::load(&app).unwrap_or_default();
+            let key = cf_api_key_from(
+                std::env::var(providers::CF_API_KEY_ENV).ok(),
+                settings.curseforge_api_key,
+                option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+            );
+            let p = CurseForgeProvider::new(key);
+            p.get_project(&http, &project_id)
                 .await
                 .map_err(ProviderCommandError::from)
         }
@@ -2918,6 +2955,7 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             logout,
             search_mods,
             get_mod_versions,
+            get_pack_info,
             add_mod,
             set_mod_enabled,
             remove_mod,

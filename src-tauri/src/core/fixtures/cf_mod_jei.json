@@ -1,0 +1,36 @@
+{
+  "data": {
+    "id": 238222,
+    "gameId": 432,
+    "name": "Just Enough Items (JEI)",
+    "slug": "jei",
+    "summary": "JEI is an item and recipe viewing mod for Minecraft, built from the ground up for stability and performance.",
+    "downloadCount": 300000000,
+    "logo": {
+      "id": 29,
+      "modId": 238222,
+      "title": "JEI logo",
+      "description": "",
+      "thumbnailUrl": "https://media.forgecdn.net/avatars/thumbnails/29/69/256/256/636346904411966716.png",
+      "url": "https://media.forgecdn.net/avatars/29/69/636346904411966716.png"
+    },
+    "categories": [
+      { "id": 421, "gameId": 432, "name": "Map and Information", "slug": "map-information", "url": "", "iconUrl": "", "dateModified": "2019-08-02T00:00:00Z", "isClass": false, "classId": 6, "parentCategoryId": 6 }
+    ],
+    "classId": 6,
+    "authors": [{ "id": 1, "name": "mezz" }],
+    "links": {
+      "websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/jei",
+      "wikiUrl": null,
+      "issuesUrl": "https://github.com/mezz/JustEnoughItems/issues",
+      "sourceUrl": "https://github.com/mezz/JustEnoughItems"
+    },
+    "status": 4,
+    "primaryCategoryId": 421,
+    "dateCreated": "2014-10-14T00:00:00Z",
+    "dateModified": "2024-01-18T10:00:00Z",
+    "dateReleased": "2024-01-18T10:00:00Z",
+    "allowModDistribution": true,
+    "isAvailable": true
+  }
+}

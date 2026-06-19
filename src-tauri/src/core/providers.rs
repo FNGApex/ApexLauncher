@@ -265,6 +265,24 @@ impl From<reqwest::Error> for ProviderError {
     }
 }
 
+/// Rich project info for the Info tab — title, long description, and icon.
+///
+/// Returned by `ModProvider::get_project`. The `description` field carries the
+/// full body: Markdown for Modrinth (`body_is_html: false`) or HTML for
+/// CurseForge (`body_is_html: true`).
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PackInfo {
+    /// Display name of the project.
+    pub title: String,
+    /// Full long description (Markdown or HTML depending on `body_is_html`).
+    pub description: String,
+    /// Icon URL, if available.
+    pub icon_url: Option<String>,
+    /// `true` if `description` is HTML (CurseForge); `false` if Markdown (Modrinth).
+    pub body_is_html: bool,
+}
+
 /// A mod provider capable of searching mods and fetching version lists.
 ///
 /// Object-safe: `Box<dyn ModProvider>` is valid. HTTP is injected via
@@ -289,6 +307,15 @@ pub trait ModProvider: Send + Sync {
         mc_version: Option<&str>,
         loader: Option<&str>,
     ) -> Result<Vec<ProjectVersion>, ProviderError>;
+
+    /// Fetch rich project info (title, long description, icon) for the Info tab.
+    ///
+    /// Object-safe: no generics — `client` is passed as `&dyn ProviderHttpClient`.
+    async fn get_project(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackInfo, ProviderError>;
 }
 
 // ── Raw Modrinth deserialization types ────────────────────────────────────────

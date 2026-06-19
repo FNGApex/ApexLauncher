@@ -22,8 +22,8 @@
 use serde::Deserialize;
 
 use crate::core::providers::{
-    Dependency, ModProvider, ProjectType, ProjectVersion, ProviderError, ProviderHttpClient,
-    ProviderKind, SearchParams, SearchResult, VersionFile,
+    Dependency, ModProvider, PackInfo, ProjectType, ProjectVersion, ProviderError,
+    ProviderHttpClient, ProviderKind, SearchParams, SearchResult, VersionFile,
 };
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -240,6 +240,30 @@ impl CfFile {
     }
 }
 
+/// Raw CF `/v1/mods/{id}` response (subset of fields needed for `PackInfo`).
+#[derive(Debug, Deserialize)]
+struct CfModResponse {
+    data: CfModData,
+}
+
+#[derive(Debug, Deserialize)]
+struct CfModData {
+    name: String,
+    logo: Option<CfModLogo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CfModLogo {
+    url: String,
+}
+
+/// Raw CF `/v1/mods/{id}/description` response.
+/// The `data` field is the full HTML body as a string.
+#[derive(Debug, Deserialize)]
+struct CfDescriptionResponse {
+    data: String,
+}
+
 // ── CurseForgeProvider ─────────────────────────────────────────────────────────
 
 /// CurseForge implementation of `ModProvider`.
@@ -294,6 +318,16 @@ impl CurseForgeProvider {
             }
         }
         url
+    }
+
+    /// Build the CF `/v1/mods/{id}` URL (project metadata).
+    fn build_mod_url(mod_id: &str) -> String {
+        format!("{}/v1/mods/{}", BASE_URL, mod_id)
+    }
+
+    /// Build the CF `/v1/mods/{id}/description` URL (full HTML body).
+    fn build_description_url(mod_id: &str) -> String {
+        format!("{}/v1/mods/{}/description", BASE_URL, mod_id)
     }
 
     /// Build the CF `/v1/mods/{id}/files` URL.
@@ -424,6 +458,52 @@ impl ModProvider for CurseForgeProvider {
             .collect();
 
         Ok(versions)
+    }
+
+    async fn get_project(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackInfo, ProviderError> {
+        let key = self.require_key()?;
+
+        // Call 1: mod metadata (name + logo).
+        let mod_url = Self::build_mod_url(project_id);
+        let (status, body) = client
+            .get(&mod_url, &[("x-api-key", key)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw_mod: CfModResponse =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        // Call 2: full HTML description.
+        let desc_url = Self::build_description_url(project_id);
+        let (desc_status, desc_body) = client
+            .get(&desc_url, &[("x-api-key", key)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if desc_status != 200 {
+            return Err(ProviderError::HttpStatus {
+                status: desc_status,
+                body: desc_body,
+            });
+        }
+
+        let raw_desc: CfDescriptionResponse = serde_json::from_str(&desc_body)
+            .map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        Ok(PackInfo {
+            title: raw_mod.data.name,
+            description: raw_desc.data,
+            icon_url: raw_mod.data.logo.map(|l| l.url),
+            body_is_html: true,
+        })
     }
 }
 
