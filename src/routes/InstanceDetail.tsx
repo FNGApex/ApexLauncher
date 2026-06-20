@@ -24,7 +24,6 @@ import {
   Search,
   Square,
   Trash2,
-  Unlock,
   X,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -52,6 +51,7 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAppStore } from "@/lib/store";
 import { ProviderBadge } from "@/components/ProviderBadge";
+import { Toggle } from "@/components/Toggle";
 
 const PAGE_LIMIT = 20;
 const DEBOUNCE_MS = 400;
@@ -231,47 +231,47 @@ export function InstanceDetail() {
               PB-F1: icon + name + author + clickable version chip + source link
               PB-F2: updatable banner when refreshPackMeta reports update_available
           ---------------------------------------------------------------- */}
-          <header className="mb-4 rounded-xl border border-border bg-surface px-5 py-4">
+          <header className="mb-4 rounded-2xl border border-border bg-surface px-7 py-6">
             {/* Top row: icon + identity + actions */}
-            <div className="flex items-center gap-4">
-              {/* Pack icon (PB-F1) */}
+            <div className="flex items-center gap-6">
+              {/* Pack icon (PB-F1) — grandiose: size-24 */}
               {data.instance.source?.iconUrl ? (
                 <img
                   src={data.instance.source.iconUrl}
                   alt=""
                   referrerPolicy="no-referrer"
-                  className="size-14 shrink-0 rounded-xl object-cover"
+                  className="size-24 shrink-0 rounded-2xl object-cover shadow-lg"
                   loading="lazy"
                 />
               ) : (
-                <div className="grid size-14 shrink-0 place-items-center rounded-xl bg-surface-2 text-muted">
-                  <Package className="size-7" />
+                <div className="grid size-24 shrink-0 place-items-center rounded-2xl bg-surface-2 text-muted shadow-inner">
+                  <Package className="size-12" />
                 </div>
               )}
 
               {/* Name + metadata */}
               <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h1 className="text-xl font-semibold leading-tight">{data.instance.name}</h1>
+                <div className="flex flex-wrap items-center gap-3">
+                  <h1 className="text-3xl font-bold leading-tight tracking-tight">{data.instance.name}</h1>
                   {/* Clickable version chip (PB-F1, PB-F3) — only for managed instances */}
                   {data.instance.source && (
                     <button
                       onClick={() => setVersionModalOpen(true)}
                       title="View versions / update"
-                      className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2.5 py-0.5 text-xs text-muted transition-colors hover:border-primary/50 hover:text-foreground"
+                      className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-3 py-1 text-sm text-muted font-medium transition-colors hover:border-primary/50 hover:text-foreground"
                     >
-                      Pack v{data.instance.source.packVersion}
+                      v{data.instance.source.packVersion}
                     </button>
                   )}
                 </div>
 
                 {/* Author (PB-F1) — only when present */}
                 {data.instance.source?.author && (
-                  <p className="mt-0.5 text-sm text-muted">by {data.instance.source.author}</p>
+                  <p className="mt-1 text-base text-muted">by {data.instance.source.author}</p>
                 )}
 
                 {/* Loader / MC subtitle */}
-                <p className="mt-0.5 text-xs text-muted">
+                <p className="mt-1.5 text-sm text-muted/70">
                   {labelLoader(data.instance.loader.kind)}
                   {data.instance.loader.version ? ` ${data.instance.loader.version}` : ""} ·
                   Minecraft {data.instance.minecraft}
@@ -279,54 +279,56 @@ export function InstanceDetail() {
               </div>
 
               {/* Right-side controls */}
-              <div className="flex shrink-0 items-center gap-2">
-                {/* Pack source link (PB-F1) */}
-                {data.instance.source && (() => {
-                  const src = data.instance.source;
-                  const providerRoute: "modrinth" | "curseforge" =
-                    src.provider === "modrinth"
-                      ? "modrinth"
-                      : "curseforge";
-                  const pageUrl: string | null =
-                    src.pageUrl ?? (providerRoute === "modrinth"
-                      ? `https://modrinth.com/modpack/${src.projectId}`
-                      : null);
-                  return pageUrl ? (
-                    <button
-                      onClick={() => openUrl(pageUrl).catch(console.error)}
-                      title="Open pack page in browser"
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-2 px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:text-foreground"
-                    >
-                      <ExternalLink className="size-3.5" />
-                      Pack source
-                    </button>
-                  ) : null;
-                })()}
+              <div className="flex shrink-0 flex-col items-end gap-3">
+                <div className="flex items-center gap-2">
+                  {/* Pack source link (PB-F1) */}
+                  {data.instance.source && (() => {
+                    const src = data.instance.source;
+                    const providerRoute: "modrinth" | "curseforge" =
+                      src.provider === "modrinth"
+                        ? "modrinth"
+                        : "curseforge";
+                    const pageUrl: string | null =
+                      src.pageUrl ?? (providerRoute === "modrinth"
+                        ? `https://modrinth.com/modpack/${src.projectId}`
+                        : null);
+                    return pageUrl ? (
+                      <button
+                        onClick={() => openUrl(pageUrl).catch(console.error)}
+                        title="Open pack page in browser"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm font-medium text-muted transition-colors hover:text-foreground"
+                      >
+                        <ExternalLink className="size-4" />
+                        Pack source
+                      </button>
+                    ) : null;
+                  })()}
 
-                {/* Running badge */}
-                {running && (
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-green-500/15 px-2.5 py-1 text-xs font-medium text-green-400">
-                    <span className="size-1.5 animate-pulse rounded-full bg-green-400" />
-                    Running
-                  </span>
-                )}
+                  {/* Running badge */}
+                  {running && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-green-500/15 px-3 py-1.5 text-sm font-medium text-green-400">
+                      <span className="size-2 animate-pulse rounded-full bg-green-400" />
+                      Running
+                    </span>
+                  )}
+                </div>
 
-                {/* Launch / Stop */}
+                {/* Launch / Stop — prominent */}
                 {running ? (
                   <button
                     onClick={handleStop}
-                    className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-4 py-2 text-sm font-medium text-danger hover:bg-surface-2"
+                    className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-5 py-2.5 text-base font-medium text-danger hover:bg-surface-2"
                   >
-                    <Square className="size-4" />
+                    <Square className="size-5" />
                     Stop
                   </button>
                 ) : (
                   <button
                     onClick={handleLaunch}
                     disabled={launching}
-                    className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/80 disabled:opacity-50"
+                    className="inline-flex items-center gap-2 rounded-xl bg-accent px-5 py-2.5 text-base font-semibold text-white shadow-md hover:bg-accent/80 disabled:opacity-50"
                   >
-                    <Play className="size-4" />
+                    <Play className="size-5" />
                     {launching ? "Launching…" : "Launch"}
                   </button>
                 )}
@@ -335,15 +337,15 @@ export function InstanceDetail() {
 
             {/* PB-F2: Updatable banner */}
             {updateAvailable && (
-              <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs">
-                <span className="text-primary">
+              <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-primary/30 bg-primary/10 px-4 py-2.5 text-sm">
+                <span className="text-primary font-medium">
                   Update available{latestVersion ? `: v${latestVersion}` : ""}
                 </span>
                 <button
                   onClick={() => setVersionModalOpen(true)}
-                  className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/20 px-2.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/30"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/20 px-3 py-1.5 text-xs font-medium text-primary transition-colors hover:bg-primary/30"
                 >
-                  <RefreshCw className="size-3" />
+                  <RefreshCw className="size-3.5" />
                   Update
                 </button>
               </div>
@@ -460,183 +462,6 @@ export function InstanceDetail() {
         </>
       ) : null}
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Pack source panel — shown in InfoTab when instance was installed via Browse
-// Exported so InfoTab can import it.
-// ---------------------------------------------------------------------------
-
-interface PackSourcePanelProps {
-  slug: string;
-  source: { provider: string; projectId: string; fileId: string; packVersion: string; pageUrl?: string | null };
-  packLocked: boolean;
-  provider: string;
-  projectId: string;
-  onMutate: () => void;
-}
-
-export function PackSourcePanel({
-  slug,
-  source,
-  packLocked,
-  provider,
-  projectId,
-  onMutate,
-}: PackSourcePanelProps) {
-  const qc = useQueryClient();
-  const [selectedVersionId, setSelectedVersionId] = useState<string>("latest");
-  const [updateError, setUpdateError] = useState<string | null>(null);
-  const [lockError, setLockError] = useState<string | null>(null);
-
-  // Resolve the provider routing string (InstanceSource stores the wire value).
-  const providerRoute: "modrinth" | "curseforge" =
-    provider === "modrinth"
-      ? "modrinth"
-      : provider === "curseForge"
-        ? "curseforge"
-        : ((_: never) => "curseforge" as const)(provider as never);
-
-  // Fetch versions for the picker (no MC/loader filter).
-  const versionsQuery = useQuery({
-    queryKey: ["packVersions", provider, projectId],
-    queryFn: () => getModVersions(providerRoute, projectId, null, null),
-    staleTime: 30_000,
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: () =>
-      updateModpack(slug, selectedVersionId === "latest" ? undefined : selectedVersionId),
-    onSuccess: (_taskId) => {
-      // updateModpack now returns a task id; the result arrives via task://update.
-      // CP-9 wires the completion toast. Invalidate so data refreshes when done.
-      setUpdateError(null);
-      qc.invalidateQueries({ queryKey: ["instance", slug] });
-      qc.invalidateQueries({ queryKey: ["instances"] });
-      onMutate();
-    },
-    onError: (err) => {
-      setUpdateError(err instanceof Error ? err.message : String(err));
-    },
-  });
-
-  const lockMutation = useMutation({
-    mutationFn: () => setPackLock(slug, !packLocked),
-    onSuccess: () => {
-      setLockError(null);
-      qc.invalidateQueries({ queryKey: ["instance", slug] });
-      onMutate();
-    },
-    onError: (err) => {
-      setLockError(err instanceof Error ? err.message : String(err));
-    },
-  });
-
-  // Build the project page URL: prefer the stored pageUrl, then construct a fallback.
-  // CurseForge fallback is omitted (no stable URL template) — button is hidden in that case.
-  const projectPageUrl: string | null = (() => {
-    if (source.pageUrl) return source.pageUrl;
-    const route = providerRoute;
-    if (route === "modrinth") return `https://modrinth.com/modpack/${projectId}`;
-    return null; // curseforge without a stored pageUrl → hide button
-  })();
-
-  return (
-    <section className="mb-8 rounded-lg border border-border bg-surface px-4 py-4">
-      <div className="mb-3 flex items-center justify-between gap-4">
-        <div>
-          <h2 className="text-sm font-semibold">Pack source</h2>
-          <p className="mt-0.5 text-xs text-muted">
-            <ProviderBadge provider={provider as "modrinth" | "curseForge"} />{" "}
-            <span className="ml-1">Current version: {source.packVersion}</span>
-          </p>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-2">
-          {/* Open project page */}
-          {projectPageUrl && (
-            <button
-              onClick={() => openUrl(projectPageUrl).catch(console.error)}
-              title="Open project page in browser"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
-            >
-              <ExternalLink className="size-3.5" />
-              Open project page
-            </button>
-          )}
-
-          {/* Pack Lock toggle */}
-          <button
-            onClick={() => lockMutation.mutate()}
-            disabled={lockMutation.isPending}
-            title={packLocked ? "Unlock pack (allow mod changes)" : "Lock pack (freeze mod list)"}
-            className={
-              "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 " +
-              (packLocked
-                ? "border-amber-500/40 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20"
-                : "border-border bg-surface text-muted hover:bg-surface-2 hover:text-foreground")
-            }
-          >
-            {lockMutation.isPending ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : packLocked ? (
-              <Lock className="size-3.5" />
-            ) : (
-              <Unlock className="size-3.5" />
-            )}
-            {packLocked ? "Locked" : "Lock pack"}
-          </button>
-        </div>
-      </div>
-
-      {/* Lock error */}
-      {lockError && (
-        <p className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger">
-          {lockError}
-        </p>
-      )}
-
-      {/* Update row */}
-      <div className="flex flex-wrap items-center gap-2">
-        {versionsQuery.data && versionsQuery.data.length > 0 && (
-          <select
-            value={selectedVersionId}
-            onChange={(e) => setSelectedVersionId(e.target.value)}
-            disabled={updateMutation.isPending}
-            className="input w-auto max-w-[180px] text-xs disabled:opacity-50"
-          >
-            <option value="latest">Latest</option>
-            {versionsQuery.data.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.name || v.versionNumber}
-              </option>
-            ))}
-          </select>
-        )}
-
-        <button
-          onClick={() => updateMutation.mutate()}
-          disabled={updateMutation.isPending || versionsQuery.isLoading}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-60"
-        >
-          {updateMutation.isPending ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="size-3.5" />
-          )}
-          {updateMutation.isPending ? "Updating…" : "Update"}
-        </button>
-      </div>
-
-      {/* Update error */}
-      {updateError && (
-        <p className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger">
-          {updateError}
-        </p>
-      )}
-
-    </section>
   );
 }
 
@@ -818,9 +643,50 @@ export function ManageInstallsPanel({
   onMutate,
 }: ManageInstallsPanelProps) {
   const [tab, setTab] = useState<ManageTab>("installed");
+  const qc = useQueryClient();
+
+  const lockMutation = useMutation({
+    mutationFn: () => setPackLock(instanceSlug, !packLocked),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["instance", instanceSlug] });
+      onMutate();
+    },
+  });
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Header: tab switcher + Pack Lock toggle */}
+      <div className="flex items-center justify-between gap-4">
+        {/* Tab switcher */}
+        <div className="flex gap-1 rounded-lg border border-border bg-surface p-1 self-start">
+          {(["installed", "add"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={
+                "rounded-md px-4 py-1.5 text-sm font-medium transition-colors " +
+                (tab === t
+                  ? "bg-surface-2 text-foreground"
+                  : "text-muted hover:text-foreground")
+              }
+            >
+              {t === "installed" ? "Installed" : "Add Mods"}
+            </button>
+          ))}
+        </div>
+
+        {/* Pack Lock toggle (LF-2) */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted">Pack locked</span>
+          <Toggle
+            checked={packLocked}
+            onChange={() => lockMutation.mutate()}
+            disabled={lockMutation.isPending}
+            label="Pack locked"
+          />
+        </div>
+      </div>
+
       {/* Pack-locked notice */}
       {packLocked && (
         <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-400">
@@ -828,24 +694,6 @@ export function ManageInstallsPanel({
           <span>Pack is locked — mod changes are disabled. Unlock the pack to make changes.</span>
         </div>
       )}
-
-      {/* Tab switcher */}
-      <div className="flex gap-1 rounded-lg border border-border bg-surface p-1 self-start">
-        {(["installed", "add"] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={
-              "rounded-md px-4 py-1.5 text-sm font-medium transition-colors " +
-              (tab === t
-                ? "bg-surface-2 text-foreground"
-                : "text-muted hover:text-foreground")
-            }
-          >
-            {t === "installed" ? "Installed" : "Add mod"}
-          </button>
-        ))}
-      </div>
 
       {tab === "installed" ? (
         <InstalledModsTab
@@ -1012,6 +860,16 @@ function AddModTab({ instanceSlug, minecraft, loaderKind, modEntries, packLocked
     error.kind === "key_missing";
 
   const hits: ProjectSummary[] = data?.pages.flatMap((p) => p.hits) ?? [];
+
+  if (packLocked) {
+    return (
+      <div className="grid place-items-center rounded-xl border border-amber-500/30 bg-amber-500/5 py-14 text-center text-sm">
+        <Lock className="mb-3 size-8 text-amber-400/60" />
+        <p className="font-medium text-amber-400">Pack is locked</p>
+        <p className="mt-1 text-xs text-muted">Unlock the pack in the header above to add mods.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -1440,26 +1298,18 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
         {/* Actions — only for managed mods that have a mod entry */}
         {entry && (
           <div className="flex shrink-0 items-center gap-1 pt-0.5">
-            {/* Enable / disable toggle */}
-            <button
-              onClick={() => toggleMutation.mutate()}
-              disabled={isDisabled}
+            {/* Enable / disable — Apple-style toggle (LF-4) */}
+            <span
               title={packLocked ? "Pack is locked" : mod.disabled ? "Enable mod" : "Disable mod"}
-              className={
-                "rounded px-2 py-0.5 text-xs font-medium transition-colors disabled:opacity-50 " +
-                (mod.disabled
-                  ? "bg-surface-2 text-muted hover:text-foreground"
-                  : "bg-surface-2 text-foreground hover:text-muted")
-              }
+              className="flex items-center px-1"
             >
-              {toggleMutation.isPending ? (
-                <Loader2 className="size-3 animate-spin" />
-              ) : mod.disabled ? (
-                "Enable"
-              ) : (
-                "Disable"
-              )}
-            </button>
+              <Toggle
+                checked={!mod.disabled}
+                onChange={() => toggleMutation.mutate()}
+                disabled={isDisabled}
+                label={mod.disabled ? "Enable mod" : "Disable mod"}
+              />
+            </span>
 
             {/* Update */}
             <button

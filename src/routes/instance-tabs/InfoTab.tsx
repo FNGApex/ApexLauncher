@@ -2,12 +2,11 @@ import { useOutletContext } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, AlertCircle } from "lucide-react";
 import type { InstanceTabContext } from "@/routes/InstanceDetail";
-import { PackSourcePanel } from "@/routes/InstanceDetail";
 import { getPackInfo } from "@/lib/ipc";
 import { PackDescription } from "@/components/PackDescription";
 
 export function InfoTab() {
-  const { slug, instance, invalidate } = useOutletContext<InstanceTabContext>();
+  const { instance } = useOutletContext<InstanceTabContext>();
 
   // Provider routing: wire value "modrinth" | "curseForge" → routing string "modrinth" | "curseforge".
   const providerRoute: "modrinth" | "curseforge" | null = instance.source
@@ -70,16 +69,6 @@ export function InfoTab() {
           <PackDescription markdown={infoQuery.data.description} />
         </div>
       )}
-
-      {/* Pack source panel — update/lock stays reachable */}
-      <PackSourcePanel
-        slug={slug}
-        source={instance.source}
-        packLocked={instance.packLocked ?? false}
-        provider={instance.source.provider}
-        projectId={instance.source.projectId}
-        onMutate={invalidate}
-      />
     </div>
   );
 }
