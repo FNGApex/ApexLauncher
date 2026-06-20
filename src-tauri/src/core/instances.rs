@@ -68,6 +68,11 @@ pub struct Source {
     /// Pack-recommended Java/RAM hint. Always `None` today — plumbing only.
     #[serde(default)]
     pub recommended: Option<RecommendedJava>,
+    /// Provider project page URL, captured at install-time from the browse/install
+    /// flow. `None` for instances imported via file drop or old manifests.
+    /// Used by AM-F3 "Open project page" button.
+    #[serde(default)]
+    pub page_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
@@ -85,6 +90,18 @@ pub struct ModEntry {
     /// deserialize as `false` — no schema bump required.
     #[serde(default)]
     pub from_pack: bool,
+    /// Display name captured at add-time from the search result (`ProjectSummary.name`).
+    /// `None` for dependency-added mods and old manifests (no re-fetch to display).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Icon URL captured at add-time from the search result (`ProjectSummary.icon_url`).
+    /// `None` for dependency-added mods and old manifests.
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    /// Short description captured at add-time from the search result (`ProjectSummary.description`).
+    /// `None` for dependency-added mods and old manifests.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]

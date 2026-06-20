@@ -1242,6 +1242,19 @@ async fn get_pack_info(
     }
 }
 
+/// Display metadata captured at add-time from the search `ProjectSummary`.
+///
+/// Passed as a single struct to `add_mod` to stay within specta's 10-arg limit.
+/// The frontend passes the `ProjectSummary`'s `name`, `icon_url`, and `description`
+/// fields. All are `None` for callers that don't have this data (e.g. tests).
+#[derive(Debug, Clone, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ModMetadata {
+    pub name: Option<String>,
+    pub icon_url: Option<String>,
+    pub summary: Option<String>,
+}
+
 /// Install a mod (and its required transitive dependencies) into an instance.
 ///
 /// # Flow
@@ -1271,6 +1284,9 @@ async fn add_mod(
     slug: String,
     mc_version: String,
     loader: String,
+    // Display metadata from the search result. Stored on the root mod entry only;
+    // dependency entries always get None. Pass None fields when not available.
+    meta: ModMetadata,
 ) -> Result<u64, String> {
     // Validate provider string early so a bad caller gets a synchronous error.
     match provider.as_str() {
@@ -1302,6 +1318,9 @@ async fn add_mod(
             slug,
             mc_version,
             loader,
+            name: meta.name,
+            icon_url: meta.icon_url,
+            summary: meta.summary,
         }),
     }).await;
 
@@ -1477,6 +1496,10 @@ struct ModAddJob {
     slug: String,
     mc_version: String,
     loader: String,
+    /// Metadata from the search result; set on the root entry only (not deps).
+    name: Option<String>,
+    icon_url: Option<String>,
+    summary: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -1623,7 +1646,18 @@ impl TaskJob for ModAddJob {
             PlanResult { outcomes }
         };
 
-        let (added, mut dl_failed) = attribute_outcomes(&valid_downloads, &plan_result);
+        let (mut added, mut dl_failed) = attribute_outcomes(&valid_downloads, &plan_result);
+
+        // Stamp display metadata onto the root added entry (the one whose project_id
+        // matches the command's project_id). Dependency entries intentionally keep None.
+        for entry in added.iter_mut() {
+            if entry.project_id == self.project_id {
+                entry.name = self.name.clone();
+                entry.icon_url = self.icon_url.clone();
+                entry.summary = self.summary.clone();
+                break;
+            }
+        }
 
         // --- APPLY ---
         ctx.enter_applying().await;
@@ -2738,6 +2772,9 @@ async fn install_modpack(
         file_id: resolved.version_id.clone(),
         pack_version: resolved.version_name.clone(),
         recommended: None,
+        // Capture the page URL passed by the browse frontend so AM-F3 can
+        // surface "Open project page" without a re-fetch.
+        page_url: page_url.clone(),
     };
     let name_override: Option<String> = if resolved.version_name.is_empty() {
         None

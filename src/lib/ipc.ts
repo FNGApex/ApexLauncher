@@ -272,8 +272,17 @@ export function addMod(
   slug: string,
   mcVersion: string,
   loader: string,
+  // Display metadata captured at add-time from the search result, persisted on the
+  // mod entry so the Installed list never re-fetches it (api-frugality rule).
+  meta?: { name?: string | null; iconUrl?: string | null; summary?: string | null },
 ) {
-  return unwrap(commands.addMod(provider, projectId, versionId, slug, mcVersion, loader));
+  return unwrap(
+    commands.addMod(provider, projectId, versionId, slug, mcVersion, loader, {
+      name: meta?.name ?? null,
+      iconUrl: meta?.iconUrl ?? null,
+      summary: meta?.summary ?? null,
+    }),
+  );
 }
 
 /** Enable or disable an installed mod by toggling the `.disabled` suffix on its file. */

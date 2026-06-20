@@ -197,6 +197,7 @@ fn recommended_memory_overrides_global_default() {
             memory_mb: Some(6144),
             java_args: None,
         }),
+        page_url: None,
     });
     // use_pack_settings = false → would normally give 4096 from settings
     inst.java.use_pack_settings = false;
@@ -225,6 +226,7 @@ fn recommended_memory_overrides_instance_override() {
             memory_mb: Some(6144),
             java_args: None,
         }),
+        page_url: None,
     });
 
     let settings = default_settings();
@@ -251,6 +253,7 @@ fn recommended_java_args_overrides_instance_args() {
             memory_mb: None,
             java_args: Some("-XX:+UseG1GC -Xss512k".into()),
         }),
+        page_url: None,
     });
 
     let settings = default_settings();
@@ -277,6 +280,7 @@ fn source_with_no_recommended_falls_through_to_instance_tier() {
         file_id: "file".into(),
         pack_version: "1.0".into(),
         recommended: None,
+        page_url: None,
     });
 
     let settings = default_settings();

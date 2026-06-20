@@ -206,6 +206,7 @@ fn d1_source_built_from_resolved_pack_file_fields() {
         file_id: resolved.version_id.clone(),
         pack_version: resolved.version_name.clone(),
         recommended: None,
+        page_url: None,
     };
 
     assert_eq!(source.provider, "modrinth");

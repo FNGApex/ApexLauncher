@@ -1594,6 +1594,9 @@ fn mod_entry(file_name: &str, from_pack: bool) -> super::super::instances::ModEn
         enabled: true,
         side: "both".to_string(),
         from_pack,
+        name: None,
+        icon_url: None,
+        summary: None,
     }
 }
 

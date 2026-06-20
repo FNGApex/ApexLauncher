@@ -49,6 +49,9 @@ fn stub_mod_entry(file_name: &str, enabled: bool) -> ModEntry {
         enabled,
         side: "unknown".into(),
         from_pack: false,
+        name: None,
+        icon_url: None,
+        summary: None,
     }
 }
 
@@ -523,5 +526,145 @@ fn a1_old_source_without_recommended_defaults_to_none() {
     assert_eq!(
         source.recommended, None,
         "recommended must default to None when absent from old source"
+    );
+}
+
+// -----------------------------------------------------------------------
+// AM-B1: ModEntry old-manifest round-trip (new metadata fields default to None)
+// -----------------------------------------------------------------------
+
+/// An old `instance.json` whose mod entries lack `name`, `iconUrl`, and `summary`
+/// must deserialize with all three new fields defaulting to `None`.
+/// Guards backward-compat: no schema bump, no migration needed.
+#[test]
+fn amb1_old_mod_entry_without_metadata_defaults_to_none() {
+    let json = r#"{
+        "schema": 1,
+        "id": "old-id-4",
+        "name": "Old Instance",
+        "slug": "old-instance-4",
+        "icon": null,
+        "minecraft": "1.20.1",
+        "loader": { "kind": "vanilla", "version": null },
+        "java": { "major": null, "argsOverride": null, "memoryMb": 2048 },
+        "source": null,
+        "mods": [
+            {
+                "provider": "modrinth",
+                "projectId": "proj-1",
+                "versionId": "ver-1",
+                "fileName": "sodium.jar",
+                "hashes": {},
+                "enabled": true,
+                "side": "client",
+                "fromPack": false
+            }
+        ],
+        "created": "2024-01-01T00:00:00Z",
+        "lastPlayed": null,
+        "totalPlaytimeSec": 0
+    }"#;
+
+    let inst: Instance = serde_json::from_str(json).expect("old manifest must deserialize");
+
+    assert_eq!(inst.mods.len(), 1);
+    let m = &inst.mods[0];
+    assert_eq!(m.name, None, "name must default to None when absent from old ModEntry");
+    assert_eq!(m.icon_url, None, "iconUrl must default to None when absent from old ModEntry");
+    assert_eq!(m.summary, None, "summary must default to None when absent from old ModEntry");
+}
+
+/// Round-trip: a ModEntry that HAS metadata fields serialises them and they survive
+/// a write-then-read cycle.
+#[test]
+fn amb1_mod_entry_with_metadata_survives_round_trip() {
+    let tmp = TempDir::new().unwrap();
+
+    let entry = ModEntry {
+        provider: "modrinth".into(),
+        project_id: "proj-rt".into(),
+        version_id: "ver-rt".into(),
+        file_name: "sodium.jar".into(),
+        hashes: BTreeMap::new(),
+        enabled: true,
+        side: "client".into(),
+        from_pack: false,
+        name: Some("Sodium".into()),
+        icon_url: Some("https://cdn.modrinth.com/sodium.png".into()),
+        summary: Some("A rendering optimisation mod".into()),
+    };
+
+    let inst = stub_instance(vec![entry]);
+    let manifest_path = write_inst(tmp.path(), &inst);
+    let reloaded = read_manifest_pub(&manifest_path).unwrap();
+
+    let m = &reloaded.mods[0];
+    assert_eq!(m.name.as_deref(), Some("Sodium"));
+    assert_eq!(m.icon_url.as_deref(), Some("https://cdn.modrinth.com/sodium.png"));
+    assert_eq!(m.summary.as_deref(), Some("A rendering optimisation mod"));
+}
+
+// -----------------------------------------------------------------------
+// AM-B3: Source.page_url old-manifest round-trip
+// -----------------------------------------------------------------------
+
+/// An old `instance.json` whose source lacks `pageUrl` must deserialize with
+/// `page_url == None`. Guards backward-compat.
+#[test]
+fn amb3_old_source_without_page_url_defaults_to_none() {
+    let json = r#"{
+        "schema": 1,
+        "id": "old-id-5",
+        "name": "Old Pack",
+        "slug": "old-pack-5",
+        "icon": null,
+        "minecraft": "1.20.1",
+        "loader": { "kind": "fabric", "version": "0.15.0" },
+        "java": { "major": null, "argsOverride": null, "memoryMb": 4096 },
+        "source": {
+            "provider": "modrinth",
+            "projectId": "proj-abc",
+            "fileId": "file-xyz",
+            "packVersion": "1.0.0"
+        },
+        "mods": [],
+        "created": "2024-01-01T00:00:00Z",
+        "lastPlayed": null,
+        "totalPlaytimeSec": 0
+    }"#;
+
+    let inst: Instance = serde_json::from_str(json).expect("old manifest with source must deserialize");
+
+    let source = inst.source.expect("source must be Some");
+    assert_eq!(
+        source.page_url, None,
+        "pageUrl must default to None when absent from old source"
+    );
+}
+
+/// Round-trip: a Source that HAS page_url serialises it and it survives a
+/// write-then-read cycle.
+#[test]
+fn amb3_source_with_page_url_survives_round_trip() {
+    let tmp = TempDir::new().unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    inst.source = Some(Source {
+        provider: "modrinth".into(),
+        project_id: "proj-rt2".into(),
+        file_id: "file-rt2".into(),
+        pack_version: "2.0.0".into(),
+        recommended: None,
+        page_url: Some("https://modrinth.com/modpack/mypack".into()),
+    });
+
+    let manifest_path = write_inst(tmp.path(), &inst);
+    let reloaded = read_manifest_pub(&manifest_path).unwrap();
+
+    let source = reloaded.source.expect("source must be Some");
+    assert_eq!(
+        source.page_url.as_deref(),
+        Some("https://modrinth.com/modpack/mypack"),
+        "pageUrl must survive a manifest round-trip"
     );
 }

@@ -181,7 +181,7 @@ export const commands = {
 	 *  locked instance errors without touching the queue. All download work runs
 	 *  inside [`ModAddJob`].
 	 */
-	addMod: (provider: string, projectId: string, versionId: string, slug: string, mcVersion: string, loader: string) => typedError<number, string>(__TAURI_INVOKE("add_mod", { provider, projectId, versionId, slug, mcVersion, loader })),
+	addMod: (provider: string, projectId: string, versionId: string, slug: string, mcVersion: string, loader: string, meta: ModMetadata) => typedError<number, string>(__TAURI_INVOKE("add_mod", { provider, projectId, versionId, slug, mcVersion, loader, meta })),
 	/**
 	 *  Enable or disable an installed mod by renaming its file and flipping the
 	 *  `enabled` flag in the manifest.
@@ -701,6 +701,34 @@ export type ModEntry = {
 	 *  deserialize as `false` — no schema bump required.
 	 */
 	fromPack?: boolean,
+	/**
+	 *  Display name captured at add-time from the search result (`ProjectSummary.name`).
+	 *  `None` for dependency-added mods and old manifests (no re-fetch to display).
+	 */
+	name?: string | null,
+	/**
+	 *  Icon URL captured at add-time from the search result (`ProjectSummary.icon_url`).
+	 *  `None` for dependency-added mods and old manifests.
+	 */
+	iconUrl?: string | null,
+	/**
+	 *  Short description captured at add-time from the search result (`ProjectSummary.description`).
+	 *  `None` for dependency-added mods and old manifests.
+	 */
+	summary?: string | null,
+};
+
+/**
+ *  Display metadata captured at add-time from the search `ProjectSummary`.
+ * 
+ *  Passed as a single struct to `add_mod` to stay within specta's 10-arg limit.
+ *  The frontend passes the `ProjectSummary`'s `name`, `icon_url`, and `description`
+ *  fields. All are `None` for callers that don't have this data (e.g. tests).
+ */
+export type ModMetadata = {
+	name: string | null,
+	iconUrl: string | null,
+	summary: string | null,
 };
 
 /**
@@ -1013,6 +1041,12 @@ export type Source = {
 	packVersion: string,
 	/**  Pack-recommended Java/RAM hint. Always `None` today — plumbing only. */
 	recommended?: RecommendedJava | null,
+	/**
+	 *  Provider project page URL, captured at install-time from the browse/install
+	 *  flow. `None` for instances imported via file drop or old manifests.
+	 *  Used by AM-F3 "Open project page" button.
+	 */
+	pageUrl?: string | null,
 };
 
 /**  An optional dependency surfaced as a suggestion. */

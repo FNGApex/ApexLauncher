@@ -1047,6 +1047,9 @@ fn stub_mod_entry(version_id: &str, file_name: &str, enabled: bool) -> ModEntry 
         enabled,
         side: "unknown".to_string(),
         from_pack: false,
+        name: None,
+        icon_url: None,
+        summary: None,
     }
 }
 

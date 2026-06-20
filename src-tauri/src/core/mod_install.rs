@@ -550,6 +550,9 @@ pub fn planned_to_mod_entry(p: &PlannedMod) -> ModEntry {
         enabled: true,
         side: p.side.clone(),
         from_pack: false,
+        name: None,
+        icon_url: None,
+        summary: None,
     }
 }
 
