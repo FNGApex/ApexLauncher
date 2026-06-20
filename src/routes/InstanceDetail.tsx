@@ -821,6 +821,10 @@ function ModSearchCard({
 }: ModSearchCardProps) {
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
+  // Versions are fetched lazily on first hover/focus, not eagerly per card —
+  // a search page of ~20 cards would otherwise fire ~20 getModVersions calls on
+  // render (and again per infinite-scroll page). Mirrors Browse's ModpackCard.
+  const [versionsEnabled, setVersionsEnabled] = useState(false);
 
   // Resolve the provider routing string from the ProviderKind response value.
   // ProviderKind serializes as "modrinth" | "curseForge" (camelCase from Rust).
@@ -842,8 +846,9 @@ function ModSearchCard({
     queryFn: () =>
       getModVersions(providerRoute, mod.id, minecraft, loaderKind),
     staleTime: 30_000,
-    // Fetch eagerly — the user may click Install immediately.
-    enabled: true,
+    // Lazy: enabled only after the user shows intent (hover/focus on the card),
+    // so the version round-trip is ready by the time they click Install.
+    enabled: versionsEnabled,
   });
 
   const primaryVersion = versionsQuery.data?.[0];
@@ -871,7 +876,11 @@ function ModSearchCard({
   }
 
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm">
+    <div
+      className="flex flex-col gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm"
+      onMouseEnter={() => setVersionsEnabled(true)}
+      onFocus={() => setVersionsEnabled(true)}
+    >
       <div className="flex items-center gap-3">
         {/* Icon */}
         {mod.iconUrl ? (

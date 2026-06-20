@@ -103,7 +103,9 @@ interface FacetRowProps {
 
 function FacetRow({ mcVersion, loader, onMcVersionChange, onLoaderChange }: FacetRowProps) {
   const { data: versions } = useQuery({
-    queryKey: ["mcVersions"],
+    // Canonical key shared with prefetch.ts + NewInstanceModal so Browse reuses
+    // the startup-warmed MC-versions cache instead of refetching (was "mcVersions").
+    queryKey: ["mc-versions"],
     queryFn: listMinecraftVersions,
     staleTime: META_STALE_TIME,
   });
