@@ -32,7 +32,15 @@ Symptom (human): the app makes far more provider/API calls than it should. Likel
   doesn't refetch on every tab switch.
 - Consider a provider-call rate limiter / dedupe layer in the Rust provider seam.
 
-## P2 · Download Manager reliability + feedback (active focus)
+## P2 · Download Manager reliability + feedback — ✅ ADDRESSED (2026-06-19)
+
+**Outcome:** full plan `docs/spec/download-feedback.md` (D-F1..D-F4) shipped. Honest task status (fail when
+nothing installed), failure/partial/manual toasts with "Open page", live progress (item_done bridge — a
+deadlock was caught + fixed with a regression test), install buttons that track the task to completion,
+per-file diagnostic logging, and parallelized dependency resolution. F4-2 (concurrent task worker) deferred.
+Pending a dev-window smoke-test. Original symptoms + leads kept below.
+
+### (original)
 
 **Human-reported symptoms (2026-06-19), ranked by their priority:**
 1. **No real install feedback / instant false success** — clicking Install on a mod just queues a task;

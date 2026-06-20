@@ -1,8 +1,10 @@
 # Download Manager feedback + reliability (spec)
 
-Status: **diagnosed, not built.** Source: investigation 2026-06-19 (see `docs/handoff/post-ui-priorities.md`
-P2). Addresses the human's report: instant false "mod installed", silent failures, frozen progress, thin
-logging, CF opt-out not surfaced on single-mod add, slow installs.
+Status: **COMPLETE (2026-06-19) — all of D-F1..D-F4 shipped on `ui-overhaul`.** Commits: F1-1 4bc4359,
+F1-2/F1-3 6b93920, F2-1 e4b6167 (deadlock caught+fixed), F2-2 687c145, F3 169894e, F4-1 e6bd7cd. F4-2
+(concurrent task worker) deferred. **Pending: dev-window smoke-test.** Source: investigation 2026-06-19
+(see `docs/handoff/post-ui-priorities.md` P2). Addressed: instant false "mod installed", silent failures,
+frozen progress, thin logging, CF opt-out not surfaced on single-mod add, slow installs.
 
 Root cause: `addMod`/`installModpack`/`updateMod` are enqueue commands (return a task id immediately);
 results arrive async via `task://update`. The install UI treats enqueue as success and never observes the
