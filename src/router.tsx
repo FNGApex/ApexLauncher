@@ -1,7 +1,7 @@
 import { createBrowserRouter, Navigate } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { Home } from "@/routes/Home";
-import { Browse } from "@/routes/Browse";
+import { BrowseProvider } from "@/routes/Browse";
 import { BrowsePackInfo } from "@/routes/BrowsePackInfo";
 import { Settings } from "@/routes/Settings";
 import { InstanceDetail } from "@/routes/InstanceDetail";
@@ -9,6 +9,13 @@ import { InfoTab } from "@/routes/instance-tabs/InfoTab";
 import { ModlistTab } from "@/routes/instance-tabs/ModlistTab";
 import { TechTab } from "@/routes/instance-tabs/TechTab";
 import { JavaTab } from "@/routes/instance-tabs/JavaTab";
+import { useUiStore } from "@/lib/store";
+
+/** Reads the persisted last-used browse provider and redirects to /browse/<p>. */
+function BrowseRedirect() {
+  const p = useUiStore.getState().browseProvider;
+  return <Navigate to={`/browse/${p}`} replace />;
+}
 
 export const router = createBrowserRouter([
   {
@@ -28,7 +35,8 @@ export const router = createBrowserRouter([
           { path: "java", element: <JavaTab /> },
         ],
       },
-      { path: "browse", element: <Browse /> },
+      { path: "browse", element: <BrowseRedirect /> },
+      { path: "browse/:provider", element: <BrowseProvider /> },
       { path: "browse/:provider/:id", element: <BrowsePackInfo /> },
       { path: "settings", element: <Settings /> },
     ],

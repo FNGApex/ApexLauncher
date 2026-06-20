@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useParams } from "react-router-dom";
 import {
   AlertCircle,
   Filter,
@@ -20,6 +21,7 @@ import { resolveCategoriesFor } from "@/lib/categoryMap";
 import { FiltersPopover, type FiltersState } from "@/components/FiltersPopover";
 import { BrowseCard } from "@/components/BrowseCard";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/lib/store";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -35,27 +37,38 @@ const EMPTY_FILTERS: FiltersState = {
 };
 
 // ---------------------------------------------------------------------------
-// Root component
+// BrowseProvider — per-provider browse page, driven by :provider route param
 // ---------------------------------------------------------------------------
 
-export function Browse() {
+export function BrowseProvider() {
+  const { provider } = useParams<{ provider: string }>();
+  const setBrowseProvider = useUiStore((s) => s.setBrowseProvider);
+
   const [rawQuery, setRawQuery] = useState("");
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<FiltersState>(EMPTY_FILTERS);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [cfNoticeDismissed, setCfNoticeDismissed] = useState(false);
   const filtersButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  // Remember last-used provider for the two real providers.
+  useEffect(() => {
+    if (provider === "curseforge" || provider === "modrinth") {
+      setBrowseProvider(provider);
+    }
+  }, [provider, setBrowseProvider]);
+
+  // Reset filters when provider changes so stale cross-provider categories are cleared.
+  useEffect(() => {
+    setFilters(EMPTY_FILTERS);
+    setRawQuery("");
+    setQuery("");
+  }, [provider]);
 
   // Debounce: apply the input value after DEBOUNCE_MS of inactivity.
   useEffect(() => {
     const id = setTimeout(() => setQuery(rawQuery.trim()), DEBOUNCE_MS);
     return () => clearTimeout(id);
   }, [rawQuery]);
-
-  // Dismiss CF notice whenever filter state or query changes.
-  useEffect(() => {
-    setCfNoticeDismissed(false);
-  }, [query, filters]);
 
   // BR-B: build installed index from the cached ["instances"] query (no new IPC call).
   const { data: instances } = useQuery({
@@ -87,9 +100,29 @@ export function Browse() {
     setFilters((f) => ({ ...f, mcVersion: null }));
   }
 
+  // Coming-soon placeholder for unimplemented providers.
+  if (provider !== "curseforge" && provider !== "modrinth") {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 px-8 py-7">
+        <Package className="size-12 text-muted" />
+        <div className="text-center">
+          <p className="text-lg font-semibold text-foreground">Coming soon</p>
+          <p className="mt-1 text-sm text-muted">
+            {provider === "ftb"
+              ? "FTB"
+              : provider === "atlauncher"
+                ? "ATLauncher"
+                : "This provider"}{" "}
+            support is not yet available.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full flex-col px-8 py-7">
-      {/* Search + Filters bar — BR-D: prominent, centered search field */}
+      {/* Search + Filters bar */}
       <div className="mb-4">
         <div className="flex items-center gap-2">
           {/* Search field */}
@@ -112,7 +145,7 @@ export function Browse() {
             )}
           </div>
 
-          {/* Filters button — BR-C: with active-filter count badge */}
+          {/* Filters button — with active-filter count badge */}
           <div className="relative">
             <button
               ref={filtersButtonRef}
@@ -140,11 +173,12 @@ export function Browse() {
               onClose={() => setFiltersOpen(false)}
               filters={filters}
               onFiltersChange={setFilters}
+              provider={provider}
             />
           </div>
         </div>
 
-        {/* Applied-filter chips — BR-C */}
+        {/* Applied-filter chips */}
         {activeFilterCount > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {filters.mcVersion != null && (
@@ -169,12 +203,11 @@ export function Browse() {
 
       {/* Results area */}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <MergedFeed
+        <SingleProviderFeed
+          provider={provider}
           query={query}
           filters={filters}
           installedIndex={installedIndex}
-          cfNoticeDismissed={cfNoticeDismissed}
-          onDismissCfNotice={() => setCfNoticeDismissed(true)}
         />
       </div>
     </div>
@@ -201,94 +234,66 @@ function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }
 }
 
 // ---------------------------------------------------------------------------
-// Merged feed: two independent infinite queries, merged + sorted client-side
+// Single-provider infinite feed
 // ---------------------------------------------------------------------------
 
-interface MergedFeedProps {
+interface SingleProviderFeedProps {
+  provider: "curseforge" | "modrinth";
   query: string;
   filters: FiltersState;
   installedIndex: Map<string, string>;
-  cfNoticeDismissed: boolean;
-  onDismissCfNotice: () => void;
 }
 
-function MergedFeed({
+function SingleProviderFeed({
+  provider,
   query,
   filters,
   installedIndex,
-  cfNoticeDismissed,
-  onDismissCfNotice,
-}: MergedFeedProps) {
+}: SingleProviderFeedProps) {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
-  // Derive per-provider values from the unified filter state (BR-C-4).
   const loadersArr = Array.from(filters.loaders);
-  const mrCategories = resolveCategoriesFor("modrinth", filters.categories);
-  // CF ANDs categoryIds → send at most one (design §5.3 / Q7).
-  const cfCategoriesAll = resolveCategoriesFor("curseforge", filters.categories);
-  const cfCategories = cfCategoriesAll.length > 0 ? [cfCategoriesAll[0]] : [];
 
-  // Provider compatibility: a provider is shown only if it supports ALL selected
-  // categories. So an exclusive single-provider category (CF-only Skyblock,
-  // Modrinth-only Optimization) hides the other provider's feed entirely.
-  const catCount = filters.categories.size;
-  const mrCompatible = catCount === 0 || mrCategories.length === catCount;
-  const cfCompatible = catCount === 0 || cfCategoriesAll.length === catCount;
+  // Resolve categories for the active provider.
+  const resolvedCategories = resolveCategoriesFor(provider, filters.categories);
+  // CurseForge ANDs categoryIds → send at most one.
+  const queryCategories =
+    provider === "curseforge"
+      ? resolvedCategories.length > 0
+        ? [resolvedCategories[0]]
+        : []
+      : resolvedCategories;
 
-  // Stable query-key arrays (filters wired into keys so changes refetch).
-  const modrinthKey = [
-    "modpacks", "modrinth", query,
+  // Loader arg: CurseForge singular-or-Any rule (>1 selected → omit); Modrinth ORs all.
+  const queryLoaders =
+    provider === "curseforge"
+      ? loadersArr.length === 1
+        ? loadersArr
+        : []
+      : loadersArr;
+
+  const queryKey = [
+    "modpacks",
+    provider,
+    query,
     filters.mcVersion,
     loadersArr.join(","),
-    mrCategories.join(","),
+    queryCategories.join(","),
   ] as const;
 
-  const curseforgeKey = [
-    "modpacks", "curseforge", query,
-    filters.mcVersion,
-    loadersArr.join(","),
-    cfCategories.join(","),
-  ] as const;
-
-  const modrinth = useInfiniteQuery({
-    queryKey: modrinthKey,
-    enabled: mrCompatible,
+  const feed = useInfiniteQuery({
+    queryKey,
     queryFn: ({ pageParam }) =>
       searchMods(
-        "modrinth",
-        query,
-        filters.mcVersion,
-        null,           // single-loader arg unused — pass multi via loaders[]
-        pageParam,
-        PAGE_LIMIT,
-        "modpack",
-        loadersArr,
-        mrCategories,
-      ),
-    initialPageParam: 0,
-    getNextPageParam: (lastPage) => {
-      if (lastPage.hits.length === 0) return undefined;
-      const fetched = lastPage.offset + lastPage.hits.length;
-      return fetched < lastPage.total ? fetched : undefined;
-    },
-    staleTime: 30_000,
-  });
-
-  const curseforge = useInfiniteQuery({
-    queryKey: curseforgeKey,
-    enabled: cfCompatible,
-    queryFn: ({ pageParam }) =>
-      searchMods(
-        "curseforge",
+        provider,
         query,
         filters.mcVersion,
         null,
         pageParam,
         PAGE_LIMIT,
         "modpack",
-        // Q1: singular-or-Any — if >1 loader selected CF gets Any (empty → omit)
-        loadersArr.length === 1 ? loadersArr : [],
-        cfCategories,
+        queryLoaders,
+        queryCategories,
       ),
     initialPageParam: 0,
     getNextPageParam: (lastPage) => {
@@ -299,75 +304,36 @@ function MergedFeed({
     staleTime: 30_000,
   });
 
-  // CF key-missing is a non-fatal condition — surface an inline notice only.
-  const cfKeyMissing =
-    curseforge.isError &&
-    isProviderCommandError(curseforge.error) &&
-    curseforge.error.kind === "key_missing";
-
-  const cfOtherError = curseforge.isError && !cfKeyMissing;
-
   // Infinite scroll sentinel
-  const fetchBoth = () => {
-    if (modrinth.hasNextPage && !modrinth.isFetchingNextPage) {
-      modrinth.fetchNextPage();
-    }
-    if (curseforge.hasNextPage && !curseforge.isFetchingNextPage) {
-      curseforge.fetchNextPage();
-    }
-  };
-
   useEffect(() => {
     const el = sentinelRef.current;
     if (!el) return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting) fetchBoth();
+        if (
+          entries[0].isIntersecting &&
+          feed.hasNextPage &&
+          !feed.isFetchingNextPage
+        ) {
+          feed.fetchNextPage();
+        }
       },
       { threshold: 0.1 },
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [
-    modrinth.hasNextPage,
-    modrinth.isFetchingNextPage,
-    curseforge.hasNextPage,
-    curseforge.isFetchingNextPage,
-    modrinth.fetchNextPage,
-    curseforge.fetchNextPage,
-  ]);
+  }, [feed.hasNextPage, feed.isFetchingNextPage, feed.fetchNextPage]);
 
-  // Merge, dedupe, sort by downloads desc. Incompatible providers contribute nothing.
-  const modrinthHits = mrCompatible
-    ? modrinth.data?.pages.flatMap((p) => p.hits) ?? []
-    : [];
-  const curseforgeHits = !cfCompatible || curseforge.isError
-    ? []
-    : curseforge.data?.pages.flatMap((p) => p.hits) ?? [];
+  const cfKeyMissing =
+    feed.isError &&
+    isProviderCommandError(feed.error) &&
+    feed.error.kind === "key_missing";
 
-  const seen = new Set<string>();
-  const merged = [] as typeof modrinthHits;
+  const otherError = feed.isError && !cfKeyMissing;
 
-  for (const hit of [...modrinthHits, ...curseforgeHits]) {
-    const key = `${hit.provider}:${hit.id}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(hit);
-    }
-  }
-  merged.sort((a, b) => b.downloads - a.downloads);
+  const hits = feed.data?.pages.flatMap((p) => p.hits) ?? [];
 
-  // Only the SHOWN providers gate the loading / empty states.
-  const mrShown = mrCompatible;
-  const cfShown = cfCompatible && !cfKeyMissing;
-  const isInitialLoading =
-    (mrShown || cfShown) &&
-    (!mrShown || modrinth.isLoading) &&
-    (!cfShown || curseforge.isLoading);
-  const isFetchingMore =
-    modrinth.isFetchingNextPage || curseforge.isFetchingNextPage;
-
-  if (isInitialLoading) {
+  if (feed.isLoading) {
     return (
       <div className="flex items-center gap-2 py-8 text-sm text-muted">
         <Loader2 className="size-4 animate-spin" />
@@ -378,9 +344,10 @@ function MergedFeed({
 
   return (
     <div className="flex flex-col gap-3">
-      {/* CF key-missing inline notice */}
-      {cfKeyMissing && !cfNoticeDismissed && (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-surface/60 px-4 py-3 text-sm text-muted">
+      {/* CF key-missing notice */}
+      {cfKeyMissing && (
+        <div className="flex items-center gap-3 rounded-xl border border-border bg-surface/60 px-4 py-3 text-sm text-muted">
+          <AlertCircle className="size-4 shrink-0" />
           <span>
             CurseForge results hidden — add an API key in{" "}
             <Link to="/settings" className="text-primary hover:underline">
@@ -388,45 +355,25 @@ function MergedFeed({
             </Link>
             .
           </span>
-          <button
-            onClick={onDismissCfNotice}
-            className="shrink-0 rounded-md p-0.5 hover:bg-surface-2 hover:text-foreground"
-            title="Dismiss"
-          >
-            <X className="size-4" />
-          </button>
         </div>
       )}
 
-      {/* CF non-key error */}
-      {cfOtherError && (
+      {/* Other error */}
+      {otherError && (
         <div className="flex items-center gap-3 rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
           <AlertCircle className="size-4 shrink-0" />
           <span>
-            CurseForge error:{" "}
-            {isProviderCommandError(curseforge.error)
-              ? curseforge.error.message
-              : String(curseforge.error)}
+            Error:{" "}
+            {isProviderCommandError(feed.error)
+              ? feed.error.message
+              : String(feed.error)}
           </span>
         </div>
       )}
 
-      {/* Modrinth error */}
-      {modrinth.isError && (
-        <div className="flex items-center gap-3 rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-          <AlertCircle className="size-4 shrink-0" />
-          <span>
-            Modrinth error:{" "}
-            {isProviderCommandError(modrinth.error)
-              ? modrinth.error.message
-              : String(modrinth.error)}
-          </span>
-        </div>
-      )}
-
-      {/* BR-D: responsive grid of larger cards */}
+      {/* Responsive grid of cards */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {merged.map((pack) => (
+        {hits.map((pack) => (
           <BrowseCard
             key={`${pack.provider}:${pack.id}`}
             pack={pack}
@@ -436,19 +383,17 @@ function MergedFeed({
       </div>
 
       {/* Empty state */}
-      {merged.length === 0 &&
-        (!mrShown || !modrinth.isLoading) &&
-        (!cfShown || !curseforge.isLoading) && (
-          <div className="grid place-items-center rounded-xl border border-dashed border-border bg-surface/40 py-12 text-center text-sm text-muted">
-            <Package className="mb-3 size-8" />
-            No modpacks found
-          </div>
-        )}
+      {hits.length === 0 && !feed.isLoading && !feed.isFetching && (
+        <div className="grid place-items-center rounded-xl border border-dashed border-border bg-surface/40 py-12 text-center text-sm text-muted">
+          <Package className="mb-3 size-8" />
+          No modpacks found
+        </div>
+      )}
 
       {/* Scroll sentinel */}
       <div ref={sentinelRef} className="h-4" />
 
-      {isFetchingMore && (
+      {feed.isFetchingNextPage && (
         <div className="flex items-center justify-center gap-2 py-2 text-sm text-muted">
           <Loader2 className="size-4 animate-spin" />
           Loading more…

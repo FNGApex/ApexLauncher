@@ -115,6 +115,8 @@ interface UiState {
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
   setSidebarCollapsed: (v: boolean) => void;
+  browseProvider: "curseforge" | "modrinth";
+  setBrowseProvider: (p: "curseforge" | "modrinth") => void;
 }
 
 export const useUiStore = create<UiState>()(
@@ -123,6 +125,8 @@ export const useUiStore = create<UiState>()(
       sidebarCollapsed: false,
       toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
       setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
+      browseProvider: "curseforge",
+      setBrowseProvider: (p) => set({ browseProvider: p }),
     }),
     { name: "apex-ui" },
   ),

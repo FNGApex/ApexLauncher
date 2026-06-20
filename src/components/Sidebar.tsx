@@ -26,12 +26,6 @@ import {
 import { DownloadManagerButton } from "@/components/DownloadManager";
 import { useAppStore, useUiStore } from "@/lib/store";
 
-const NAV = [
-  { to: "/instances", label: "Instances", icon: LayoutGrid },
-  { to: "/browse", label: "Browse", icon: Compass },
-  { to: "/settings", label: "Settings", icon: Cog },
-];
-
 export function Sidebar() {
   const qc = useQueryClient();
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
@@ -156,24 +150,42 @@ export function Sidebar() {
 
       {/* Nav */}
       <nav className={cn("flex flex-1 flex-col gap-1", collapsed ? "px-2" : "px-3")}>
-        {NAV.map(({ to, label, icon: Icon }) => (
-          <NavLink
-            key={to}
-            to={to}
-            title={collapsed ? label : undefined}
-            className={({ isActive }) =>
-              cn(
-                "flex items-center rounded-lg py-2 text-sm font-medium transition-colors",
-                "text-muted hover:bg-surface-2 hover:text-foreground",
-                isActive && "bg-surface-2 text-foreground",
-                collapsed ? "justify-center px-0" : "gap-3 px-3",
-              )
-            }
-          >
-            <Icon className="size-[18px] shrink-0" />
-            {!collapsed && label}
-          </NavLink>
-        ))}
+        {/* Instances */}
+        <NavLink
+          to="/instances"
+          title={collapsed ? "Instances" : undefined}
+          className={({ isActive }) =>
+            cn(
+              "flex items-center rounded-lg py-2 text-sm font-medium transition-colors",
+              "text-muted hover:bg-surface-2 hover:text-foreground",
+              isActive && "bg-surface-2 text-foreground",
+              collapsed ? "justify-center px-0" : "gap-3 px-3",
+            )
+          }
+        >
+          <LayoutGrid className="size-[18px] shrink-0" />
+          {!collapsed && "Instances"}
+        </NavLink>
+
+        {/* Browse — parent link + sub-items when expanded */}
+        <BrowseNav collapsed={collapsed} />
+
+        {/* Settings */}
+        <NavLink
+          to="/settings"
+          title={collapsed ? "Settings" : undefined}
+          className={({ isActive }) =>
+            cn(
+              "flex items-center rounded-lg py-2 text-sm font-medium transition-colors",
+              "text-muted hover:bg-surface-2 hover:text-foreground",
+              isActive && "bg-surface-2 text-foreground",
+              collapsed ? "justify-center px-0" : "gap-3 px-3",
+            )
+          }
+        >
+          <Cog className="size-[18px] shrink-0" />
+          {!collapsed && "Settings"}
+        </NavLink>
       </nav>
 
       {/* Running indicator */}
@@ -216,6 +228,87 @@ export function Sidebar() {
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
+
+/** Browse parent link + sub-provider items (expanded only). */
+function BrowseNav({ collapsed }: { collapsed: boolean }) {
+  const browseProvider = useUiStore((s) => s.browseProvider);
+
+  return (
+    <>
+      {/* Browse parent link — goes to last-used provider */}
+      <NavLink
+        to={`/browse/${browseProvider}`}
+        title={collapsed ? "Browse" : undefined}
+        className={({ isActive }) =>
+          cn(
+            "flex items-center rounded-lg py-2 text-sm font-medium transition-colors",
+            "text-muted hover:bg-surface-2 hover:text-foreground",
+            isActive && "bg-surface-2 text-foreground",
+            collapsed ? "justify-center px-0" : "gap-3 px-3",
+          )
+        }
+      >
+        <Compass className="size-[18px] shrink-0" />
+        {!collapsed && "Browse"}
+      </NavLink>
+
+      {/* Sub-items — shown only when expanded */}
+      {!collapsed && (
+        <div className="ml-6 flex flex-col gap-0.5">
+          {/* CurseForge — active link */}
+          <NavLink
+            to="/browse/curseforge"
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors",
+                "text-muted hover:bg-surface-2 hover:text-foreground",
+                isActive && "bg-surface-2 text-foreground",
+              )
+            }
+          >
+            CurseForge
+          </NavLink>
+
+          {/* Modrinth — active link */}
+          <NavLink
+            to="/browse/modrinth"
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors",
+                "text-muted hover:bg-surface-2 hover:text-foreground",
+                isActive && "bg-surface-2 text-foreground",
+              )
+            }
+          >
+            Modrinth
+          </NavLink>
+
+          {/* FTB — coming soon (not a link) */}
+          <div
+            title="Coming soon"
+            className="flex cursor-not-allowed items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium text-muted/40"
+          >
+            FTB
+            <span className="rounded bg-muted/20 px-1 py-0.5 text-[10px] leading-tight">
+              Soon
+            </span>
+          </div>
+
+          {/* ATLauncher — coming soon (not a link) */}
+          <div
+            title="Coming soon"
+            className="flex cursor-not-allowed items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium text-muted/40"
+          >
+            ATLauncher
+            <span className="rounded bg-muted/20 px-1 py-0.5 text-[10px] leading-tight">
+              Soon
+            </span>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
 
 interface LoggedInControlProps {
   username: string;

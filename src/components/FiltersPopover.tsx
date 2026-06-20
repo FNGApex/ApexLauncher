@@ -7,17 +7,17 @@
  *
  * Groups:
  *   1. Loaders — fabric / quilt / forge / neoforge checkboxes.
- *      Disabled until a game version is selected (Q5: CF ignores loader without version).
  *   2. Game version — single <select> from the ["mc-versions"] cache (no new fetch).
- *   3. Categories — checkbox chips from categoryMap.ts.
- *      Single-provider rows tagged with a provider glyph (Q6).
+ *   3. Categories — checkbox chips from categoryMap.ts, filtered to the active provider.
+ *      Only rows where the provider's value is non-null are shown (no provider tags
+ *      needed — it's a single-provider view).
  */
 
 import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { listMinecraftVersions } from "@/lib/ipc";
 import { META_STALE_TIME } from "@/lib/query";
-import { CATEGORY_MAP, isSingleProvider } from "@/lib/categoryMap";
+import { CATEGORY_MAP } from "@/lib/categoryMap";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -37,6 +37,8 @@ export interface FiltersPopoverProps {
   onClose: () => void;
   filters: FiltersState;
   onFiltersChange: (next: FiltersState) => void;
+  /** Active provider — determines which categories are shown. */
+  provider: "curseforge" | "modrinth";
 }
 
 const LOADER_OPTIONS = [
@@ -56,6 +58,7 @@ export function FiltersPopover({
   onClose,
   filters,
   onFiltersChange,
+  provider,
 }: FiltersPopoverProps) {
   const popoverRef = useRef<HTMLDivElement | null>(null);
 
@@ -201,24 +204,19 @@ export function FiltersPopover({
           </div>
         </section>
 
-        {/* Categories */}
+        {/* Categories — filtered to the active provider */}
         <section className="px-4 py-3">
           <p className="mb-2 text-xs font-medium text-muted uppercase tracking-wider">
             Category
           </p>
           <div className="flex flex-wrap gap-1.5">
-            {CATEGORY_MAP.map((row) => {
+            {CATEGORY_MAP.filter((row) =>
+              provider === "modrinth" ? row.modrinth != null : row.cfId != null,
+            ).map((row) => {
               const checked = filters.categories.has(row.label);
-              const single = isSingleProvider(row);
-              const glyphLabel = row.modrinth != null ? "M" : "CF";
               return (
                 <label
                   key={row.label}
-                  title={
-                    single
-                      ? `${row.modrinth != null ? "Modrinth" : "CurseForge"} only`
-                      : undefined
-                  }
                   className={cn(
                     "flex cursor-pointer select-none items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors",
                     checked
@@ -233,18 +231,6 @@ export function FiltersPopover({
                     onChange={(e) => setCategory(row.label, e.target.checked)}
                   />
                   {row.label}
-                  {single && (
-                    <span
-                      className={cn(
-                        "ml-0.5 rounded px-0.5 text-[10px] font-semibold leading-tight",
-                        row.modrinth != null
-                          ? "bg-emerald-500/20 text-emerald-400"
-                          : "bg-orange-500/20 text-orange-400",
-                      )}
-                    >
-                      {glyphLabel}
-                    </span>
-                  )}
                 </label>
               );
             })}
