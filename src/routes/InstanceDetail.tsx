@@ -821,6 +821,7 @@ function ModSearchCard({
 }: ModSearchCardProps) {
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
+  const [installTaskId, setInstallTaskId] = useState<number | null>(null);
   // Versions are fetched lazily on first hover/focus, not eagerly per card —
   // a search page of ~20 cards would otherwise fire ~20 getModVersions calls on
   // render (and again per infinite-scroll page). Mirrors Browse's ModpackCard.
@@ -853,13 +854,31 @@ function ModSearchCard({
 
   const primaryVersion = versionsQuery.data?.[0];
 
+  // Track the enqueued task so the button stays busy until the task is terminal.
+  // AppShell populates the store from task://update — no new subscription needed.
+  const installTask = useAppStore((s) =>
+    installTaskId != null ? s.tasks.get(installTaskId) : undefined,
+  );
+
+  useEffect(() => {
+    const kind = installTask?.status.kind;
+    if (kind === "done" || kind === "failed" || kind === "cancelled") {
+      setInstalling(false);
+      setInstallTaskId(null);
+      if (kind === "done") {
+        onInstalled();
+      }
+      // On failed/cancelled: the global toast (D-F1) already reports the failure.
+    }
+  }, [installTask?.status.kind, onInstalled]);
+
   async function handleInstall() {
     if (!primaryVersion) return;
     setInstalling(true);
     setInstallError(null);
     try {
-      // addMod now returns a task id; result arrives via task://update (CP-9 toast).
-      await addMod(
+      // addMod returns a task id; keep installing=true until the task is terminal.
+      const taskId = await addMod(
         providerRoute,
         mod.id,
         primaryVersion.id,
@@ -867,10 +886,11 @@ function ModSearchCard({
         minecraft,
         loaderKind,
       );
-      onInstalled();
+      setInstallTaskId(taskId);
+      // Do NOT call onInstalled() here — wait for the task to reach "done".
     } catch (err) {
+      // Synchronous reject (e.g. enqueue failure) — stop immediately.
       setInstallError(String(err));
-    } finally {
       setInstalling(false);
     }
   }
@@ -927,7 +947,10 @@ function ModSearchCard({
           className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/80 disabled:opacity-50"
         >
           {installing ? (
-            <Loader2 className="size-3.5 animate-spin" />
+            <>
+              <Loader2 className="size-3.5 animate-spin" />
+              Installing…
+            </>
           ) : versionsQuery.isLoading ? (
             <Loader2 className="size-3.5 animate-spin" />
           ) : (
@@ -972,6 +995,9 @@ interface ModRowProps {
 }
 
 function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps) {
+  const [updateTaskId, setUpdateTaskId] = useState<number | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
+
   const toggleMutation = useMutation({
     mutationFn: () => setModEnabled(instanceSlug, mod.fileName, mod.disabled),
     onSuccess: onMutate,
@@ -982,19 +1008,40 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
     onSuccess: onMutate,
   });
 
-  // updateMod now returns a task id; result arrives via task://update (CP-9 toast).
+  // updateMod returns a task id; keep the spinner until the task is terminal.
   const updateMutation = useMutation({
     mutationFn: () => {
       if (!entry) return Promise.reject(new Error("no mod entry"));
       return updateMod(instanceSlug, entry.projectId);
     },
-    onSuccess: (_taskId) => {
-      // Enqueued — no synchronous result to display.
+    onSuccess: (taskId) => {
+      setUpdateTaskId(taskId);
+      setIsUpdating(true);
+    },
+    onError: () => {
+      setIsUpdating(false);
     },
   });
 
+  // Track the enqueued update task until it reaches a terminal state.
+  const updateTask = useAppStore((s) =>
+    updateTaskId != null ? s.tasks.get(updateTaskId) : undefined,
+  );
+
+  useEffect(() => {
+    const kind = updateTask?.status.kind;
+    if (kind === "done" || kind === "failed" || kind === "cancelled") {
+      setIsUpdating(false);
+      setUpdateTaskId(null);
+      if (kind === "done") {
+        onMutate();
+      }
+      // On failed/cancelled: the global toast (D-F1) already reports the failure.
+    }
+  }, [updateTask?.status.kind, onMutate]);
+
   const isBusy =
-    toggleMutation.isPending || removeMutation.isPending || updateMutation.isPending;
+    toggleMutation.isPending || removeMutation.isPending || updateMutation.isPending || isUpdating;
   const isDisabled = isBusy || packLocked;
 
   return (
@@ -1041,7 +1088,7 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
               title={packLocked ? "Pack is locked" : "Check for update"}
               className="rounded p-1 text-muted transition-colors hover:bg-surface-2 hover:text-foreground disabled:opacity-50"
             >
-              {updateMutation.isPending ? (
+              {updateMutation.isPending || isUpdating ? (
                 <Loader2 className="size-3.5 animate-spin" />
               ) : (
                 <RefreshCw className="size-3.5" />
