@@ -50,24 +50,9 @@ export function InfoTab() {
       )}
 
       {infoQuery.data && (
-        <div className="flex flex-col gap-4">
-          {/* Title row: icon + name */}
-          <div className="flex items-center gap-3">
-            {infoQuery.data.iconUrl && (
-              <img
-                src={infoQuery.data.iconUrl}
-                alt=""
-                referrerPolicy="no-referrer"
-                className="size-14 shrink-0 rounded-xl object-cover"
-                loading="lazy"
-              />
-            )}
-            <h2 className="text-xl font-semibold">{infoQuery.data.title}</h2>
-          </div>
-
-          {/* Description: single render path handles both Modrinth Markdown and CF HTML */}
-          <PackDescription markdown={infoQuery.data.description} />
-        </div>
+        // Icon + name are shown in the persistent bar above — Info tab is just the
+        // provider description (single render path: Modrinth Markdown / CF HTML).
+        <PackDescription markdown={infoQuery.data.description} />
       )}
     </div>
   );

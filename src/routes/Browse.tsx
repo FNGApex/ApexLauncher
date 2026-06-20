@@ -84,8 +84,7 @@ export function Browse() {
   }
 
   function removeMcVersion() {
-    // Also clear loaders when version is cleared (they have no effect without version).
-    setFilters((f) => ({ ...f, mcVersion: null, loaders: new Set<string>() }));
+    setFilters((f) => ({ ...f, mcVersion: null }));
   }
 
   return (
@@ -229,6 +228,13 @@ function MergedFeed({
   const cfCategoriesAll = resolveCategoriesFor("curseforge", filters.categories);
   const cfCategories = cfCategoriesAll.length > 0 ? [cfCategoriesAll[0]] : [];
 
+  // Provider compatibility: a provider is shown only if it supports ALL selected
+  // categories. So an exclusive single-provider category (CF-only Skyblock,
+  // Modrinth-only Optimization) hides the other provider's feed entirely.
+  const catCount = filters.categories.size;
+  const mrCompatible = catCount === 0 || mrCategories.length === catCount;
+  const cfCompatible = catCount === 0 || cfCategoriesAll.length === catCount;
+
   // Stable query-key arrays (filters wired into keys so changes refetch).
   const modrinthKey = [
     "modpacks", "modrinth", query,
@@ -246,6 +252,7 @@ function MergedFeed({
 
   const modrinth = useInfiniteQuery({
     queryKey: modrinthKey,
+    enabled: mrCompatible,
     queryFn: ({ pageParam }) =>
       searchMods(
         "modrinth",
@@ -269,6 +276,7 @@ function MergedFeed({
 
   const curseforge = useInfiniteQuery({
     queryKey: curseforgeKey,
+    enabled: cfCompatible,
     queryFn: ({ pageParam }) =>
       searchMods(
         "curseforge",
@@ -329,9 +337,11 @@ function MergedFeed({
     curseforge.fetchNextPage,
   ]);
 
-  // Merge, dedupe, sort by downloads desc.
-  const modrinthHits = modrinth.data?.pages.flatMap((p) => p.hits) ?? [];
-  const curseforgeHits = curseforge.isError
+  // Merge, dedupe, sort by downloads desc. Incompatible providers contribute nothing.
+  const modrinthHits = mrCompatible
+    ? modrinth.data?.pages.flatMap((p) => p.hits) ?? []
+    : [];
+  const curseforgeHits = !cfCompatible || curseforge.isError
     ? []
     : curseforge.data?.pages.flatMap((p) => p.hits) ?? [];
 
@@ -347,7 +357,13 @@ function MergedFeed({
   }
   merged.sort((a, b) => b.downloads - a.downloads);
 
-  const isInitialLoading = modrinth.isLoading && (cfKeyMissing || curseforge.isLoading);
+  // Only the SHOWN providers gate the loading / empty states.
+  const mrShown = mrCompatible;
+  const cfShown = cfCompatible && !cfKeyMissing;
+  const isInitialLoading =
+    (mrShown || cfShown) &&
+    (!mrShown || modrinth.isLoading) &&
+    (!cfShown || curseforge.isLoading);
   const isFetchingMore =
     modrinth.isFetchingNextPage || curseforge.isFetchingNextPage;
 
@@ -421,8 +437,8 @@ function MergedFeed({
 
       {/* Empty state */}
       {merged.length === 0 &&
-        !modrinth.isLoading &&
-        (cfKeyMissing || !curseforge.isLoading) && (
+        (!mrShown || !modrinth.isLoading) &&
+        (!cfShown || !curseforge.isLoading) && (
           <div className="grid place-items-center rounded-xl border border-dashed border-border bg-surface/40 py-12 text-center text-sm text-muted">
             <Package className="mb-3 size-8" />
             No modpacks found

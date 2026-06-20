@@ -107,9 +107,7 @@ export function FiltersPopover({
   }
 
   function setMcVersion(v: string | null) {
-    // When version is cleared, also clear loaders (they require a version for CF).
-    const nextLoaders = v == null ? new Set<string>() : filters.loaders;
-    onFiltersChange({ ...filters, mcVersion: v, loaders: nextLoaders });
+    onFiltersChange({ ...filters, mcVersion: v });
   }
 
   function setCategory(label: string, checked: boolean) {
@@ -123,7 +121,6 @@ export function FiltersPopover({
     onFiltersChange({ loaders: new Set(), mcVersion: null, categories: new Set() });
   }
 
-  const loadersDisabled = filters.mcVersion == null;
   const hasAny =
     filters.loaders.size > 0 ||
     filters.mcVersion != null ||
@@ -136,8 +133,10 @@ export function FiltersPopover({
   return (
     <div
       ref={popoverRef}
-      className="absolute z-40 mt-1 w-80 rounded-xl border border-border bg-surface shadow-xl"
-      style={{ top: "100%", left: 0 }}
+      // Right-aligned under the Filters button so the panel opens leftward and
+      // never overflows the right edge of the page.
+      className="absolute right-0 z-40 mt-1 w-80 rounded-xl border border-border bg-surface shadow-xl"
+      style={{ top: "100%" }}
     >
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <span className="text-sm font-medium">Filters</span>
@@ -176,11 +175,6 @@ export function FiltersPopover({
           <p className="mb-2 text-xs font-medium text-muted uppercase tracking-wider">
             Loader
           </p>
-          {loadersDisabled && (
-            <p className="mb-2 text-xs text-muted italic">
-              Select a game version to filter by loader.
-            </p>
-          )}
           <div className="flex flex-wrap gap-2">
             {LOADER_OPTIONS.map(({ id, label }) => {
               const checked = filters.loaders.has(id);
@@ -189,17 +183,14 @@ export function FiltersPopover({
                   key={id}
                   className={cn(
                     "flex cursor-pointer select-none items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors",
-                    loadersDisabled
-                      ? "cursor-not-allowed border-border text-muted opacity-40"
-                      : checked
-                        ? "border-primary bg-primary/10 text-primary"
-                        : "border-border text-muted hover:border-primary/50 hover:text-foreground",
+                    checked
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border text-muted hover:border-primary/50 hover:text-foreground",
                   )}
                 >
                   <input
                     type="checkbox"
                     className="sr-only"
-                    disabled={loadersDisabled}
                     checked={checked}
                     onChange={(e) => setLoader(id, e.target.checked)}
                   />
