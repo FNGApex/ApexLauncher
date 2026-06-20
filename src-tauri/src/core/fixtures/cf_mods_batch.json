@@ -1,0 +1,33 @@
+{
+  "data": [
+    {
+      "id": 238222,
+      "name": "Just Enough Items (JEI)",
+      "slug": "jei",
+      "summary": "JEI is an item and recipe viewing mod for Minecraft, built from the ground up for stability and performance.",
+      "downloadCount": 300000000,
+      "logo": {
+        "id": 29,
+        "modId": 238222,
+        "title": "JEI logo",
+        "description": "",
+        "thumbnailUrl": "https://media.forgecdn.net/avatars/thumbnails/29/69/256/256/636346904411966716.png",
+        "url": "https://media.forgecdn.net/avatars/29/69/636346904411966716.png"
+      },
+      "categories": [],
+      "links": {
+        "websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/jei"
+      }
+    },
+    {
+      "id": 454158,
+      "name": "Sodium",
+      "slug": "sodium",
+      "summary": "A modern rendering engine and client-side optimization mod for Minecraft.",
+      "downloadCount": 5000000,
+      "logo": null,
+      "categories": [],
+      "links": null
+    }
+  ]
+}

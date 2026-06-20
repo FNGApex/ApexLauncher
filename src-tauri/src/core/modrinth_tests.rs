@@ -80,12 +80,37 @@ impl ProviderHttpClient for CapturingMockClient {
             .expect("CapturingMockClient: no more canned responses");
         Ok((s, b))
     }
+
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        _body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        // Record the call (same structure as GET).
+        {
+            let mut cap = self.captured.lock().await;
+            cap.push((
+                url.to_string(),
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+        }
+        let mut q = self.responses.lock().await;
+        let MockResp(s, b) = q
+            .pop_front()
+            .expect("CapturingMockClient: no more canned responses");
+        Ok((s, b))
+    }
 }
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
 const MODRINTH_SEARCH_FIXTURE: &str = include_str!("fixtures/modrinth_search.json");
 const MODRINTH_VERSIONS_FIXTURE: &str = include_str!("fixtures/modrinth_versions.json");
+const MODRINTH_PROJECTS_BATCH_FIXTURE: &str = include_str!("fixtures/modrinth_projects_batch.json");
 
 // ── URL construction ───────────────────────────────────────────────────────
 
@@ -95,6 +120,8 @@ fn search_url_includes_query_facets_offset_limit() {
         query: "sodium".to_string(),
         mc_version: Some("1.21".to_string()),
         loader: Some("fabric".to_string()),
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Mod,
@@ -125,6 +152,8 @@ fn search_url_no_filters_still_includes_project_type_mod() {
         query: "".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 20,
         limit: 10,
         project_type: ProjectType::Mod,
@@ -170,6 +199,8 @@ async fn search_returns_correct_project_summary_count_and_fields() {
         query: "sodium".to_string(),
         mc_version: Some("1.21".to_string()),
         loader: Some("fabric".to_string()),
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Mod,
@@ -199,6 +230,8 @@ async fn search_request_url_contains_facets_query_offset_limit() {
         query: "sodium".to_string(),
         mc_version: Some("1.21".to_string()),
         loader: Some("fabric".to_string()),
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Mod,
@@ -239,6 +272,8 @@ async fn search_request_carries_user_agent_header() {
         query: "test".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 10,
         project_type: ProjectType::Mod,
@@ -262,6 +297,8 @@ async fn search_returns_provider_error_on_non_200() {
         query: "test".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 10,
         project_type: ProjectType::Mod,
@@ -424,6 +461,77 @@ async fn get_versions_returns_provider_error_on_non_200() {
     );
 }
 
+// ── get_project: fixture → PackInfo ───────────────────────────────────────
+
+const MODRINTH_PROJECT_FIXTURE: &str = include_str!("fixtures/modrinth_project_sodium.json");
+
+#[tokio::test]
+async fn get_project_maps_fixture_to_pack_info() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECT_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let info = provider.get_project(&client, "AANobbMI").await.unwrap();
+
+    assert_eq!(info.title, "Sodium");
+    assert!(
+        info.description.contains("# Sodium"),
+        "description should be the Markdown body, got: {:?}",
+        &info.description[..50.min(info.description.len())]
+    );
+    assert_eq!(
+        info.icon_url,
+        Some("https://cdn.modrinth.com/data/AANobbMI/icon.png".to_string())
+    );
+    assert!(!info.body_is_html, "Modrinth body is Markdown, not HTML");
+}
+
+#[tokio::test]
+async fn get_project_url_targets_project_endpoint() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECT_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    provider.get_project(&client, "AANobbMI").await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 1);
+    assert!(
+        urls[0].ends_with("/v2/project/AANobbMI"),
+        "unexpected url: {}",
+        urls[0]
+    );
+}
+
+#[tokio::test]
+async fn get_project_request_carries_user_agent_header() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECT_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    provider.get_project(&client, "AANobbMI").await.unwrap();
+
+    let all_headers = client.captured_headers().await;
+    let headers = &all_headers[0];
+    let has_ua = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("User-Agent") && v.contains("modloader/"));
+    assert!(has_ua, "User-Agent header missing or wrong: {:?}", headers);
+}
+
+#[tokio::test]
+async fn get_project_returns_http_error_on_non_200() {
+    let client = CapturingMockClient::new(vec![MockResp(404, "not found".to_string())]);
+    let provider = ModrinthProvider;
+
+    let err = provider
+        .get_project(&client, "INVALID")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 404, .. }),
+        "expected HttpStatus(404), got {:?}",
+        err
+    );
+}
+
 // ── project_type selector: facet switching ────────────────────────────────
 
 #[test]
@@ -432,6 +540,8 @@ fn search_url_with_project_type_mod_includes_mod_facet() {
         query: "sodium".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Mod,
@@ -454,6 +564,8 @@ fn search_url_with_project_type_modpack_includes_modpack_facet() {
         query: "all the mods".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Modpack,
@@ -483,6 +595,8 @@ async fn search_populates_page_url_for_mod_hits() {
         query: "sodium".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Mod,
@@ -511,6 +625,8 @@ async fn search_populates_page_url_using_response_project_type_not_selector() {
         query: "sodium".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Modpack,
@@ -525,5 +641,461 @@ async fn search_populates_page_url_using_response_project_type_not_selector() {
         Some("https://modrinth.com/mod/sodium".to_string()),
         "page_url must derive from response project_type, not selector: {:?}",
         sodium.page_url
+    );
+}
+
+// ── get_projects_brief: batch metadata fetch (MM-B2) ──────────────────────
+
+#[tokio::test]
+async fn get_projects_brief_returns_briefs_for_all_ids() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECTS_BATCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string(), "gvQqBUqZ".to_string()];
+    let briefs = provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    assert_eq!(briefs.len(), 2, "should return 2 briefs from fixture");
+    let sodium = briefs.iter().find(|b| b.project_id == "AANobbMI").unwrap();
+    assert_eq!(sodium.name, "Sodium");
+    assert_eq!(
+        sodium.icon_url,
+        Some("https://cdn.modrinth.com/data/AANobbMI/icon.png".to_string())
+    );
+    assert_eq!(
+        sodium.summary,
+        "A modern rendering engine and client-side optimization mod for Minecraft."
+    );
+
+    let lithium = briefs.iter().find(|b| b.project_id == "gvQqBUqZ").unwrap();
+    assert_eq!(lithium.name, "Lithium");
+    assert!(lithium.icon_url.is_some());
+}
+
+#[tokio::test]
+async fn get_projects_brief_issues_one_get_call() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECTS_BATCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string(), "gvQqBUqZ".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 1, "must issue exactly ONE HTTP call; got {:?}", urls);
+    assert!(
+        urls[0].contains("/v2/projects"),
+        "URL should target /v2/projects: {}",
+        urls[0]
+    );
+}
+
+#[tokio::test]
+async fn get_projects_brief_url_contains_encoded_ids() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECTS_BATCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string(), "gvQqBUqZ".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let urls = client.captured_urls().await;
+    // The URL must contain the ids JSON-encoded and percent-encoded.
+    // Decoded it should contain both ids.
+    let decoded_url = urls[0]
+        .replace("%22", "\"")
+        .replace("%5B", "[")
+        .replace("%5D", "]")
+        .replace("%2C", ",");
+    assert!(
+        decoded_url.contains("AANobbMI"),
+        "decoded URL should contain AANobbMI: {}",
+        decoded_url
+    );
+    assert!(
+        decoded_url.contains("gvQqBUqZ"),
+        "decoded URL should contain gvQqBUqZ: {}",
+        decoded_url
+    );
+}
+
+#[tokio::test]
+async fn get_projects_brief_carries_user_agent() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECTS_BATCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let all_headers = client.captured_headers().await;
+    let headers = &all_headers[0];
+    let has_ua = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("User-Agent") && v.contains("modloader/"));
+    assert!(has_ua, "User-Agent header missing: {:?}", headers);
+}
+
+#[tokio::test]
+async fn get_projects_brief_empty_ids_returns_empty_no_http() {
+    let client = CapturingMockClient::new(vec![]); // no responses queued
+    let provider = ModrinthProvider;
+
+    let briefs = provider.get_projects_brief(&client, &[]).await.unwrap();
+
+    assert!(briefs.is_empty(), "empty ids → empty result");
+    let urls = client.captured_urls().await;
+    assert!(urls.is_empty(), "empty ids → zero HTTP calls");
+}
+
+#[tokio::test]
+async fn get_projects_brief_returns_http_error_on_non_200() {
+    let client = CapturingMockClient::new(vec![MockResp(429, "rate limited".to_string())]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string()];
+    let err = provider
+        .get_projects_brief(&client, &ids)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 429, .. }),
+        "expected HttpStatus(429), got {:?}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn get_projects_brief_summary_uses_description_not_body() {
+    // Fixture has both `description` (short) and `body` (long Markdown).
+    // The brief must carry `description`, not `body`.
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECTS_BATCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string()];
+    let briefs = provider.get_projects_brief(&client, &ids).await.unwrap();
+    let sodium = briefs.iter().find(|b| b.project_id == "AANobbMI").unwrap();
+
+    // Short description from fixture; body starts with "# Sodium"
+    assert!(
+        !sodium.summary.starts_with("# Sodium"),
+        "summary must be the short description, not the body; got: {}",
+        sodium.summary
+    );
+    assert_eq!(
+        sodium.summary,
+        "A modern rendering engine and client-side optimization mod for Minecraft."
+    );
+}
+
+// ── get_pack_summary: PB-B2 ──────────────────────────────────────────────────
+
+const MODRINTH_MEMBERS_FIXTURE: &str = include_str!("fixtures/modrinth_members_sodium.json");
+
+#[tokio::test]
+async fn get_pack_summary_returns_name_icon_owner_username() {
+    // Two calls: project (title+icon) then members (owner).
+    let client = CapturingMockClient::new(vec![
+        MockResp::ok(MODRINTH_PROJECT_FIXTURE),
+        MockResp::ok(MODRINTH_MEMBERS_FIXTURE),
+    ]);
+    let provider = ModrinthProvider;
+
+    let summary = provider.get_pack_summary(&client, "AANobbMI").await.unwrap();
+
+    assert_eq!(summary.name, "Sodium");
+    assert_eq!(
+        summary.icon_url,
+        Some("https://cdn.modrinth.com/data/AANobbMI/icon.png".to_string())
+    );
+    // The fixture has role "Owner" for "jellysquid3".
+    assert_eq!(summary.author, Some("jellysquid3".to_string()));
+}
+
+#[tokio::test]
+async fn get_pack_summary_issues_two_http_calls() {
+    let client = CapturingMockClient::new(vec![
+        MockResp::ok(MODRINTH_PROJECT_FIXTURE),
+        MockResp::ok(MODRINTH_MEMBERS_FIXTURE),
+    ]);
+    let provider = ModrinthProvider;
+
+    provider.get_pack_summary(&client, "AANobbMI").await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 2, "must issue exactly two HTTP calls; got {:?}", urls);
+    assert!(
+        urls[0].ends_with("/v2/project/AANobbMI"),
+        "first call must target project endpoint: {}",
+        urls[0]
+    );
+    assert!(
+        urls[1].contains("/v2/project/AANobbMI/members"),
+        "second call must target members endpoint: {}",
+        urls[1]
+    );
+}
+
+#[tokio::test]
+async fn get_pack_summary_falls_back_to_first_member_when_no_owner() {
+    // Members fixture with no "Owner" role — should fall back to first member.
+    let no_owner_members = r#"[
+        {"user": {"id": "u1", "username": "alpha"}, "role": "Member", "permissions": null, "accepted": true, "paid_through": null, "payouts_split": null, "ordering": 0},
+        {"user": {"id": "u2", "username": "beta"}, "role": "Moderator", "permissions": null, "accepted": true, "paid_through": null, "payouts_split": null, "ordering": 1}
+    ]"#;
+    let client = CapturingMockClient::new(vec![
+        MockResp::ok(MODRINTH_PROJECT_FIXTURE),
+        MockResp::ok(no_owner_members),
+    ]);
+    let provider = ModrinthProvider;
+
+    let summary = provider.get_pack_summary(&client, "AANobbMI").await.unwrap();
+
+    // Falls back to first member when no Owner.
+    assert_eq!(summary.author, Some("alpha".to_string()));
+}
+
+#[tokio::test]
+async fn get_pack_summary_project_call_failure_propagates() {
+    let client = CapturingMockClient::new(vec![MockResp(404, "not found".to_string())]);
+    let provider = ModrinthProvider;
+
+    let err = provider.get_pack_summary(&client, "INVALID").await.unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 404, .. }),
+        "expected HttpStatus(404), got {:?}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn get_pack_summary_members_call_failure_propagates() {
+    let client = CapturingMockClient::new(vec![
+        MockResp::ok(MODRINTH_PROJECT_FIXTURE),
+        MockResp(503, "service unavailable".to_string()),
+    ]);
+    let provider = ModrinthProvider;
+
+    let err = provider.get_pack_summary(&client, "AANobbMI").await.unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 503, .. }),
+        "expected HttpStatus(503), got {:?}",
+        err
+    );
+}
+
+// ── A-2: multi-loader + category facets (BR-A) ────────────────────────────
+
+/// (a) 2 loaders → single OR'd inner array in the facets JSON.
+#[test]
+fn search_url_two_loaders_emits_single_or_inner_array() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: None,
+        loader: None,
+        loaders: vec!["fabric".to_string(), "quilt".to_string()],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = ModrinthProvider::build_search_url(&params);
+    let decoded = percent_decode(&url);
+
+    // The decoded facets JSON must contain ONE inner array that ORs both loaders.
+    // Expected shape (in addition to the project_type array):
+    //   [["project_type:modpack"],["categories:fabric","categories:quilt"]]
+    assert!(
+        decoded.contains("categories:fabric"),
+        "categories:fabric missing: {decoded}"
+    );
+    assert!(
+        decoded.contains("categories:quilt"),
+        "categories:quilt missing: {decoded}"
+    );
+    // Both loaders must appear in the SAME inner array (comma-separated, no outer
+    // array break between them). Parse the facets JSON directly to verify structure.
+    let facets_start = decoded.find("facets=").expect("facets= missing") + 7;
+    let facets_raw: &str = decoded[facets_start..].split('&').next().unwrap();
+    let outer: serde_json::Value =
+        serde_json::from_str(facets_raw).expect("facets JSON must be valid");
+    let outer_arr = outer.as_array().expect("outer must be array");
+
+    // Exactly one inner array should contain both loaders.
+    let loader_inner = outer_arr.iter().find(|inner| {
+        let arr = inner.as_array().unwrap();
+        arr.iter().any(|v| v.as_str().map_or(false, |s| s.contains("categories:fabric")))
+            && arr.iter().any(|v| v.as_str().map_or(false, |s| s.contains("categories:quilt")))
+    });
+    assert!(
+        loader_inner.is_some(),
+        "Expected one inner array containing both fabric and quilt, facets: {decoded}"
+    );
+}
+
+/// (b) 2 categories → single OR'd inner array in the facets JSON.
+#[test]
+fn search_url_two_categories_emits_single_or_inner_array() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: None,
+        loader: None,
+        loaders: vec![],
+        categories: vec!["technology".to_string(), "magic".to_string()],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = ModrinthProvider::build_search_url(&params);
+    let decoded = percent_decode(&url);
+
+    assert!(
+        decoded.contains("categories:technology"),
+        "categories:technology missing: {decoded}"
+    );
+    assert!(
+        decoded.contains("categories:magic"),
+        "categories:magic missing: {decoded}"
+    );
+
+    // Parse to verify both appear in ONE inner array (OR'd together).
+    let facets_start = decoded.find("facets=").expect("facets= missing") + 7;
+    let facets_raw: &str = decoded[facets_start..].split('&').next().unwrap();
+    let outer: serde_json::Value =
+        serde_json::from_str(facets_raw).expect("facets JSON must be valid");
+    let outer_arr = outer.as_array().expect("outer must be array");
+
+    let cat_inner = outer_arr.iter().find(|inner| {
+        let arr = inner.as_array().unwrap();
+        arr.iter().any(|v| v.as_str().map_or(false, |s| s == "categories:technology"))
+            && arr.iter().any(|v| v.as_str().map_or(false, |s| s == "categories:magic"))
+    });
+    assert!(
+        cat_inner.is_some(),
+        "Expected one inner array containing both technology and magic; facets: {decoded}"
+    );
+}
+
+/// (c) loaders + categories + mc version → 3 AND arrays (outer array has 4 entries:
+/// project_type + versions + loaders-OR + categories-OR).
+#[test]
+fn search_url_loaders_categories_version_produces_four_outer_arrays() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: Some("1.20.1".to_string()),
+        loader: None,
+        loaders: vec!["fabric".to_string(), "forge".to_string()],
+        categories: vec!["adventure".to_string(), "quests".to_string()],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = ModrinthProvider::build_search_url(&params);
+    let decoded = percent_decode(&url);
+
+    // Parse the facets JSON.
+    let facets_start = decoded.find("facets=").expect("facets= missing") + 7;
+    let facets_raw: &str = decoded[facets_start..].split('&').next().unwrap();
+    let outer: serde_json::Value =
+        serde_json::from_str(facets_raw).expect("facets JSON must be valid");
+    let outer_arr = outer.as_array().expect("outer must be array");
+
+    // Expect 4 outer entries: project_type, versions, loaders-OR, categories-OR.
+    assert_eq!(
+        outer_arr.len(),
+        4,
+        "Expected 4 outer AND arrays; got {}: {decoded}",
+        outer_arr.len()
+    );
+
+    // 1. project_type facet.
+    let has_project_type = outer_arr.iter().any(|inner| {
+        inner.as_array().unwrap().iter().any(|v| {
+            v.as_str().map_or(false, |s| s.starts_with("project_type:"))
+        })
+    });
+    assert!(has_project_type, "project_type facet missing: {decoded}");
+
+    // 2. versions facet.
+    let has_version = outer_arr.iter().any(|inner| {
+        inner.as_array().unwrap().iter().any(|v| {
+            v.as_str().map_or(false, |s| s == "versions:1.20.1")
+        })
+    });
+    assert!(has_version, "versions:1.20.1 facet missing: {decoded}");
+
+    // 3. Loaders OR'd in one inner array.
+    let loaders_inner = outer_arr.iter().find(|inner| {
+        let arr = inner.as_array().unwrap();
+        arr.iter().any(|v| v.as_str().map_or(false, |s| s == "categories:fabric"))
+    });
+    assert!(loaders_inner.is_some(), "loader inner array missing: {decoded}");
+    let loaders_inner_arr = loaders_inner.unwrap().as_array().unwrap();
+    assert_eq!(loaders_inner_arr.len(), 2, "loader inner array must have 2 entries: {decoded}");
+
+    // 4. Categories OR'd in one inner array (distinct from loaders inner array).
+    let cats_inner = outer_arr.iter().find(|inner| {
+        let arr = inner.as_array().unwrap();
+        arr.iter().any(|v| v.as_str().map_or(false, |s| s == "categories:adventure"))
+    });
+    assert!(cats_inner.is_some(), "categories inner array missing: {decoded}");
+    let cats_inner_arr = cats_inner.unwrap().as_array().unwrap();
+    assert_eq!(cats_inner_arr.len(), 2, "categories inner array must have 2 entries: {decoded}");
+}
+
+/// Verify that setting the legacy `loader` field still works when `loaders` is empty.
+#[test]
+fn search_url_legacy_loader_field_works_when_loaders_empty() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: None,
+        loader: Some("neoforge".to_string()),
+        loaders: vec![],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Mod,
+    };
+    let url = ModrinthProvider::build_search_url(&params);
+    let decoded = percent_decode(&url);
+    assert!(
+        decoded.contains("categories:neoforge"),
+        "legacy loader should appear as categories:neoforge facet: {decoded}"
+    );
+}
+
+/// When `loaders` is non-empty, it takes precedence over the legacy `loader` field.
+#[test]
+fn search_url_loaders_vec_takes_priority_over_legacy_loader() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: None,
+        loader: Some("forge".to_string()),    // legacy field
+        loaders: vec!["fabric".to_string()],  // new field — should win
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Mod,
+    };
+    let url = ModrinthProvider::build_search_url(&params);
+    let decoded = percent_decode(&url);
+    assert!(
+        decoded.contains("categories:fabric"),
+        "loaders vec should take priority; fabric missing: {decoded}"
+    );
+    // The legacy loader (forge) should NOT appear because loaders vec is non-empty.
+    // We can't guarantee forge doesn't appear for other reasons, but we check the
+    // loaders-OR inner array contains only fabric.
+    let facets_start = decoded.find("facets=").expect("facets= missing") + 7;
+    let facets_raw: &str = decoded[facets_start..].split('&').next().unwrap();
+    let outer: serde_json::Value = serde_json::from_str(facets_raw).unwrap();
+    let outer_arr = outer.as_array().unwrap();
+    // The inner array for loaders should have exactly 1 entry (fabric).
+    let loader_inner = outer_arr.iter().find(|inner| {
+        inner.as_array().unwrap().iter().any(|v| {
+            v.as_str().map_or(false, |s| s == "categories:fabric")
+        })
+    });
+    let loader_inner_arr = loader_inner.unwrap().as_array().unwrap();
+    assert_eq!(
+        loader_inner_arr.len(),
+        1,
+        "loaders vec wins; inner array should have only fabric: {decoded}"
     );
 }

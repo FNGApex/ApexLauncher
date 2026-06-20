@@ -10,6 +10,17 @@ fn offline_identity() -> LaunchIdentity {
     LaunchIdentity::offline()
 }
 
+/// Minimal EffectiveJava for tests that do not exercise heap/extra-args behaviour.
+/// Uses 512 MiB xmx (arbitrary non-zero value), no xms, no extra args, no path override.
+fn noop_eff() -> crate::core::java_resolve::EffectiveJava {
+    crate::core::java_resolve::EffectiveJava {
+        xmx_mb: 512,
+        xms_mb: None,
+        extra_args: vec![],
+        java_path: None,
+    }
+}
+
 fn make_meta(
     version_type: &str,
     jvm_args: Vec<&str>,
@@ -127,7 +138,7 @@ fn build_argv_modern_all_placeholders_substituted() {
     let meta = make_meta("release", jvm_args, game_args, cp, false, None);
     let paths = make_paths();
 
-    let argv = build_argv(&meta, &paths, &offline_identity()).expect("no unresolved placeholders");
+    let argv = build_argv(&meta, &paths, &offline_identity(), &noop_eff()).expect("no unresolved placeholders");
 
     // main_class must be present between jvm and game sections.
     let mc_idx = argv
@@ -216,7 +227,7 @@ fn build_argv_unsubstituted_placeholder_is_error() {
     let meta = make_meta("release", jvm_args, vec![], vec![], false, None);
     let paths = make_paths();
 
-    let err = build_argv(&meta, &paths, &offline_identity())
+    let err = build_argv(&meta, &paths, &offline_identity(), &noop_eff())
         .expect_err("must error on unknown placeholder");
     match err {
         AssembleError::UnsubstitutedPlaceholders(ps) => {
@@ -245,7 +256,7 @@ fn build_argv_logging_config_none_omits_path_arg() {
     );
     let paths = make_paths();
 
-    let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error expected");
+    let argv = build_argv(&meta, &paths, &offline_identity(), &noop_eff()).expect("no error expected");
     assert!(
         !argv.iter().any(|a| a.contains("log4j")),
         "log4j arg must be omitted when logging_config is None: {argv:?}"
@@ -269,7 +280,7 @@ fn build_argv_logging_config_some_substitutes_path() {
     );
     let paths = make_paths();
 
-    let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error expected");
+    let argv = build_argv(&meta, &paths, &offline_identity(), &noop_eff()).expect("no error expected");
     assert!(
         argv.iter()
             .any(|a| a.contains("/data/assets/log_configs/log4j2.xml")),
@@ -316,7 +327,7 @@ fn build_argv_legacy_manifest_gets_default_jvm_args() {
     );
     let paths = make_paths();
 
-    let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error expected");
+    let argv = build_argv(&meta, &paths, &offline_identity(), &noop_eff()).expect("no error expected");
 
     // Defaults must include -cp and classpath.
     let cp_idx = argv
@@ -358,7 +369,7 @@ fn build_argv_assets_legacy_uses_virtual_root() {
     );
     let paths = make_paths();
 
-    let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error");
+    let argv = build_argv(&meta, &paths, &offline_identity(), &noop_eff()).expect("no error");
     assert!(
         argv.iter().any(|a| a.contains("virtual/legacy")),
         "legacy assets must point at virtual/legacy: {argv:?}"
@@ -378,7 +389,7 @@ fn build_argv_assets_modern_uses_regular_root() {
     );
     let paths = make_paths();
 
-    let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error");
+    let argv = build_argv(&meta, &paths, &offline_identity(), &noop_eff()).expect("no error");
     // Modern: uses /data/cache/assets, NOT /data/cache/assets/virtual/legacy.
     assert!(
         argv.iter().any(|a| a == "/data/cache/assets"),
@@ -408,7 +419,7 @@ fn version_type_snapshot_propagates() {
     );
     let paths = make_paths();
 
-    let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error");
+    let argv = build_argv(&meta, &paths, &offline_identity(), &noop_eff()).expect("no error");
     assert!(
         argv.iter().any(|a| a == "snapshot"),
         "snapshot version_type must appear in argv: {argv:?}"
@@ -445,7 +456,7 @@ fn build_argv_forge_library_directory_substituted() {
     let paths = make_paths();
     // library_directory = /instances/my-world/libraries (per-instance, post-C2)
 
-    let argv = build_argv(&meta, &paths, &offline_identity()).expect("no unresolved");
+    let argv = build_argv(&meta, &paths, &offline_identity(), &noop_eff()).expect("no unresolved");
 
     let lib_dir_arg = argv
         .iter()
@@ -490,7 +501,7 @@ fn build_argv_assets_dir_stays_in_shared_cache() {
     let paths = make_paths();
     // assets_root = /data/cache/assets — must remain unchanged after C2.
 
-    let argv = build_argv(&meta, &paths, &offline_identity()).expect("no error");
+    let argv = build_argv(&meta, &paths, &offline_identity(), &noop_eff()).expect("no error");
 
     let assets_arg = argv
         .iter()
@@ -526,7 +537,7 @@ fn build_argv_forge_classpath_separator_substituted() {
     );
     let paths = make_paths();
 
-    let argv = build_argv(&meta, &paths, &offline_identity()).expect("no unresolved");
+    let argv = build_argv(&meta, &paths, &offline_identity(), &noop_eff()).expect("no unresolved");
 
     let sep_arg = argv
         .iter()
@@ -557,7 +568,7 @@ fn build_argv_forge_version_name_substituted() {
     );
     let paths = make_paths();
 
-    let argv = build_argv(&meta, &paths, &offline_identity()).expect("no unresolved");
+    let argv = build_argv(&meta, &paths, &offline_identity(), &noop_eff()).expect("no unresolved");
 
     let mc_version = argv
         .iter()
@@ -714,6 +725,9 @@ fn make_instance_dir(tmp: &tempfile::TempDir, initial_playtime: u64) -> std::pat
             major: None,
             args_override: None,
             memory_mb: 2048,
+            min_memory_mb: None,
+            path_override: None,
+            use_pack_settings: false,
         },
         source: None,
         pack_locked: false,
@@ -1045,7 +1059,7 @@ fn cp4_online_identity_in_argv() {
         client_id: "azure_client_xyz".to_string(),
     };
 
-    let argv = build_argv(&meta, &paths, &identity).expect("no unresolved placeholders");
+    let argv = build_argv(&meta, &paths, &identity, &noop_eff()).expect("no unresolved placeholders");
     let joined = argv.join(" ");
 
     assert!(
@@ -1084,7 +1098,7 @@ fn cp4_offline_identity_in_argv() {
     let paths = make_paths();
     let identity = LaunchIdentity::offline();
 
-    let argv = build_argv(&meta, &paths, &identity).expect("no error");
+    let argv = build_argv(&meta, &paths, &identity, &noop_eff()).expect("no error");
     let joined = argv.join(" ");
 
     assert!(
@@ -1117,7 +1131,7 @@ fn cp4_auth_xuid_placeholder_is_substituted() {
         client_id: "client_check_456".to_string(),
     };
 
-    let argv = build_argv(&meta, &paths, &identity).expect("no error");
+    let argv = build_argv(&meta, &paths, &identity, &noop_eff()).expect("no error");
     // No raw placeholder must survive.
     for arg in &argv {
         assert!(
@@ -1150,7 +1164,7 @@ fn cp4_clientid_placeholder_is_substituted() {
         client_id: "client_id_value_789".to_string(),
     };
 
-    let argv = build_argv(&meta, &paths, &identity).expect("no error");
+    let argv = build_argv(&meta, &paths, &identity, &noop_eff()).expect("no error");
     // No raw placeholder must survive.
     for arg in &argv {
         assert!(
@@ -1879,6 +1893,9 @@ fn make_instance_dir_named(tmp: &tempfile::TempDir, slug: &str) -> std::path::Pa
             major: None,
             args_override: None,
             memory_mb: 2048,
+            min_memory_mb: None,
+            path_override: None,
+            use_pack_settings: false,
         },
         source: None,
         pack_locked: false,
@@ -1894,4 +1911,147 @@ fn make_instance_dir_named(tmp: &tempfile::TempDir, slug: &str) -> std::path::Pa
     let mut f = fs::File::create(dir.join("instance.json")).unwrap();
     f.write_all(json.as_bytes()).unwrap();
     dir
+}
+
+// -----------------------------------------------------------------------
+// A-3 — EffectiveJava heap + extra args in build_argv
+// -----------------------------------------------------------------------
+
+use crate::core::java_resolve::EffectiveJava;
+
+/// Construct a minimal EffectiveJava with default values for fields not under test.
+fn eff_java(xmx_mb: u32, xms_mb: Option<u32>, extra_args: Vec<&str>) -> EffectiveJava {
+    EffectiveJava {
+        xmx_mb,
+        xms_mb,
+        extra_args: extra_args.into_iter().map(str::to_owned).collect(),
+        java_path: None,
+    }
+}
+
+/// Minimal meta that satisfies build_argv without placeholder errors.
+fn minimal_meta() -> LaunchMeta {
+    make_meta(
+        "release",
+        vec!["-cp", "${classpath}"],
+        vec![],
+        vec!["/data/versions/1.21.1/1.21.1.jar"],
+        false,
+        None,
+    )
+}
+
+/// -Xmx4096M must appear in argv when xmx_mb = 4096.
+/// -Xms* must NOT appear when xms_mb = None.
+#[test]
+fn a3_xmx_present_xms_absent_when_none() {
+    let meta = minimal_meta();
+    let paths = make_paths();
+    let eff = eff_java(4096, None, vec![]);
+
+    let argv = build_argv(&meta, &paths, &offline_identity(), &eff).expect("no error");
+
+    assert!(
+        argv.iter().any(|a| a == "-Xmx4096M"),
+        "-Xmx4096M must appear in argv: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a.starts_with("-Xms")),
+        "-Xms must NOT appear when xms_mb is None: {argv:?}"
+    );
+}
+
+/// -Xms2048M must appear when xms_mb = Some(2048).
+#[test]
+fn a3_xms_present_when_some() {
+    let meta = minimal_meta();
+    let paths = make_paths();
+    let eff = eff_java(4096, Some(2048), vec![]);
+
+    let argv = build_argv(&meta, &paths, &offline_identity(), &eff).expect("no error");
+
+    assert!(
+        argv.iter().any(|a| a == "-Xms2048M"),
+        "-Xms2048M must appear in argv when xms_mb is Some(2048): {argv:?}"
+    );
+}
+
+/// extra_args tokens appear in argv.
+#[test]
+fn a3_extra_args_appear_in_argv() {
+    let meta = minimal_meta();
+    let paths = make_paths();
+    let eff = eff_java(2048, None, vec!["-XX:+UseG1GC", "-XX:MaxGCPauseMillis=50"]);
+
+    let argv = build_argv(&meta, &paths, &offline_identity(), &eff).expect("no error");
+
+    assert!(
+        argv.iter().any(|a| a == "-XX:+UseG1GC"),
+        "-XX:+UseG1GC must appear in argv: {argv:?}"
+    );
+    assert!(
+        argv.iter().any(|a| a == "-XX:MaxGCPauseMillis=50"),
+        "-XX:MaxGCPauseMillis=50 must appear in argv: {argv:?}"
+    );
+}
+
+/// Heap args (-Xmx, -Xms, extra_args) must all precede main_class in argv ordering.
+#[test]
+fn a3_heap_args_precede_main_class() {
+    let meta = minimal_meta();
+    let paths = make_paths();
+    let eff = eff_java(4096, Some(2048), vec!["-XX:+UseG1GC"]);
+
+    let argv = build_argv(&meta, &paths, &offline_identity(), &eff).expect("no error");
+
+    let mc_idx = argv
+        .iter()
+        .position(|a| a == "net.minecraft.client.main.Main")
+        .expect("main_class must be in argv");
+
+    let xmx_idx = argv.iter().position(|a| a == "-Xmx4096M").expect("-Xmx4096M must be in argv");
+    let xms_idx = argv.iter().position(|a| a == "-Xms2048M").expect("-Xms2048M must be in argv");
+    let g1_idx = argv.iter().position(|a| a == "-XX:+UseG1GC").expect("-XX:+UseG1GC must be in argv");
+
+    assert!(xmx_idx < mc_idx, "-Xmx must precede main_class (xmx={xmx_idx}, mc={mc_idx})");
+    assert!(xms_idx < mc_idx, "-Xms must precede main_class (xms={xms_idx}, mc={mc_idx})");
+    assert!(g1_idx < mc_idx, "extra_args must precede main_class (g1={g1_idx}, mc={mc_idx})");
+}
+
+/// Legacy manifest (empty jvm_args) + EffectiveJava still assembles a valid argv.
+/// The default jvm_args are injected and no raw placeholder survives.
+#[test]
+fn a3_legacy_empty_jvm_args_plus_effective_java_valid() {
+    // Legacy: jvm_args empty; game_args use the old-style minecraftArguments placeholders.
+    let game_args = vec![
+        "--username", "${auth_player_name}",
+        "--version", "${version_name}",
+        "--gameDir", "${game_directory}",
+        "--assetsDir", "${assets_root}",
+        "--assetIndex", "${assets_index_name}",
+        "--uuid", "${auth_uuid}",
+        "--accessToken", "${auth_access_token}",
+        "--userType", "${user_type}",
+    ];
+    let meta = make_meta(
+        "release",
+        vec![], // empty → legacy path
+        game_args,
+        vec!["/data/libraries/a.jar", "/data/versions/1.8.9/1.8.9.jar"],
+        false,
+        None,
+    );
+    let paths = make_paths();
+    let eff = eff_java(1024, None, vec![]);
+
+    let argv = build_argv(&meta, &paths, &offline_identity(), &eff).expect("no error on legacy+effective");
+
+    // -Xmx must appear.
+    assert!(argv.iter().any(|a| a == "-Xmx1024M"), "-Xmx1024M must appear: {argv:?}");
+    // Default classpath must also be present (legacy branch injects it).
+    assert!(argv.iter().any(|a| a == "-cp"), "-cp must be injected for legacy manifest: {argv:?}");
+    // No raw placeholders.
+    for arg in &argv {
+        assert!(!arg.contains("${"), "raw placeholder in legacy+effective argv: {arg}");
+    }
 }

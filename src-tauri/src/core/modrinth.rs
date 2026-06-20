@@ -14,8 +14,9 @@
 use serde::Deserialize;
 
 use crate::core::providers::{
-    Dependency, ModProvider, MrSearchResponse, ProjectType, ProjectVersion, ProviderError,
-    ProviderHttpClient, ProviderKind, SearchParams, SearchResult, VersionFile,
+    Dependency, ModBrief, ModProvider, MrSearchResponse, PackInfo, PackSummary, ProjectType,
+    ProjectVersion, ProviderError, ProviderHttpClient, ProviderKind, SearchParams, SearchResult,
+    VersionFile,
 };
 
 // ── Percent-encoding helper ────────────────────────────────────────────────────
@@ -151,6 +152,42 @@ impl MrVersion {
     }
 }
 
+/// Raw Modrinth `/v2/project/{id}` response (subset of fields needed for `PackInfo`).
+///
+/// The `body` field carries the full Markdown long description.
+/// The `description` field is only the short summary — we use `body`.
+#[derive(Debug, Deserialize)]
+struct MrProject {
+    title: String,
+    /// Full Markdown long description (NOT the short `description` field).
+    body: String,
+    icon_url: Option<String>,
+}
+
+/// Raw Modrinth `/v2/projects?ids=[...]` response item (for batch metadata fetch).
+///
+/// Uses the short `description` field — NOT `body` — per MM-B2 spec.
+#[derive(Debug, Deserialize)]
+struct MrProjectBrief {
+    id: String,
+    title: String,
+    icon_url: Option<String>,
+    /// Short description (not the long Markdown body).
+    description: String,
+}
+
+/// Raw Modrinth `/v2/project/{id}/members` response item (for pack summary author).
+#[derive(Debug, Deserialize)]
+struct MrMember {
+    role: String,
+    user: MrMemberUser,
+}
+
+#[derive(Debug, Deserialize)]
+struct MrMemberUser {
+    username: String,
+}
+
 // ── ModrinthProvider ───────────────────────────────────────────────────────────
 
 /// Modrinth implementation of `ModProvider`.
@@ -160,7 +197,17 @@ impl ModrinthProvider {
     /// Build the Modrinth `/search` URL from `SearchParams`.
     ///
     /// Facets are encoded as a JSON array-of-arrays as required by the Modrinth API.
-    /// The `project_type` facet is derived from `params.project_type`.
+    /// Inner array = OR; outer arrays = AND.
+    ///
+    /// Layout (all non-empty vecs emit one outer entry each):
+    /// - `["project_type:<mod|modpack>"]` — always present.
+    /// - `["versions:<mc>"]` — when `mc_version` is set.
+    /// - `["categories:<loader>","categories:<loader2>",…]` — when `loaders` is
+    ///   non-empty: ONE OR'd inner array (Modrinth treats loaders as categories facets).
+    ///   If the legacy `loader` field is set but `loaders` is empty, it is emitted the
+    ///   same way for back-compat.
+    /// - `["categories:<val>","categories:<val2>",…]` — when `categories` is non-empty:
+    ///   ONE OR'd inner array (Modrinth ORs categories within the inner array).
     fn build_search_url(params: &SearchParams) -> String {
         let project_type_str = match params.project_type {
             ProjectType::Mod => "mod",
@@ -171,8 +218,28 @@ impl ModrinthProvider {
         if let Some(mc) = &params.mc_version {
             facets.push(format!(r#"["versions:{}"]"#, mc));
         }
-        if let Some(loader) = &params.loader {
+
+        // Multi-loader filter: one OR'd inner array (loaders are categories facets on Modrinth).
+        // Prefer `loaders` vec; fall back to legacy `loader` field if `loaders` is empty.
+        if !params.loaders.is_empty() {
+            let inner: Vec<String> = params
+                .loaders
+                .iter()
+                .map(|l| format!(r#""categories:{}""#, l))
+                .collect();
+            facets.push(format!("[{}]", inner.join(",")));
+        } else if let Some(loader) = &params.loader {
             facets.push(format!(r#"["categories:{}"]"#, loader));
+        }
+
+        // Categories filter: one OR'd inner array.
+        if !params.categories.is_empty() {
+            let inner: Vec<String> = params
+                .categories
+                .iter()
+                .map(|c| format!(r#""categories:{}""#, c))
+                .collect();
+            facets.push(format!("[{}]", inner.join(",")));
         }
 
         let facets_json = format!("[{}]", facets.join(","));
@@ -209,6 +276,32 @@ impl ModrinthProvider {
         } else {
             format!("{}?{}", base, parts.join("&"))
         }
+    }
+
+    /// Build the Modrinth `/v2/project/{id}` URL.
+    fn build_project_url(project_id: &str) -> String {
+        format!("{}/project/{}", BASE_URL, project_id)
+    }
+
+    /// Build the Modrinth `/v2/projects?ids=[...]` URL for batch metadata fetch.
+    ///
+    /// The `ids` array is serialized as a JSON array string and percent-encoded
+    /// as the `ids` query parameter value per Modrinth API convention.
+    fn build_projects_brief_url(ids: &[String]) -> String {
+        // Build a JSON array: ["id1","id2",...]
+        let ids_json = format!(
+            "[{}]",
+            ids.iter()
+                .map(|id| format!(r#""{}""#, id))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        format!("{}/projects?ids={}", BASE_URL, percent_encode(&ids_json))
+    }
+
+    /// Build the Modrinth `/v2/project/{id}/members` URL (for team/author info).
+    fn build_members_url(project_id: &str) -> String {
+        format!("{}/project/{}/members", BASE_URL, project_id)
     }
 }
 
@@ -277,6 +370,114 @@ impl ModProvider for ModrinthProvider {
             .collect();
 
         Ok(versions)
+    }
+
+    async fn get_project(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackInfo, ProviderError> {
+        let url = Self::build_project_url(project_id);
+        let (status, body) = client
+            .get(&url, &[("User-Agent", USER_AGENT)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw: MrProject =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        Ok(PackInfo {
+            title: raw.title,
+            description: raw.body,
+            icon_url: raw.icon_url,
+            body_is_html: false,
+        })
+    }
+
+    async fn get_projects_brief(
+        &self,
+        client: &dyn ProviderHttpClient,
+        ids: &[String],
+    ) -> Result<Vec<ModBrief>, ProviderError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let url = Self::build_projects_brief_url(ids);
+        let (status, body) = client
+            .get(&url, &[("User-Agent", USER_AGENT)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw: Vec<MrProjectBrief> =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        Ok(raw
+            .into_iter()
+            .map(|p| ModBrief {
+                project_id: p.id,
+                name: p.title,
+                icon_url: p.icon_url,
+                summary: p.description,
+            })
+            .collect())
+    }
+
+    async fn get_pack_summary(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackSummary, ProviderError> {
+        // Call 1: project metadata (title + icon_url).
+        let project_url = Self::build_project_url(project_id);
+        let (status, body) = client
+            .get(&project_url, &[("User-Agent", USER_AGENT)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw_project: MrProject =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        // Call 2: members (to find the owner's username).
+        let members_url = Self::build_members_url(project_id);
+        let (members_status, members_body) = client
+            .get(&members_url, &[("User-Agent", USER_AGENT)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if members_status != 200 {
+            return Err(ProviderError::HttpStatus {
+                status: members_status,
+                body: members_body,
+            });
+        }
+
+        let members: Vec<MrMember> = serde_json::from_str(&members_body)
+            .map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        // Find the "Owner" role, or fall back to first member.
+        let author = members
+            .iter()
+            .find(|m| m.role.eq_ignore_ascii_case("Owner"))
+            .or_else(|| members.first())
+            .map(|m| m.user.username.clone());
+
+        Ok(PackSummary {
+            name: raw_project.title,
+            icon_url: raw_project.icon_url,
+            author,
+        })
     }
 }
 

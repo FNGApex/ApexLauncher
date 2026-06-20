@@ -484,6 +484,9 @@ pub fn build_cf_pack_plan(
                     enabled: true,
                     side: "both".to_string(),
                     from_pack: true,
+                    name: None,
+                    icon_url: None,
+                    summary: None,
                 });
             }
             _ => {
@@ -861,6 +864,9 @@ pub fn build_pack_plan(
                 enabled: true,
                 side: file.side(),
                 from_pack: true,
+                name: None,
+                icon_url: None,
+                summary: None,
             });
         }
     }

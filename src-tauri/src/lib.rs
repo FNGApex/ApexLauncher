@@ -21,9 +21,10 @@ use core::mod_install::{AddModResult, UpdateModResult};
 use core::modpack;
 use core::modrinth::ModrinthProvider;
 use core::providers::{
-    self, cf_api_key_from, ModProvider, ProjectType, ProviderError, ReqwestProviderClient,
-    SearchParams, SearchResult, ProjectVersion,
+    self, cf_api_key_from, ModProvider, PackInfo, PackSummary, ProjectType, ProviderError,
+    ReqwestProviderClient, SearchParams, SearchResult, ProjectVersion,
 };
+use core::instances::needs_update_check;
 use core::settings::{self, Settings};
 use core::task_manager::{ChildItem, Task, TaskJob, TaskKind, TaskManager, TaskObserver, TaskProgress, TaskSpec};
 use core::versions::{self, McVersion};
@@ -355,6 +356,72 @@ impl ProgressSink for TauriEventSink {
         // Best-effort emit: if the webview is gone, ignore the error.
         let _ = self.app.emit("download://progress", payload);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task-progress bridge: sync ProgressSink → async TaskContext::finish_child
+// ---------------------------------------------------------------------------
+
+/// A [`ProgressSink`] that bridges the engine's synchronous [`item_done`] hook
+/// to the async [`TaskContext::finish_child`] call, without spawning `ctx`
+/// (which is borrowed, not `'static`).
+///
+/// **Design:** `CtxProgressSink` holds the sending half of an unbounded mpsc
+/// channel.  Each [`item_done`] call sends a unit through it — the send is
+/// sync and infallible for an unbounded channel.  Callers use
+/// [`drive_with_progress`] rather than constructing this type directly;
+/// that helper ensures the sender is dropped exactly when the download future
+/// completes, closing the channel and letting the drain see `None`.
+struct CtxProgressSink {
+    tx: tokio::sync::mpsc::UnboundedSender<()>,
+}
+
+impl download::ProgressSink for CtxProgressSink {
+    fn report(&self, _update: download::ProgressUpdate) {
+        // chunk-level progress is not forwarded through TaskContext — the
+        // task://progress event only tracks per-item completion, not bytes.
+    }
+
+    fn item_done(&self, _url: &str, _success: bool) {
+        // Unbounded send is infallible; if the receiver is already dropped
+        // (shouldn't happen before downloads finish), silently swallow.
+        let _ = self.tx.send(());
+    }
+}
+
+/// Run a download future concurrently with a drain loop that calls
+/// [`TaskContext::finish_child`] once per item completion.
+///
+/// # Deadlock-free contract
+///
+/// `run` receives the [`CtxProgressSink`] **by value** and must move it into
+/// the future it returns (typically by passing it to `execute_plan_cancellable`
+/// as the `sink` argument via a local borrow inside the async block).  When
+/// `run`'s future completes, the sink — and thus the underlying
+/// `UnboundedSender` — is dropped, which closes the channel.  The drain loop
+/// then sees `recv()` → `None` and terminates, allowing `tokio::join!` to
+/// resolve without deadlock.
+///
+/// If `bridge_sink` were kept alive in the outer scope (the pre-fix pattern),
+/// the sender would not be dropped when the download finished, so
+/// `item_rx.recv()` would block forever and the `join!` would hang.
+async fn drive_with_progress<F, Fut>(ctx: &core::task_manager::TaskContext, run: F) -> Fut::Output
+where
+    F: FnOnce(CtxProgressSink) -> Fut,
+    Fut: std::future::Future,
+{
+    let (item_tx, mut item_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let sink = CtxProgressSink { tx: item_tx };
+    // `run(sink)` moves `sink` (and therefore the sender) into the returned
+    // future.  When that future finishes the sender is dropped → channel closes.
+    let dl_fut = run(sink);
+    let drain_fut = async {
+        while item_rx.recv().await.is_some() {
+            ctx.finish_child().await;
+        }
+    };
+    let (result, ()) = tokio::join!(dl_fut, drain_fut);
+    result
 }
 
 /// Execute a [`DownloadPlan`] concurrently, emitting per-chunk progress on
@@ -804,10 +871,49 @@ async fn launch_instance(
         ));
     }
 
-    // --- 5. Ensure Java (reuse from installer step if forge/neoforge). ---
+    // --- 5. Resolve effective Java config + ensure Java binary. ---
+    // Load settings once here; reused at step 8 for offline_mode (avoids a
+    // second settings::load call). `effective` captures per-instance overrides
+    // (RAM, extra args, optional java_path) resolved against global defaults.
+    let app_settings = settings::load(&app).unwrap_or_default();
+    let effective = core::java_resolve::resolve_effective_java(&inst, &app_settings);
+
+    // Java binary selection:
+    //   - If the forge/neoforge installer already provisioned a JRE, reuse it
+    //     (the installer itself needed a real provisioned JRE, so we keep it).
+    //   - Else if the user supplied an explicit path override, use it directly
+    //     and skip the ensure_java provisioning step.
+    //   - Else fall through to ensure_java (auto-provision Temurin as before).
     let java_inst = match java_inst_opt {
         Some(j) => j,
-        None => core::java::ensure_java(&app, launch_meta.java_major).await?,
+        None => {
+            if effective.java_path.is_some() {
+                // Path override set — no provisioning needed.
+                // Construct a minimal JavaInstallation so the path is available;
+                // it is only used for `.path` (checked by grep in CLAUDE.md).
+                core::java::JavaInstallation {
+                    path: effective.java_path.clone().unwrap(),
+                    major: launch_meta.java_major,
+                    source: core::java::JavaSource::Detected,
+                }
+            } else if app_settings.auto_download_java {
+                core::java::ensure_java(&app, launch_meta.java_major).await?
+            } else {
+                // auto_download_java is disabled — attempt detection only.
+                let os = core::java::TargetOs::current();
+                let data_dir = core::store::data_dir(&app).unwrap_or_default();
+                let candidates = core::java::default_candidates(os, &data_dir);
+                let cache_java = core::store::cache_java_dir(&app).ok();
+                let cache_prefix = cache_java.as_deref();
+                core::java::detect(launch_meta.java_major, &candidates, os, cache_prefix)
+                    .ok_or_else(|| {
+                        "No Java found and auto-download is disabled. \
+                        Set a Java path in the instance's Java tab or enable \
+                        automatic Java downloads in Settings."
+                            .to_string()
+                    })?
+            }
+        }
     };
 
     // --- 6. Resolve paths. ---
@@ -832,12 +938,10 @@ async fn launch_instance(
     launch::extract_natives(&launch_meta.natives, &paths.natives_directory)?;
 
     // --- 8. Resolve launch identity. ---
-    // Load settings to check the offline-mode toggle, then delegate to the
-    // seam-injectable resolver. The MC token is never cached (CP3 decision), so
-    // the resolver always performs a full MS refresh → Xbox chain when an active
-    // account is present. Lock is held for the duration of the async call; the
-    // resolver drops no sub-locks internally — single lock site here.
-    let app_settings = settings::load(&app).unwrap_or_default();
+    // The MC token is never cached (CP3 decision), so the resolver always performs
+    // a full MS refresh → Xbox chain when an active account is present. Lock is
+    // held for the duration of the async call; the resolver drops no sub-locks
+    // internally — single lock site here. app_settings loaded at step 5.
     let http = auth::ReqwestAuthClient(reqwest::Client::new());
     let identity = {
         let mut store_guard = store_state.lock().await;
@@ -847,14 +951,17 @@ async fn launch_instance(
     };
 
     // --- 8b. Build argv. ---
-    let argv = launch::build_argv(&launch_meta, &paths, &identity)
+    let argv = launch::build_argv(&launch_meta, &paths, &identity, &effective)
         .map_err(|e| format!("argv assembly failed: {e}"))?;
 
     // --- 9. Spawn — transition `Preparing` → `Running`. The prep permit is held
     //        until spawn returns, then dropped so the next launch's prep can begin
     //        while this pack runs. Never wait on the pack's exit. ---
     let game_dir = paths.game_directory.clone();
-    let java_path = java_inst.path.clone();
+    // When a path_override is set, it wins for the launch binary (even if the
+    // installer also ran — the installer needed a provisioned JRE, but the user
+    // wants their own binary for the actual game launch).
+    let java_path = effective.java_path.clone().unwrap_or_else(|| java_inst.path.clone());
 
     // Clone the Arc so the monitor task owns its own reference.
     // State<Arc<…>> auto-derefs to Arc<…>, so &*registry_state is &Arc<…>.
@@ -1021,6 +1128,11 @@ fn unknown_provider_err(other: &str) -> ProviderCommandError {
 /// Unknown provider strings return a typed `unknown_provider` error rather than panicking.
 /// The CF key is resolved from `MODLOADER_CF_API_KEY` env or `settings.curseforge_api_key`.
 /// `project_type` selects the content class: `"mod"` (default) or `"modpack"`.
+///
+/// `loaders` is an optional multi-loader filter (e.g. `["fabric","forge"]`).
+/// `categories` carries per-provider category values already resolved by the
+/// frontend (Modrinth: slug strings; CurseForge: numeric id strings).
+/// Both default to empty (= no filter) when `None`.
 #[tauri::command]
 #[specta::specta]
 async fn search_mods(
@@ -1029,6 +1141,8 @@ async fn search_mods(
     query: String,
     mc_version: Option<String>,
     loader: Option<String>,
+    loaders: Option<Vec<String>>,
+    categories: Option<Vec<String>>,
     offset: u32,
     limit: u32,
     project_type: Option<ProjectType>,
@@ -1037,6 +1151,8 @@ async fn search_mods(
         query,
         mc_version,
         loader,
+        loaders: loaders.unwrap_or_default(),
+        categories: categories.unwrap_or_default(),
         offset,
         limit,
         project_type: project_type.unwrap_or_default(),
@@ -1099,6 +1215,314 @@ async fn get_mod_versions(
     }
 }
 
+/// Fetch rich project info (title, long description, icon) for the Info tab.
+///
+/// `provider` must be `"modrinth"` or `"curseforge"` (case-sensitive).
+/// Modrinth returns Markdown (`body_is_html: false`); CurseForge returns HTML
+/// (`body_is_html: true`). The CF key is resolved exactly like `search_mods`.
+#[tauri::command]
+#[specta::specta]
+async fn get_pack_info(
+    app: tauri::AppHandle,
+    provider: String,
+    project_id: String,
+) -> Result<PackInfo, ProviderCommandError> {
+    let http = ReqwestProviderClient(reqwest::Client::new());
+
+    match provider.as_str() {
+        "modrinth" => {
+            let p = ModrinthProvider;
+            p.get_project(&http, &project_id)
+                .await
+                .map_err(ProviderCommandError::from)
+        }
+        "curseforge" => {
+            let settings = settings::load(&app).unwrap_or_default();
+            let key = cf_api_key_from(
+                std::env::var(providers::CF_API_KEY_ENV).ok(),
+                settings.curseforge_api_key,
+                option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+            );
+            let p = CurseForgeProvider::new(key);
+            p.get_project(&http, &project_id)
+                .await
+                .map_err(ProviderCommandError::from)
+        }
+        other => Err(unknown_provider_err(other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PB-B3: refresh_pack_meta — throttled pack-meta update-check command
+// ---------------------------------------------------------------------------
+
+/// Response DTO for `refresh_pack_meta`.
+///
+/// `update_available` — whether a newer version exists (latest_version_id != file_id).
+/// `latest_version`  — human-readable version string of the newest available release.
+/// `checked`         — `true` when this call actually polled the network (24h throttle expired
+///                     or first call); `false` when the cached result was returned without I/O.
+#[derive(Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+struct PackMetaRefresh {
+    update_available: bool,
+    latest_version: Option<String>,
+    checked: bool,
+}
+
+/// Check whether a managed instance has an update available, throttled to once per 24h.
+///
+/// Behaviour (spec PB-B3):
+/// - No `source` on instance → `{ false, None, false }` (not a managed pack).
+/// - `needs_update_check` returns false (within 24h) → return cached result, `checked: false`.
+/// - Otherwise: fetch `get_pack_summary` (name/icon/author) + `get_versions` (newest [0]);
+///   store results on `source`; `save_manifest`; return `{ update_available, latest_version, checked: true }`.
+#[tauri::command]
+#[specta::specta]
+async fn refresh_pack_meta(
+    app: tauri::AppHandle,
+    slug: String,
+) -> Result<PackMetaRefresh, String> {
+    let mut inst = instances::load_manifest(&app, &slug)?;
+
+    // No source → not a managed pack.
+    let source = match inst.source.as_mut() {
+        Some(s) => s,
+        None => return Ok(PackMetaRefresh { update_available: false, latest_version: None, checked: false }),
+    };
+
+    let now = chrono::Utc::now();
+
+    // Within 24h: return cached result, no network.
+    if !needs_update_check(source.last_update_check.as_deref(), now) {
+        let update_available = matches!(
+            (source.latest_version_id.as_deref(), &source.file_id),
+            (Some(lv_id), fid) if lv_id != fid.as_str()
+        );
+        return Ok(PackMetaRefresh {
+            update_available,
+            latest_version: source.latest_version.clone(),
+            checked: false,
+        });
+    }
+
+    // Resolve CF key once.
+    let settings = settings::load(&app).unwrap_or_default();
+    let cf_key = cf_api_key_from(
+        std::env::var(providers::CF_API_KEY_ENV).ok(),
+        settings.curseforge_api_key,
+        option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+    );
+
+    let http = ReqwestProviderClient(reqwest::Client::new());
+    let project_id = source.project_id.clone();
+    let file_id = source.file_id.clone();
+    let provider_str = source.provider.clone();
+
+    // Fetch pack summary (name + icon + author) and version list.
+    let (summary_result, versions_result): (
+        Result<PackSummary, ProviderError>,
+        Result<Vec<core::providers::ProjectVersion>, ProviderError>,
+    ) = match provider_str.as_str() {
+        "modrinth" => {
+            let p = ModrinthProvider;
+            let s = p.get_pack_summary(&http, &project_id).await;
+            let v = p.get_versions(&http, &project_id, None, None).await;
+            (s, v)
+        }
+        "curseforge" | "curseForge" => {
+            let p = CurseForgeProvider::new(cf_key);
+            let s = p.get_pack_summary(&http, &project_id).await;
+            let v = p.get_versions(&http, &project_id, None, None).await;
+            (s, v)
+        }
+        other => {
+            return Err(format!("Unknown provider: '{other}'"));
+        }
+    };
+
+    // Apply summary fields (best-effort: log but don't fail if summary errs).
+    if let Ok(summary) = summary_result {
+        let source = inst.source.as_mut().unwrap();
+        source.icon_url = summary.icon_url;
+        source.author = summary.author;
+    }
+
+    // Apply version check (best-effort).
+    let (latest_version, latest_version_id) = match versions_result {
+        Ok(versions) if !versions.is_empty() => {
+            let newest = &versions[0];
+            (Some(newest.version_number.clone()), Some(newest.id.clone()))
+        }
+        _ => (None, None),
+    };
+
+    {
+        let source = inst.source.as_mut().unwrap();
+        source.latest_version = latest_version.clone();
+        source.latest_version_id = latest_version_id.clone();
+        source.last_update_check = Some(now.to_rfc3339());
+    }
+
+    instances::save_manifest(&app, &slug, &inst)?;
+
+    let update_available = matches!(
+        (latest_version_id.as_deref(), file_id.as_str()),
+        (Some(lv_id), fid) if lv_id != fid
+    );
+
+    Ok(PackMetaRefresh {
+        update_available,
+        latest_version,
+        checked: true,
+    })
+}
+
+/// Collect the project ids of mods lacking a `name`, grouped by provider.
+///
+/// Returns `(modrinth_ids, cf_ids)` both deduplicated. Used by
+/// `enrich_instance_mods` and its tests.
+fn collect_missing_ids(mods: &[instances::ModEntry]) -> (Vec<String>, Vec<String>) {
+    let mut modrinth_ids: Vec<String> = Vec::new();
+    let mut cf_ids: Vec<String> = Vec::new();
+    for m in mods {
+        if m.name.is_none() {
+            match m.provider.as_str() {
+                "modrinth" => {
+                    if !modrinth_ids.contains(&m.project_id) {
+                        modrinth_ids.push(m.project_id.clone());
+                    }
+                }
+                // ModEntry.provider stores the lowercase `provider_kind_str` form
+                // ("curseforge"), NOT the camelCase ProviderKind DTO casing.
+                "curseforge" => {
+                    if !cf_ids.contains(&m.project_id) {
+                        cf_ids.push(m.project_id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (modrinth_ids, cf_ids)
+}
+
+/// Apply a `project_id → ModBrief` map to a mutable slice of `ModEntry`s.
+///
+/// Fills `name`, `icon_url`, and `summary` on any entry where `name.is_none()`
+/// and the entry's `project_id` is present in `brief_map`.
+/// Returns the count of entries that were updated.
+fn apply_briefs(
+    mods: &mut Vec<instances::ModEntry>,
+    brief_map: &std::collections::HashMap<String, core::providers::ModBrief>,
+) -> u32 {
+    let mut enriched = 0u32;
+    for m in mods.iter_mut() {
+        if m.name.is_none() {
+            if let Some(brief) = brief_map.get(&m.project_id) {
+                m.name = Some(brief.name.clone());
+                m.icon_url = brief.icon_url.clone();
+                m.summary = Some(brief.summary.clone());
+                enriched += 1;
+            }
+        }
+    }
+    enriched
+}
+
+/// Back-fill metadata (`name`, `icon_url`, `summary`) for modpack-imported mods that
+/// were added without display metadata (only search-added mods capture it at add-time).
+///
+/// ## Frugality contract
+/// - If all mods already have `name` set → returns `Ok(0)` with **zero** network calls.
+/// - Otherwise issues **exactly one** batched call per provider with missing entries.
+/// - Persists enriched metadata to the manifest so subsequent calls skip already-filled entries.
+///
+/// ## Returns
+/// The count of `ModEntry`s that were actually enriched.
+#[tauri::command]
+#[specta::specta]
+async fn enrich_instance_mods(
+    app: tauri::AppHandle,
+    slug: String,
+) -> Result<u32, String> {
+    use std::collections::HashMap;
+
+    // 1. Load manifest.
+    let mut inst = instances::get(&app, &slug)
+        .map_err(|e| e.to_string())?
+        .instance;
+
+    // 2. Collect mods where name is None, grouped by provider.
+    let (modrinth_ids, cf_ids) = collect_missing_ids(&inst.mods);
+
+    // Idempotent fast path: nothing needs enriching.
+    if modrinth_ids.is_empty() && cf_ids.is_empty() {
+        log::info!("enrich: instance {slug} — 0 mods enriched (0 provider calls)");
+        return Ok(0);
+    }
+
+    let http = ReqwestProviderClient(reqwest::Client::new());
+    let mut brief_map: HashMap<String, core::providers::ModBrief> = HashMap::new();
+    let mut calls = 0u32;
+
+    // 3a. Modrinth batch.
+    if !modrinth_ids.is_empty() {
+        let p = ModrinthProvider;
+        let briefs = p
+            .get_projects_brief(&http, &modrinth_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        calls += 1;
+        for b in briefs {
+            brief_map.insert(b.project_id.clone(), b);
+        }
+    }
+
+    // 3b. CurseForge batch.
+    if !cf_ids.is_empty() {
+        let settings = settings::load(&app).unwrap_or_default();
+        let key = cf_api_key_from(
+            std::env::var(providers::CF_API_KEY_ENV).ok(),
+            settings.curseforge_api_key,
+            option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+        );
+        let p = CurseForgeProvider::new(key);
+        let briefs = p
+            .get_projects_brief(&http, &cf_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        calls += 1;
+        for b in briefs {
+            brief_map.insert(b.project_id.clone(), b);
+        }
+    }
+
+    // 4. Populate metadata on each ModEntry that is still missing name.
+    let enriched = apply_briefs(&mut inst.mods, &brief_map);
+
+    // 5. Save manifest.
+    instances::save_manifest(&app, &slug, &inst).map_err(|e| e.to_string())?;
+
+    log::info!(
+        "enrich: instance {slug} — {enriched} mods enriched ({calls} provider calls)"
+    );
+    Ok(enriched)
+}
+
+/// Display metadata captured at add-time from the search `ProjectSummary`.
+///
+/// Passed as a single struct to `add_mod` to stay within specta's 10-arg limit.
+/// The frontend passes the `ProjectSummary`'s `name`, `icon_url`, and `description`
+/// fields. All are `None` for callers that don't have this data (e.g. tests).
+#[derive(Debug, Clone, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ModMetadata {
+    pub name: Option<String>,
+    pub icon_url: Option<String>,
+    pub summary: Option<String>,
+}
+
 /// Install a mod (and its required transitive dependencies) into an instance.
 ///
 /// # Flow
@@ -1128,6 +1552,9 @@ async fn add_mod(
     slug: String,
     mc_version: String,
     loader: String,
+    // Display metadata from the search result. Stored on the root mod entry only;
+    // dependency entries always get None. Pass None fields when not available.
+    meta: ModMetadata,
 ) -> Result<u64, String> {
     // Validate provider string early so a bad caller gets a synchronous error.
     match provider.as_str() {
@@ -1159,6 +1586,9 @@ async fn add_mod(
             slug,
             mc_version,
             loader,
+            name: meta.name,
+            icon_url: meta.icon_url,
+            summary: meta.summary,
         }),
     }).await;
 
@@ -1216,6 +1646,51 @@ fn remove_mod(app: tauri::AppHandle, slug: String, file_name: String) -> Result<
 #[specta::specta]
 fn set_pack_lock(app: tauri::AppHandle, slug: String, locked: bool) -> Result<(), String> {
     instances::set_pack_lock(&app, &slug, locked)
+}
+
+// ---------------------------------------------------------------------------
+// D-3: Java tab — set per-instance Java config + validate a Java path
+// ---------------------------------------------------------------------------
+
+/// Persist a `JavaCfg` override to an instance's manifest.
+///
+/// When `cfg.use_pack_settings` is `true` the launcher uses this instance's own
+/// Java/memory settings at launch; when `false` it falls back to the global
+/// default from `Settings`. Resolution is handled by `resolve_effective_java`
+/// (WS-A) — this command only persists the user's choice.
+#[tauri::command]
+#[specta::specta]
+fn set_instance_java(
+    app: tauri::AppHandle,
+    slug: String,
+    java: crate::core::instances::JavaCfg,
+) -> Result<(), String> {
+    instances::set_instance_java(&app, &slug, java)
+}
+
+/// Probe a Java binary by running `<path> -version` and parsing its stderr.
+///
+/// Returns a [`JavaProbe`] with the major version and full version string on
+/// success, or a human-readable `Err` when the binary cannot be spawned or its
+/// output doesn't contain a recognisable `java version "…"` line.
+#[tauri::command]
+#[specta::specta]
+async fn validate_java_path(path: String) -> Result<crate::core::java::JavaProbe, String> {
+    use tokio::process::Command;
+
+    let output = Command::new(&path)
+        .arg("-version")
+        .output()
+        .await
+        .map_err(|e| format!("failed to spawn '{path}': {e}"))?;
+
+    // `java -version` writes to stderr on all JVM vendors.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let (major, version) = crate::core::java::parse_java_version_output(&stderr)
+        .ok_or_else(|| format!("could not parse java version from output of '{path}'"))?;
+
+    Ok(crate::core::java::JavaProbe { major, version })
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,6 +1764,10 @@ struct ModAddJob {
     slug: String,
     mc_version: String,
     loader: String,
+    /// Metadata from the search result; set on the root entry only (not deps).
+    name: Option<String>,
+    icon_url: Option<String>,
+    summary: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -1361,6 +1840,13 @@ impl TaskJob for ModAddJob {
             other => { ctx.finish_failed(format!("unknown provider: {other}")).await; return; }
         };
 
+        log::info!(
+            "mod: ModAddJob plan resolved — {} to download, {} manual, {} unresolved",
+            plan.downloads.len(),
+            plan.manual.len(),
+            plan.unresolved.len()
+        );
+
         // Validate + partition download items.
         let (valid_downloads, invalid_downloads) = partition_by_file_name(plan.downloads.clone());
 
@@ -1403,13 +1889,9 @@ impl TaskJob for ModAddJob {
             }
         };
 
-        let dl_result = execute_plan_cancellable(
-            &http_client,
-            &staged_plan,
-            &core::download::NoOpSink,
-            8,
-            ctx.cancel_token(),
-        ).await;
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 8, ctx.cancel_token()).await
+        }).await;
 
         if dl_result.cancelled || ctx.is_cancelled() {
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -1432,7 +1914,18 @@ impl TaskJob for ModAddJob {
             PlanResult { outcomes }
         };
 
-        let (added, mut dl_failed) = attribute_outcomes(&valid_downloads, &plan_result);
+        let (mut added, mut dl_failed) = attribute_outcomes(&valid_downloads, &plan_result);
+
+        // Stamp display metadata onto the root added entry (the one whose project_id
+        // matches the command's project_id). Dependency entries intentionally keep None.
+        for entry in added.iter_mut() {
+            if entry.project_id == self.project_id {
+                entry.name = self.name.clone();
+                entry.icon_url = self.icon_url.clone();
+                entry.summary = self.summary.clone();
+                break;
+            }
+        }
 
         // --- APPLY ---
         ctx.enter_applying().await;
@@ -1461,14 +1954,42 @@ impl TaskJob for ModAddJob {
         };
         result.failed.append(&mut dl_failed);
 
+        for f in &result.failed {
+            log::warn!("mod add: failed {} — {}", f.file_name, f.error);
+        }
+        for m in &result.manual {
+            log::warn!(
+                "mod add: manual download required {} — {}",
+                m.file_name,
+                m.page_url
+            );
+        }
         log::info!(
             "mod: ModAddJob done task_id={task_id} — added={} failed={} manual={}",
             result.added.len(), result.failed.len(), result.manual.len()
         );
 
-        match serde_json::to_value(&result) {
-            Ok(v) => ctx.finish_done_with_result(v).await,
-            Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+        // F1-1: honest terminal status.
+        match mod_install_outcome(result.added.len(), result.failed.len(), result.manual.len()) {
+            ModInstallOutcome::Failed(_base_msg) => {
+                // Build a detail message: count + first failure reason.
+                let count = result.failed.len();
+                let first_detail = result.failed.first().map(|f| {
+                    format!(" ({})", f.error)
+                }).unwrap_or_default();
+                let msg = if count == 1 {
+                    format!("1 file failed to download{first_detail}")
+                } else {
+                    format!("{count} files failed to download{first_detail}")
+                };
+                ctx.finish_failed(msg).await;
+            }
+            ModInstallOutcome::Done => {
+                match serde_json::to_value(&result) {
+                    Ok(v) => ctx.finish_done_with_result(v).await,
+                    Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                }
+            }
         }
     }
 }
@@ -1660,13 +2181,9 @@ impl TaskJob for ModUpdateJob {
             }
         };
 
-        let dl_result = execute_plan_cancellable(
-            &http_client,
-            &staged_plan,
-            &core::download::NoOpSink,
-            1,
-            ctx.cancel_token(),
-        ).await;
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 1, ctx.cancel_token()).await
+        }).await;
 
         if dl_result.cancelled || ctx.is_cancelled() {
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -1688,11 +2205,8 @@ impl TaskJob for ModUpdateJob {
                 }
             }).unwrap_or_else(|| "download failed: no outcome recorded".to_string());
             log::warn!("mod-update: project_id={} download failed — {err}", self.project_id);
-            let result = UpdateModResult { status: "failed".to_string(), entry: None, page_url: None, error: Some(err) };
-            match serde_json::to_value(&result) {
-                Ok(v) => ctx.finish_done_with_result(v).await,
-                Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
-            }
+            // F1-1: a download failure with nothing updated is a hard fail — report red.
+            ctx.finish_failed(format!("mod update download failed: {err}")).await;
             return;
         }
 
@@ -1786,6 +2300,53 @@ fn tally_cancellable(
         }
     }
     (installed, failed, failed_files)
+}
+
+// ---------------------------------------------------------------------------
+// F1-1: Honest terminal-status decision helper
+// ---------------------------------------------------------------------------
+
+/// Outcome of a mod-install/pack-import job after tallying `added`, `failed`, and `manual`.
+///
+/// This is a pure, unit-testable decision — it has no AppHandle dependency and
+/// can be called from any job impl. The `run()` body maps this to the appropriate
+/// `ctx.finish_*` call.
+///
+/// Decision contract (locked 2026-06-19, see `docs/spec/download-feedback.md` D-F1):
+/// - **Hard fail**: `added == 0 && failed > 0` → `Failed(msg)` (real errors, nothing installed).
+/// - **All-manual**: `added == 0 && failed == 0 && manual > 0` → `Done` (structured result
+///   must reach the frontend so the toast can offer "Open page"). Amber, not red.
+/// - **Partial or clean success**: `added > 0` → `Done` (some or all installs succeeded).
+pub(crate) enum ModInstallOutcome {
+    Done,
+    Failed(String),
+}
+
+/// Compute the terminal-status outcome for a mod-add / pack-import job.
+///
+/// `added_len`   — number of successfully installed mods/files
+/// `failed_len`  — number of download/resolve failures
+/// `manual_len`  — number of distribution-disabled files (manual download required)
+///
+/// See [`ModInstallOutcome`] for the decision contract.
+pub(crate) fn mod_install_outcome(
+    added_len: usize,
+    failed_len: usize,
+    manual_len: usize,
+) -> ModInstallOutcome {
+    if added_len == 0 && failed_len > 0 {
+        // Build a concise message: count + contextual hint.
+        let msg = if failed_len == 1 {
+            "1 file failed to download".to_string()
+        } else {
+            format!("{failed_len} files failed to download")
+        };
+        ModInstallOutcome::Failed(msg)
+    } else {
+        // Covers: all-manual (added==0, failed==0, manual>0) and partial/clean success.
+        let _ = manual_len; // manual list stays in the result payload, not in the outcome
+        ModInstallOutcome::Done
+    }
 }
 
 /// Build a [`ChildItem`] list from plan items (basename of each dest path).
@@ -1923,14 +2484,9 @@ impl TaskJob for ImportMrpackJob {
             }
         };
 
-        let dl_result = execute_plan_cancellable(
-            &http_client,
-            &staged_plan,
-            &core::download::NoOpSink,
-            8,
-            ctx.cancel_token(),
-        )
-        .await;
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 8, ctx.cancel_token()).await
+        }).await;
 
         if dl_result.cancelled || ctx.is_cancelled() {
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -1972,6 +2528,8 @@ impl TaskJob for ImportMrpackJob {
                 if let Some(src) = self.pack_source {
                     instance.source = Some(src);
                 }
+                // LB-1: instances created from a modpack start locked.
+                instance.pack_locked = true;
                 match instances::save_manifest(&self.app, &inst.slug, &instance) {
                     Ok(_) => Ok(MrpackImportResult {
                         slug: inst.slug,
@@ -1993,9 +2551,22 @@ impl TaskJob for ImportMrpackJob {
                     "modpack: ImportMrpackJob done — slug='{}' installed={} failed={}",
                     r.slug, r.installed, r.failed
                 );
-                match serde_json::to_value(&r) {
-                    Ok(v) => ctx.finish_done_with_result(v).await,
-                    Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                // F1-1: no `manual` for mrpack; hard-fail when nothing installed and errors exist.
+                match mod_install_outcome(r.installed as usize, r.failed as usize, 0) {
+                    ModInstallOutcome::Failed(_) => {
+                        let msg = if r.failed == 1 {
+                            format!("1 file failed to download; pack may be incomplete")
+                        } else {
+                            format!("{} files failed to download; pack may be incomplete", r.failed)
+                        };
+                        ctx.finish_failed(msg).await;
+                    }
+                    ModInstallOutcome::Done => {
+                        match serde_json::to_value(&r) {
+                            Ok(v) => ctx.finish_done_with_result(v).await,
+                            Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                        }
+                    }
                 }
             }
             Err(e) => ctx.finish_failed(e).await,
@@ -2199,14 +2770,9 @@ impl TaskJob for ImportCfZipJob {
             }
         };
 
-        let dl_result = execute_plan_cancellable(
-            &http_client,
-            &staged_plan,
-            &core::download::NoOpSink,
-            8,
-            ctx.cancel_token(),
-        )
-        .await;
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 8, ctx.cancel_token()).await
+        }).await;
 
         if dl_result.cancelled || ctx.is_cancelled() {
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -2246,6 +2812,8 @@ impl TaskJob for ImportCfZipJob {
                 if let Some(src) = self.pack_source {
                     instance.source = Some(src);
                 }
+                // LB-1: instances created from a modpack start locked.
+                instance.pack_locked = true;
                 match instances::save_manifest(&self.app, &inst.slug, &instance) {
                     Ok(_) => Ok(CfImportResult {
                         slug: inst.slug,
@@ -2266,9 +2834,23 @@ impl TaskJob for ImportCfZipJob {
                     "modpack: ImportCfZipJob done — slug='{}' installed={} failed={}",
                     r.slug, r.installed, r.failed
                 );
-                match serde_json::to_value(&r) {
-                    Ok(v) => ctx.finish_done_with_result(v).await,
-                    Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                // F1-1: all-manual (installed==0, failed==0, manual>0) stays Done so the
+                // structured manual list reaches the frontend toast. Hard-fail otherwise.
+                match mod_install_outcome(r.installed as usize, r.failed as usize, r.manual.len()) {
+                    ModInstallOutcome::Failed(_) => {
+                        let msg = if r.failed == 1 {
+                            format!("1 file failed to download; pack may be incomplete")
+                        } else {
+                            format!("{} files failed to download; pack may be incomplete", r.failed)
+                        };
+                        ctx.finish_failed(msg).await;
+                    }
+                    ModInstallOutcome::Done => {
+                        match serde_json::to_value(&r) {
+                            Ok(v) => ctx.finish_done_with_result(v).await,
+                            Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                        }
+                    }
                 }
             }
             Err(e) => ctx.finish_failed(e).await,
@@ -2461,6 +3043,15 @@ async fn install_modpack(
         project_id: project_id.clone(),
         file_id: resolved.version_id.clone(),
         pack_version: resolved.version_name.clone(),
+        recommended: None,
+        // Capture the page URL passed by the browse frontend so AM-F3 can
+        // surface "Open project page" without a re-fetch.
+        page_url: page_url.clone(),
+        icon_url: None,
+        author: None,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
     };
     let name_override: Option<String> = if resolved.version_name.is_empty() {
         None
@@ -2633,14 +3224,9 @@ impl TaskJob for UpdateModpackJob {
             }
         };
 
-        let dl_result = execute_plan_cancellable(
-            &http_client,
-            &staged_plan,
-            &core::download::NoOpSink,
-            8,
-            ctx.cancel_token(),
-        )
-        .await;
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 8, ctx.cancel_token()).await
+        }).await;
 
         if dl_result.cancelled || ctx.is_cancelled() {
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -2648,7 +3234,7 @@ impl TaskJob for UpdateModpackJob {
             return;
         }
 
-        let (_, dl_failed, _) = tally_cancellable(&dl_result.outcomes);
+        let (dl_installed, dl_failed, _) = tally_cancellable(&dl_result.outcomes);
         let download_failed = resolve_failed_count + dl_failed;
 
         // --- APPLY ---
@@ -2701,9 +3287,24 @@ impl TaskJob for UpdateModpackJob {
             result.added, result.removed, result.kept, result.failed
         );
 
-        match serde_json::to_value(&result) {
-            Ok(v) => ctx.finish_done_with_result(v).await,
-            Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+        // F1-1: use download-level installed count (not plan-level added_count) for the
+        // terminal-status decision — added_count can be 0 on a valid "remove-only" update.
+        // Hard-fail only when NO download succeeded AND there were failures.
+        match mod_install_outcome(dl_installed as usize, download_failed as usize, result.manual.len()) {
+            ModInstallOutcome::Failed(_) => {
+                let msg = if download_failed == 1 {
+                    format!("1 file failed to download; pack update may be incomplete")
+                } else {
+                    format!("{download_failed} files failed to download; pack update may be incomplete")
+                };
+                ctx.finish_failed(msg).await;
+            }
+            ModInstallOutcome::Done => {
+                match serde_json::to_value(&result) {
+                    Ok(v) => ctx.finish_done_with_result(v).await,
+                    Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                }
+            }
         }
     }
 }
@@ -2891,15 +3492,20 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             logout,
             search_mods,
             get_mod_versions,
+            get_pack_info,
+            enrich_instance_mods,
             add_mod,
             set_mod_enabled,
             remove_mod,
             update_mod,
             set_pack_lock,
+            set_instance_java,
+            validate_java_path,
             import_mrpack,
             import_curseforge_zip,
             install_modpack,
             update_modpack,
+            refresh_pack_meta,
         ])
         .events(collect_events![
             DeviceCodePayload,
@@ -2982,6 +3588,20 @@ pub fn run() {
             // Mount typed event registry so Event::listen / Event::emit resolve
             // channel names at runtime (required when collect_events! is used).
             builder_for_setup.mount_events(app);
+
+            // T7 maximize_on_start: load settings and maximize the main window
+            // when the flag is true (default true — preserves existing behavior).
+            // `"maximized": true` has been removed from tauri.conf.json; this is
+            // the dynamic replacement.
+            let setup_settings = settings::load(app.handle()).unwrap_or_default();
+            if setup_settings.maximize_on_start {
+                if let Some(win) = app.get_webview_window("main") {
+                    if let Err(e) = win.maximize() {
+                        log::warn!("setup: could not maximize main window: {e}");
+                    }
+                }
+            }
+
             // Initialize the account store now that the AppHandle is available,
             // so the real on-disk path can be resolved.
             //

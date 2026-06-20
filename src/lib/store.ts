@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import type {
   Task,
   TaskProgressPayload,
@@ -103,3 +104,30 @@ export const useAppStore = create<AppStore>()((set) => ({
       return { runLogs: next };
     }),
 }));
+
+// ---------------------------------------------------------------------------
+// UI store — persisted to localStorage (key: "apex-ui")
+// Only UI preferences live here. The Map-based AppStore above is NOT persisted
+// (Maps don't serialize cleanly with JSON storage).
+// ---------------------------------------------------------------------------
+
+interface UiState {
+  sidebarCollapsed: boolean;
+  toggleSidebar: () => void;
+  setSidebarCollapsed: (v: boolean) => void;
+  browseProvider: "curseforge" | "modrinth";
+  setBrowseProvider: (p: "curseforge" | "modrinth") => void;
+}
+
+export const useUiStore = create<UiState>()(
+  persist(
+    (set) => ({
+      sidebarCollapsed: false,
+      toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+      setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
+      browseProvider: "curseforge",
+      setBrowseProvider: (p) => set({ browseProvider: p }),
+    }),
+    { name: "apex-ui" },
+  ),
+);

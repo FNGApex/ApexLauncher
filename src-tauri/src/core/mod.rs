@@ -10,6 +10,7 @@
 //! - `download`  — concurrent, hash-verified download engine (Phase 2).
 //! - `resolver`  — vanilla manifest fetch + parse, DownloadPlan + LaunchMeta (Phase 2 slice B).
 //! - `java`      — system JRE detection + Adoptium provisioning (Phase 2 slice C).
+//! - `java_resolve` — pure helper: resolve effective Java/RAM config for a launch (WS-A A-2).
 //! - `auth`      — Microsoft OAuth 2.0 device-code authentication + token chain (Phase 3).
 //! - `loader_profile` — Fabric/Quilt loader profile fetch + parse (Phase 4 slice A).
 //! - `forge_installer` — NeoForge/Forge headless installer runner (Phase 4 slice B).
@@ -25,6 +26,7 @@ pub mod download;
 pub mod forge_installer;
 pub mod instances;
 pub mod java;
+pub mod java_resolve;
 pub mod launch;
 pub mod loader_profile;
 pub mod loaders;

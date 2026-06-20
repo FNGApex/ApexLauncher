@@ -208,7 +208,10 @@ impl std::fmt::Display for AssembleError {
 
 /// Build the full JVM argv for the given `LaunchMeta` + resolved paths + identity.
 ///
-/// Returns `[<substituted jvm_args>, main_class, <substituted game_args>]`.
+/// Returns `[-Xmx, <-Xms if set>, <extra_args>, <substituted jvm_args>, main_class, <substituted game_args>]`.
+///
+/// The heap and extra args from `effective` are emitted literally (no `${...}` substitution)
+/// and precede the manifest jvm_args so heap/GC settings lead the argument list.
 ///
 /// Any `${...}` placeholder not in the substitution table causes an
 /// [`AssembleError::UnsubstitutedPlaceholders`] rather than passing raw text
@@ -216,7 +219,7 @@ impl std::fmt::Display for AssembleError {
 ///
 /// When `launch.jvm_args` is empty (legacy manifests), a minimal set of
 /// default JVM args is prepended so the JVM can start.
-pub fn build_argv(launch: &LaunchMeta, paths: &LaunchPaths, identity: &LaunchIdentity) -> Result<Vec<String>, AssembleError> {
+pub fn build_argv(launch: &LaunchMeta, paths: &LaunchPaths, identity: &LaunchIdentity, effective: &crate::core::java_resolve::EffectiveJava) -> Result<Vec<String>, AssembleError> {
     let classpath = build_classpath(&launch.classpath);
 
     // Choose the asset root: legacy branch points at the virtual tree.
@@ -272,6 +275,14 @@ pub fn build_argv(launch: &LaunchMeta, paths: &LaunchPaths, identity: &LaunchIde
 
     let mut argv: Vec<String> = Vec::new();
     let mut unresolved: Vec<String> = Vec::new();
+
+    // Emit heap + extra args from effective config (literal, no ${} substitution).
+    // These lead the JVM argv so heap/GC flags take precedence over manifest defaults.
+    argv.push(format!("-Xmx{}M", effective.xmx_mb));
+    if let Some(xms) = effective.xms_mb {
+        argv.push(format!("-Xms{}M", xms));
+    }
+    argv.extend(effective.extra_args.iter().cloned());
 
     // Substitute + collect jvm_args.
     for arg in &jvm_args_filtered {

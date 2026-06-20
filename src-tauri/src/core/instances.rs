@@ -34,7 +34,28 @@ pub struct Loader {
 pub struct JavaCfg {
     pub major: Option<u32>,
     pub args_override: Option<String>,
+    /// Max heap (`-Xmx`). Also used as the instance's global-default value at create time.
     pub memory_mb: u32,
+    /// Min heap (`-Xms`). `None` = omit `-Xms` entirely (§8 Q5).
+    #[serde(default)]
+    pub min_memory_mb: Option<u32>,
+    /// Custom java binary path. `None` = auto-provision via `ensure_java(major)`.
+    #[serde(default)]
+    pub path_override: Option<String>,
+    /// When `true`, this instance's saved Java/RAM override is used; when `false`,
+    /// the global default from `Settings` is used. Old manifests load as `false`.
+    #[serde(default)]
+    pub use_pack_settings: bool,
+}
+
+/// Pack-recommended Java/memory hint embedded in the instance source.
+/// All fields are optional so a partial recommendation is valid.
+/// Currently always `None` — providers don't expose it yet (design §5).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RecommendedJava {
+    pub memory_mb: Option<u32>,
+    pub java_args: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
@@ -44,6 +65,30 @@ pub struct Source {
     pub project_id: String,
     pub file_id: String,
     pub pack_version: String,
+    /// Pack-recommended Java/RAM hint. Always `None` today — plumbing only.
+    #[serde(default)]
+    pub recommended: Option<RecommendedJava>,
+    /// Provider project page URL, captured at install-time from the browse/install
+    /// flow. `None` for instances imported via file drop or old manifests.
+    /// Used by AM-F3 "Open project page" button.
+    #[serde(default)]
+    pub page_url: Option<String>,
+    /// Pack icon URL, populated by `refresh_pack_meta`. `None` until first refresh.
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    /// Pack author (CF: first/joined author name; Modrinth: owner username).
+    /// Populated by `refresh_pack_meta`. `None` until first refresh.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// RFC3339 timestamp of the last successful update-check. `None` if never checked.
+    #[serde(default)]
+    pub last_update_check: Option<String>,
+    /// Newest available version number (human-readable display), from last check.
+    #[serde(default)]
+    pub latest_version: Option<String>,
+    /// Newest available version id (for the update action), from last check.
+    #[serde(default)]
+    pub latest_version_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
@@ -61,6 +106,18 @@ pub struct ModEntry {
     /// deserialize as `false` — no schema bump required.
     #[serde(default)]
     pub from_pack: bool,
+    /// Display name captured at add-time from the search result (`ProjectSummary.name`).
+    /// `None` for dependency-added mods and old manifests (no re-fetch to display).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Icon URL captured at add-time from the search result (`ProjectSummary.icon_url`).
+    /// `None` for dependency-added mods and old manifests.
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    /// Short description captured at add-time from the search result (`ProjectSummary.description`).
+    /// `None` for dependency-added mods and old manifests.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
@@ -165,6 +222,9 @@ pub fn create(app: &AppHandle, req: CreateInstanceReq) -> Result<Instance, Strin
             major: None,
             args_override: None,
             memory_mb: default_memory_mb,
+            min_memory_mb: None,
+            path_override: None,
+            use_pack_settings: false,
         },
         source: None,
         pack_locked: false,
@@ -393,6 +453,29 @@ pub fn validate_mod_file_name(name: &str) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Java settings operations (D-3)
+// ---------------------------------------------------------------------------
+
+/// Persist `java = cfg` to the manifest at `manifest_path`.
+///
+/// Pure-path helper; call via [`set_instance_java`] for normal use.
+pub fn set_instance_java_on_disk(manifest_path: &Path, cfg: JavaCfg) -> Result<(), String> {
+    let mut inst = read_manifest(manifest_path)?;
+    inst.java = cfg;
+    write_manifest(manifest_path, &inst)
+}
+
+/// AppHandle-aware wrapper for [`set_instance_java_on_disk`].
+pub fn set_instance_java(app: &AppHandle, slug: &str, cfg: JavaCfg) -> Result<(), String> {
+    let slug = validate_slug(slug)?;
+    let path = store::instances_dir(app)?.join(&slug).join("instance.json");
+    if !path.is_file() {
+        return Err(format!("Instance '{slug}' not found"));
+    }
+    set_instance_java_on_disk(&path, cfg)
+}
+
+// ---------------------------------------------------------------------------
 // Pack Lock operations (D4)
 // ---------------------------------------------------------------------------
 
@@ -549,6 +632,31 @@ pub fn remove_mod(app: &AppHandle, slug: &str, file_name: &str) -> Result<(), St
     let mods_dir = inst_dir.join("mc").join("mods");
     let manifest_path = inst_dir.join("instance.json");
     remove_mod_from_disk(&mods_dir, &manifest_path, &file_name)
+}
+
+// ---------------------------------------------------------------------------
+// Update-check throttle helper (PB-B1)
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when the instance should poll the provider for an update.
+///
+/// Rules (spec PB-B1):
+/// - `last` is `None` → never checked → `true`.
+/// - `last` fails RFC3339 parse → treat as corrupt / never checked → `true`.
+/// - `now - last > 24h` → stale → `true`.
+/// - `now - last <= 24h` → fresh → `false`.
+///
+/// `now` is injected so callers in tests can supply a deterministic clock.
+pub fn needs_update_check(last: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let Some(s) = last else {
+        return true;
+    };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(s) else {
+        return true;
+    };
+    let last_utc: chrono::DateTime<chrono::Utc> = parsed.into();
+    let elapsed = now.signed_duration_since(last_utc);
+    elapsed > chrono::Duration::hours(24)
 }
 
 // ---------------------------------------------------------------------------

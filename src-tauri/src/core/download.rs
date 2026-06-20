@@ -117,6 +117,15 @@ pub struct ProgressUpdate {
 /// progress) and the Tauri-event sink added in CP-4.
 pub trait ProgressSink: Send + Sync {
     fn report(&self, update: ProgressUpdate);
+
+    /// Called exactly once per plan item when the engine finalises that item's
+    /// outcome — whether it succeeded, failed, was skipped (already on disk),
+    /// or was cancelled before acquiring a permit.
+    ///
+    /// `success` is `true` for `Ok` and `Skipped`; `false` for `Failed` and
+    /// `Cancelled`.  The default body is a no-op so existing implementations
+    /// (`NoOpSink`, `CapturingSink`, `TauriEventSink`) compile without change.
+    fn item_done(&self, _url: &str, _success: bool) {}
 }
 
 /// A [`ProgressSink`] that discards all updates. Zero overhead.
@@ -146,6 +155,33 @@ impl CapturingSink {
 impl ProgressSink for CapturingSink {
     fn report(&self, update: ProgressUpdate) {
         self.updates.lock().unwrap().push(update);
+    }
+}
+
+/// A [`ProgressSink`] that records every [`item_done`] call for test
+/// assertions.  Captures `(url, success)` tuples in order.
+#[cfg(test)]
+pub struct CapturingItemSink {
+    pub items: std::sync::Mutex<Vec<(String, bool)>>,
+}
+
+#[cfg(test)]
+impl CapturingItemSink {
+    pub fn new() -> Self {
+        Self {
+            items: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ProgressSink for CapturingItemSink {
+    fn report(&self, _update: ProgressUpdate) {
+        // chunk-level progress not needed for item_done tests
+    }
+
+    fn item_done(&self, url: &str, success: bool) {
+        self.items.lock().unwrap().push((url.to_owned(), success));
     }
 }
 
@@ -290,6 +326,16 @@ pub async fn download_item(
     if !needs_download(&item.dest, &item.expected_hash) {
         return Ok(());
     }
+    let name = item
+        .dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?");
+    let size_str = match item.size {
+        Some(b) => format!("{b} bytes"),
+        None => "unknown size".to_string(),
+    };
+    log::info!("download: start {name} ({size_str})");
 
     // --- Determine .part path and any existing resume offset ---
     let part_path = part_path_for(&item.dest);
@@ -673,6 +719,13 @@ pub async fn execute_plan_cancellable(
         .iter()
         .filter(|item| {
             if !needs_download(&item.dest, &item.expected_hash) {
+                let name = item
+                    .dest
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?");
+                log::info!("download: skip {name} (already present / hash match)");
+                sink.item_done(&item.url, true);
                 outcomes.push(CancellableOutcome {
                     url: item.url.clone(),
                     status: CancellableStatus::Ran(ItemStatus::Skipped),
@@ -717,18 +770,36 @@ pub async fn execute_plan_cancellable(
                 // items (already past this gate) finish normally.
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
                 if cancel.is_cancelled() {
+                    sink.item_done(&item.url, false);
                     return CancellableOutcome {
                         url: item.url.clone(),
                         status: CancellableStatus::Cancelled,
                     };
                 }
+                let item_name = item
+                    .dest
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_owned();
                 let status = match download_item(client, item, sink).await {
-                    Ok(()) => ItemStatus::Ok,
-                    Err(e) => ItemStatus::Failed {
-                        error: e.to_string(),
-                    },
+                    Ok(()) => {
+                        log::info!("download: ok {item_name}");
+                        ItemStatus::Ok
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "download: FAILED {item_name} — url={} error={e}",
+                            item.url
+                        );
+                        ItemStatus::Failed {
+                            error: e.to_string(),
+                        }
+                    }
                 };
                 // Permit dropped here → slot released.
+                let success = matches!(status, ItemStatus::Ok);
+                sink.item_done(&item.url, success);
                 CancellableOutcome {
                     url: item.url.clone(),
                     status: CancellableStatus::Ran(status),
@@ -739,11 +810,6 @@ pub async fn execute_plan_cancellable(
 
     // Collect all outcomes, running up to `concurrency` at a time.
     let mut downloaded: Vec<CancellableOutcome> = pending.collect().await;
-    for outcome in &downloaded {
-        if let CancellableStatus::Ran(ItemStatus::Failed { error }) = &outcome.status {
-            log::warn!("download: item failed — url={} error={error}", outcome.url);
-        }
-    }
     outcomes.append(&mut downloaded);
 
     CancellablePlanResult {

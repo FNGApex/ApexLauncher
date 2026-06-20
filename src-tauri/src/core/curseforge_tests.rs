@@ -26,6 +26,8 @@ struct CapturingMockClient {
     responses: Arc<Mutex<VecDeque<MockResp>>>,
     /// Captured (url, headers) pairs in call order.
     captured: Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>,
+    /// Captured POST bodies in call order (parallel index to `captured`; empty string for GETs).
+    captured_bodies: Arc<Mutex<Vec<String>>>,
 }
 
 impl CapturingMockClient {
@@ -33,6 +35,7 @@ impl CapturingMockClient {
         Self {
             responses: Arc::new(Mutex::new(responses.into_iter().collect())),
             captured: Arc::new(Mutex::new(Vec::new())),
+            captured_bodies: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -57,6 +60,10 @@ impl CapturingMockClient {
     async fn request_count(&self) -> usize {
         self.captured.lock().await.len()
     }
+
+    async fn captured_post_bodies(&self) -> Vec<String> {
+        self.captured_bodies.lock().await.clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -67,17 +74,36 @@ impl ProviderHttpClient for CapturingMockClient {
         headers: &[(&str, &str)],
     ) -> Result<(u16, String), reqwest::Error> {
         // Record the call.
-        {
-            let mut cap = self.captured.lock().await;
-            cap.push((
-                url.to_string(),
-                headers
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
-            ));
-        }
+        self.captured.lock().await.push((
+            url.to_string(),
+            headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        ));
+        self.captured_bodies.lock().await.push(String::new());
         // Pop next canned response.
+        let mut q = self.responses.lock().await;
+        let MockResp(s, b) = q
+            .pop_front()
+            .expect("CapturingMockClient: no more canned responses");
+        Ok((s, b))
+    }
+
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        self.captured.lock().await.push((
+            url.to_string(),
+            headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        ));
+        self.captured_bodies.lock().await.push(body);
         let mut q = self.responses.lock().await;
         let MockResp(s, b) = q
             .pop_front()
@@ -221,6 +247,8 @@ async fn search_key_absent_returns_key_missing_without_http() {
         query: "jei".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::default(),
@@ -268,6 +296,8 @@ async fn search_carries_api_key_header() {
         query: "jei".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::default(),
@@ -311,6 +341,8 @@ async fn search_maps_fixture_to_project_summaries() {
         query: "jei".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::default(),
@@ -349,6 +381,8 @@ async fn search_url_contains_gameid_classid_index_pagesize() {
         query: "jei".to_string(),
         mc_version: Some("1.20.1".to_string()),
         loader: Some("forge".to_string()),
+        loaders: vec![],
+        categories: vec![],
         offset: 20,
         limit: 10,
         project_type: ProjectType::Mod,
@@ -671,6 +705,213 @@ async fn get_file_returns_http_error_on_404() {
     );
 }
 
+// ── get_project: fixture → PackInfo ───────────────────────────────────────
+
+const CF_MOD_FIXTURE: &str = include_str!("fixtures/cf_mod_jei.json");
+const CF_MOD_DESCRIPTION_FIXTURE: &str = include_str!("fixtures/cf_mod_jei_description.json");
+
+/// URL-routing mock: returns different bodies depending on whether the URL
+/// contains "/description". This tests the two-call CF get_project flow.
+struct RoutingMockClient {
+    mod_body: String,
+    desc_body: String,
+    captured: Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>,
+}
+
+impl RoutingMockClient {
+    fn new(mod_body: impl Into<String>, desc_body: impl Into<String>) -> Self {
+        Self {
+            mod_body: mod_body.into(),
+            desc_body: desc_body.into(),
+            captured: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn captured_urls(&self) -> Vec<String> {
+        self.captured
+            .lock()
+            .await
+            .iter()
+            .map(|(url, _)| url.clone())
+            .collect()
+    }
+
+    async fn captured_headers(&self) -> Vec<Vec<(String, String)>> {
+        self.captured
+            .lock()
+            .await
+            .iter()
+            .map(|(_, headers)| headers.clone())
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderHttpClient for RoutingMockClient {
+    async fn get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<(u16, String), reqwest::Error> {
+        {
+            let mut cap = self.captured.lock().await;
+            cap.push((
+                url.to_string(),
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+        }
+        let body = if url.contains("/description") {
+            self.desc_body.clone()
+        } else {
+            self.mod_body.clone()
+        };
+        Ok((200, body))
+    }
+
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        _body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        {
+            let mut cap = self.captured.lock().await;
+            cap.push((
+                url.to_string(),
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+        }
+        // RoutingMockClient is for get_project only; POST should not be called here.
+        panic!("RoutingMockClient: unexpected POST call to {}", url);
+    }
+}
+
+#[tokio::test]
+async fn get_project_maps_fixture_to_pack_info() {
+    let client = RoutingMockClient::new(CF_MOD_FIXTURE, CF_MOD_DESCRIPTION_FIXTURE);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let info = provider.get_project(&client, "238222").await.unwrap();
+
+    assert_eq!(info.title, "Just Enough Items (JEI)");
+    assert!(
+        info.description.contains("<h1>Just Enough Items</h1>"),
+        "description should be HTML body, got: {:?}",
+        &info.description[..80.min(info.description.len())]
+    );
+    assert_eq!(
+        info.icon_url,
+        Some("https://media.forgecdn.net/avatars/29/69/636346904411966716.png".to_string())
+    );
+    assert!(info.body_is_html, "CurseForge body is HTML");
+}
+
+#[tokio::test]
+async fn get_project_makes_two_requests_mod_then_description() {
+    let client = RoutingMockClient::new(CF_MOD_FIXTURE, CF_MOD_DESCRIPTION_FIXTURE);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    provider.get_project(&client, "238222").await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 2, "expected exactly 2 HTTP calls, got {:?}", urls);
+    // First call: mod metadata
+    assert!(
+        urls[0].ends_with("/v1/mods/238222"),
+        "first URL should be mod endpoint: {}",
+        urls[0]
+    );
+    // Second call: description
+    assert!(
+        urls[1].ends_with("/v1/mods/238222/description"),
+        "second URL should be description endpoint: {}",
+        urls[1]
+    );
+}
+
+#[tokio::test]
+async fn get_project_carries_api_key_on_both_requests() {
+    let client = RoutingMockClient::new(CF_MOD_FIXTURE, CF_MOD_DESCRIPTION_FIXTURE);
+    let provider = CurseForgeProvider::new(Some("test-cf-key".to_string()));
+
+    provider.get_project(&client, "238222").await.unwrap();
+
+    let all_headers = client.captured_headers().await;
+    for (i, headers) in all_headers.iter().enumerate() {
+        let has_key = headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("x-api-key") && v == "test-cf-key");
+        assert!(
+            has_key,
+            "x-api-key missing on request {}: {:?}",
+            i, headers
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_project_key_absent_returns_key_missing_without_http() {
+    let client = CapturingMockClient::new(vec![]);
+    let provider = CurseForgeProvider::new(None);
+
+    let err = provider
+        .get_project(&client, "238222")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::KeyMissing),
+        "expected KeyMissing, got {:?}",
+        err
+    );
+    assert_eq!(client.request_count().await, 0);
+}
+
+#[tokio::test]
+async fn get_project_returns_http_error_on_non_200_mod_endpoint() {
+    let client = CapturingMockClient::new(vec![MockResp(404, "Not Found".to_string())]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let err = provider
+        .get_project(&client, "999999")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 404, .. }),
+        "expected HttpStatus(404), got {:?}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn get_project_returns_http_error_on_non_200_description_endpoint() {
+    // First call (mod metadata) succeeds with a valid body; second call
+    // (description) returns 404 — exercises the second-call error branch.
+    let client = CapturingMockClient::new(vec![
+        MockResp(200, CF_MOD_FIXTURE.to_string()),
+        MockResp(404, "Not Found".to_string()),
+    ]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let err = provider
+        .get_project(&client, "238222")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 404, .. }),
+        "expected HttpStatus(404) from description call, got {:?}",
+        err
+    );
+}
+
 // ── search: HTTP error propagation ────────────────────────────────────────
 
 #[tokio::test]
@@ -681,6 +922,8 @@ async fn search_returns_http_error_on_403() {
         query: "test".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 10,
         project_type: ProjectType::default(),
@@ -704,6 +947,8 @@ async fn search_url_with_project_type_mod_uses_class_id_6() {
         query: "jei".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Mod,
@@ -727,6 +972,8 @@ async fn search_url_with_project_type_modpack_uses_class_id_4471() {
         query: "all the mods".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Modpack,
@@ -757,6 +1004,8 @@ async fn search_populates_page_url_from_links_website_url() {
         query: "jei".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Mod,
@@ -795,6 +1044,8 @@ async fn search_page_url_none_when_website_url_absent() {
         query: "".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Mod,
@@ -807,5 +1058,481 @@ async fn search_page_url_none_when_website_url_absent() {
         hit.page_url.is_none(),
         "page_url should be None when websiteUrl is null: {:?}",
         hit.page_url
+    );
+}
+
+// ── get_projects_brief: batch metadata fetch via POST /v1/mods (MM-B2) ────
+
+const CF_MODS_BATCH_FIXTURE: &str = include_str!("fixtures/cf_mods_batch.json");
+
+#[tokio::test]
+async fn get_projects_brief_issues_one_post_call() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MODS_BATCH_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let ids = vec!["238222".to_string(), "454158".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 1, "must issue exactly ONE HTTP call; got {:?}", urls);
+    assert!(
+        urls[0].ends_with("/v1/mods"),
+        "URL should target /v1/mods: {}",
+        urls[0]
+    );
+}
+
+#[tokio::test]
+async fn get_projects_brief_maps_fixture_to_briefs() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MODS_BATCH_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let ids = vec!["238222".to_string(), "454158".to_string()];
+    let briefs = provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    assert_eq!(briefs.len(), 2, "should return 2 briefs from fixture");
+
+    let jei = briefs.iter().find(|b| b.project_id == "238222").unwrap();
+    assert_eq!(jei.name, "Just Enough Items (JEI)");
+    assert_eq!(
+        jei.summary,
+        "JEI is an item and recipe viewing mod for Minecraft, built from the ground up for stability and performance."
+    );
+    assert_eq!(
+        jei.icon_url,
+        Some("https://media.forgecdn.net/avatars/29/69/636346904411966716.png".to_string())
+    );
+
+    let sodium = briefs.iter().find(|b| b.project_id == "454158").unwrap();
+    assert_eq!(sodium.name, "Sodium");
+    assert!(sodium.icon_url.is_none(), "fixture sodium has null logo");
+}
+
+#[tokio::test]
+async fn get_projects_brief_post_body_contains_mod_ids() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MODS_BATCH_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let ids = vec!["238222".to_string(), "454158".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let bodies = client.captured_post_bodies().await;
+    assert_eq!(bodies.len(), 1);
+    let body = &bodies[0];
+    assert!(body.contains("238222"), "body must contain first id: {body}");
+    assert!(body.contains("454158"), "body must contain second id: {body}");
+    assert!(body.contains("modIds"), "body must contain modIds key: {body}");
+}
+
+#[tokio::test]
+async fn get_projects_brief_carries_api_key_and_content_type() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MODS_BATCH_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("my-cf-key".to_string()));
+
+    let ids = vec!["238222".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let all_headers = client.captured_headers().await;
+    let headers = &all_headers[0];
+    let has_key = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-api-key") && v == "my-cf-key");
+    let has_ct = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("Content-Type") && v.contains("application/json"));
+    assert!(has_key, "x-api-key header missing: {:?}", headers);
+    assert!(has_ct, "Content-Type header missing: {:?}", headers);
+}
+
+#[tokio::test]
+async fn get_projects_brief_key_absent_returns_key_missing_without_http() {
+    let client = CapturingMockClient::new(vec![]);
+    let provider = CurseForgeProvider::new(None);
+
+    let ids = vec!["238222".to_string()];
+    let err = provider
+        .get_projects_brief(&client, &ids)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::KeyMissing),
+        "expected KeyMissing, got {:?}",
+        err
+    );
+    assert_eq!(client.request_count().await, 0, "no HTTP call when key absent");
+}
+
+#[tokio::test]
+async fn get_projects_brief_empty_ids_returns_empty_no_http() {
+    let client = CapturingMockClient::new(vec![]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let briefs = provider.get_projects_brief(&client, &[]).await.unwrap();
+
+    assert!(briefs.is_empty(), "empty ids → empty result");
+    assert_eq!(client.request_count().await, 0, "empty ids → zero HTTP calls");
+}
+
+#[tokio::test]
+async fn get_projects_brief_non_numeric_ids_skipped() {
+    // CF ids must be numeric; passing non-numeric ids should not result in any
+    // HTTP call (all ids would parse to nothing → treat as empty).
+    let client = CapturingMockClient::new(vec![]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let ids = vec!["not-a-number".to_string(), "also-not".to_string()];
+    let briefs = provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    assert!(briefs.is_empty(), "non-numeric ids → empty result");
+    assert_eq!(client.request_count().await, 0, "non-numeric ids → zero HTTP calls");
+}
+
+#[tokio::test]
+async fn get_projects_brief_returns_http_error_on_non_200() {
+    let client = CapturingMockClient::new(vec![MockResp(403, "Forbidden".to_string())]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let ids = vec!["238222".to_string()];
+    let err = provider
+        .get_projects_brief(&client, &ids)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 403, .. }),
+        "expected HttpStatus(403), got {:?}",
+        err
+    );
+}
+
+// ── get_pack_summary: PB-B2 ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn get_pack_summary_maps_name_icon_author_from_mod_endpoint() {
+    // Uses cf_mod_jei.json — one GET call only, no /description.
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MOD_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let summary = provider.get_pack_summary(&client, "238222").await.unwrap();
+
+    assert_eq!(summary.name, "Just Enough Items (JEI)");
+    assert_eq!(
+        summary.icon_url,
+        Some("https://media.forgecdn.net/avatars/29/69/636346904411966716.png".to_string())
+    );
+    // cf_mod_jei.json has authors: [{"id": 1, "name": "mezz"}]
+    assert_eq!(summary.author, Some("mezz".to_string()));
+}
+
+#[tokio::test]
+async fn get_pack_summary_makes_exactly_one_http_call() {
+    // CRITICAL: no /description call (spec: "NO description").
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MOD_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    provider.get_pack_summary(&client, "238222").await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 1, "must issue exactly ONE HTTP call; got {:?}", urls);
+    assert!(
+        urls[0].ends_with("/v1/mods/238222"),
+        "call must target mod endpoint, not description: {}",
+        urls[0]
+    );
+    assert!(
+        !urls[0].contains("/description"),
+        "must NOT call /description endpoint: {}",
+        urls[0]
+    );
+}
+
+#[tokio::test]
+async fn get_pack_summary_carries_api_key_header() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MOD_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("my-key".to_string()));
+
+    provider.get_pack_summary(&client, "238222").await.unwrap();
+
+    let all_headers = client.captured_headers().await;
+    let headers = &all_headers[0];
+    let has_key = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-api-key") && v == "my-key");
+    assert!(has_key, "x-api-key header missing: {:?}", headers);
+}
+
+#[tokio::test]
+async fn get_pack_summary_key_absent_returns_key_missing_without_http() {
+    let client = CapturingMockClient::new(vec![]);
+    let provider = CurseForgeProvider::new(None);
+
+    let err = provider.get_pack_summary(&client, "238222").await.unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::KeyMissing),
+        "expected KeyMissing, got {:?}",
+        err
+    );
+    assert_eq!(client.request_count().await, 0);
+}
+
+#[tokio::test]
+async fn get_pack_summary_multiple_authors_joined_with_comma() {
+    // Inline fixture with two authors.
+    let two_authors = r#"{
+        "data": {
+            "id": 99,
+            "name": "My Pack",
+            "slug": "my-pack",
+            "summary": "A pack.",
+            "downloadCount": 100,
+            "logo": null,
+            "categories": [],
+            "authors": [{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Beta"}],
+            "links": null
+        }
+    }"#;
+    let client = CapturingMockClient::new(vec![MockResp::ok(two_authors)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let summary = provider.get_pack_summary(&client, "99").await.unwrap();
+
+    assert_eq!(summary.author, Some("Alpha, Beta".to_string()));
+}
+
+#[tokio::test]
+async fn get_pack_summary_no_authors_gives_none() {
+    let no_authors = r#"{
+        "data": {
+            "id": 99,
+            "name": "Pack No Author",
+            "slug": "pack-no-author",
+            "summary": ".",
+            "downloadCount": 0,
+            "logo": null,
+            "categories": [],
+            "authors": [],
+            "links": null
+        }
+    }"#;
+    let client = CapturingMockClient::new(vec![MockResp::ok(no_authors)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let summary = provider.get_pack_summary(&client, "99").await.unwrap();
+
+    assert!(summary.author.is_none(), "empty authors list → author: None");
+}
+
+#[tokio::test]
+async fn get_pack_summary_returns_http_error_on_non_200() {
+    let client = CapturingMockClient::new(vec![MockResp(404, "Not Found".to_string())]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let err = provider.get_pack_summary(&client, "999").await.unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 404, .. }),
+        "expected HttpStatus(404), got {:?}",
+        err
+    );
+}
+
+// ── A-3: multi-loader singular-or-Any + at-most-one category (BR-A) ───────
+
+/// Helper: extract URL params as a flat key=value map from a URL string.
+fn url_params(url: &str) -> std::collections::HashMap<String, String> {
+    let qs = url.split('?').nth(1).unwrap_or("");
+    qs.split('&')
+        .filter_map(|pair| {
+            let mut kv = pair.splitn(2, '=');
+            let k = kv.next()?.to_string();
+            let v = kv.next().unwrap_or("").to_string();
+            Some((k, v))
+        })
+        .collect()
+}
+
+/// 0 loaders (empty `loaders` vec, no legacy `loader`) → `modLoaderType` omitted.
+#[test]
+fn cf_search_url_zero_loaders_omits_mod_loader_type() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: Some("1.20.1".to_string()),
+        loader: None,
+        loaders: vec![],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    assert!(
+        !url.contains("modLoaderType"),
+        "0 loaders → modLoaderType must be omitted: {url}"
+    );
+}
+
+/// Exactly 1 loader → `modLoaderType=<id>` (Fabric = 4).
+#[test]
+fn cf_search_url_one_loader_emits_singular_mod_loader_type() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: Some("1.20.1".to_string()),
+        loader: None,
+        loaders: vec!["fabric".to_string()],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    let params_map = url_params(&url);
+    assert_eq!(
+        params_map.get("modLoaderType").map(|s| s.as_str()),
+        Some("4"),
+        "single fabric loader should produce modLoaderType=4: {url}"
+    );
+    assert!(
+        !url.contains("modLoaderTypes"),
+        "plural modLoaderTypes must never appear: {url}"
+    );
+}
+
+/// >1 loaders → `modLoaderType` omitted (Any/omit, per singular-or-Any rule).
+#[test]
+fn cf_search_url_multiple_loaders_omits_mod_loader_type() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: Some("1.20.1".to_string()),
+        loader: None,
+        loaders: vec!["fabric".to_string(), "forge".to_string()],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    assert!(
+        !url.contains("modLoaderType"),
+        ">1 loaders → modLoaderType must be omitted (Any rule): {url}"
+    );
+    assert!(
+        !url.contains("modLoaderTypes"),
+        "plural modLoaderTypes must never appear: {url}"
+    );
+}
+
+/// Three loaders (>1) → omit `modLoaderType`.
+#[test]
+fn cf_search_url_three_loaders_omits_mod_loader_type() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: Some("1.20.1".to_string()),
+        loader: None,
+        loaders: vec!["fabric".to_string(), "quilt".to_string(), "neoforge".to_string()],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    assert!(
+        !url.contains("modLoaderType"),
+        "3 loaders → modLoaderType must be omitted: {url}"
+    );
+}
+
+/// 0 categories → `categoryId` omitted.
+#[test]
+fn cf_search_url_zero_categories_omits_category_id() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: None,
+        loader: None,
+        loaders: vec![],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    assert!(
+        !url.contains("categoryId"),
+        "0 categories → categoryId must be omitted: {url}"
+    );
+}
+
+/// 1 category → `categoryId=<value>` emitted (at-most-one rule).
+#[test]
+fn cf_search_url_one_category_emits_category_id() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: None,
+        loader: None,
+        loaders: vec![],
+        categories: vec!["4472".to_string()],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    let params_map = url_params(&url);
+    assert_eq!(
+        params_map.get("categoryId").map(|s| s.as_str()),
+        Some("4472"),
+        "single category should produce categoryId=4472: {url}"
+    );
+}
+
+/// >1 categories → only the FIRST `categoryId` is sent (at-most-one rule to avoid CF AND trap).
+#[test]
+fn cf_search_url_multiple_categories_sends_only_first() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: None,
+        loader: None,
+        loaders: vec![],
+        categories: vec!["4472".to_string(), "4473".to_string()],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    let params_map = url_params(&url);
+    assert_eq!(
+        params_map.get("categoryId").map(|s| s.as_str()),
+        Some("4472"),
+        "at-most-one rule: only first categoryId sent: {url}"
+    );
+    // Verify the second id does NOT appear as a second categoryId.
+    // (A naive implementation might append &categoryId=4473 as a second param.)
+    let category_id_count = url.matches("categoryId=").count();
+    assert_eq!(
+        category_id_count,
+        1,
+        "exactly one categoryId must appear; found {}: {url}",
+        category_id_count
+    );
+}
+
+/// Verify that the legacy `loader` field also follows the singular-or-Any rule
+/// when `loaders` is empty (back-compat path).
+#[test]
+fn cf_search_url_legacy_loader_still_works_when_loaders_empty() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: Some("1.20.1".to_string()),
+        loader: Some("forge".to_string()),
+        loaders: vec![],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Mod,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    let params_map = url_params(&url);
+    assert_eq!(
+        params_map.get("modLoaderType").map(|s| s.as_str()),
+        Some("1"),
+        "legacy loader=forge should produce modLoaderType=1 (Forge): {url}"
     );
 }

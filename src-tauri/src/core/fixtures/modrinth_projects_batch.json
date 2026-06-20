@@ -1,0 +1,24 @@
+[
+  {
+    "id": "AANobbMI",
+    "slug": "sodium",
+    "project_type": "mod",
+    "title": "Sodium",
+    "description": "A modern rendering engine and client-side optimization mod for Minecraft.",
+    "body": "# Sodium\n\nFull markdown body here.",
+    "icon_url": "https://cdn.modrinth.com/data/AANobbMI/icon.png",
+    "categories": ["optimization"],
+    "downloads": 15000000
+  },
+  {
+    "id": "gvQqBUqZ",
+    "slug": "lithium",
+    "project_type": "mod",
+    "title": "Lithium",
+    "description": "No-compromises game logic/server optimization mod.",
+    "body": "# Lithium\n\nFull markdown body here.",
+    "icon_url": "https://cdn.modrinth.com/data/gvQqBUqZ/icon.png",
+    "categories": ["optimization"],
+    "downloads": 8000000
+  }
+]

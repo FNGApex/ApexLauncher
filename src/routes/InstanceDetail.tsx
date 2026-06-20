@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, NavLink, Outlet } from "react-router-dom";
 import {
   useInfiniteQuery,
   useMutation,
@@ -9,7 +9,11 @@ import {
 import {
   AlertCircle,
   ArrowLeft,
+  Check,
+  ChevronDown,
+  ChevronUp,
   Download,
+  ExternalLink,
   FileBox,
   Key,
   Lock,
@@ -18,18 +22,20 @@ import {
   Play,
   RefreshCw,
   Search,
-  Settings2,
   Square,
   Trash2,
-  Unlock,
   X,
 } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   addMod,
+  enrichInstanceMods,
   getInstance,
   getModVersions,
+  getSettings,
   launchInstance,
   killInstance,
+  refreshPackMeta,
   removeMod,
   searchMods,
   setModEnabled,
@@ -37,19 +43,43 @@ import {
   updateMod,
   updateModpack,
   type FolderMod,
+  type Instance,
   type ModEntry,
   type ProjectSummary,
   type ProviderCommandError,
 } from "@/lib/ipc";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAppStore } from "@/lib/store";
-import { SlideOver } from "@/components/SlideOver";
 import { ProviderBadge } from "@/components/ProviderBadge";
+import { Toggle } from "@/components/Toggle";
 
 const PAGE_LIMIT = 20;
 const DEBOUNCE_MS = 400;
 
+// Tracks instances whose mod metadata backfill has been triggered this session, so
+// the lazy enrich (for modpack-imported mods without metadata) runs at most once per
+// instance. The backend enrich is also idempotent (0 network calls when nothing is
+// missing); this just avoids redundant in-flight calls before the refetch lands.
+const enrichedSlugs = new Set<string>();
+
+// Tracks managed instances for which refreshPackMeta has been called this session.
+// The backend throttles to once/24h; this guard prevents redundant calls within a
+// single session before a refetch has settled.
+const refreshedSlugs = new Set<string>();
+
 // ---------------------------------------------------------------------------
-// Root page component
+// Outlet context type — consumed by the four tab components
+// ---------------------------------------------------------------------------
+
+export type InstanceTabContext = {
+  slug: string;
+  instance: Instance;
+  folderMods: FolderMod[];
+  invalidate: () => void;
+};
+
+// ---------------------------------------------------------------------------
+// Root shell component
 // ---------------------------------------------------------------------------
 
 export function InstanceDetail() {
@@ -60,6 +90,9 @@ export function InstanceDetail() {
     queryFn: () => getInstance(slug!),
     enabled: !!slug,
   });
+
+  // Settings query — used for T5 (showConsoleDefault) and T6 (keepLauncherOpen).
+  const { data: appSettings } = useQuery({ queryKey: ["settings"], queryFn: getSettings });
 
   // Run state + logs come from the app-level store (populated by AppShell listeners).
   // Reading from here survives navigation: navigate away and back shows live status
@@ -72,14 +105,56 @@ export function InstanceDetail() {
 
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
-  const [slideOverOpen, setSlideOverOpen] = useState(false);
   const consoleRef = useRef<HTMLPreElement>(null);
+
+  // T5 show_console_default: console collapse state seeded from the setting.
+  // `null` means "not yet seeded" — we wait for the settings query to resolve.
+  const [consoleExpanded, setConsoleExpanded] = useState<boolean | null>(null);
+
+  // PB-F2: update-available banner state (populated by refreshPackMeta).
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+
+  // PB-F3: version/update modal open state.
+  const [versionModalOpen, setVersionModalOpen] = useState(false);
+
+  // Seed console expanded state once settings load (only once — null guard).
+  useEffect(() => {
+    if (appSettings !== undefined && consoleExpanded === null) {
+      setConsoleExpanded(appSettings.showConsoleDefault ?? false);
+    }
+  }, [appSettings, consoleExpanded]);
 
   // Auto-scroll console to bottom when new log lines arrive.
   useEffect(() => {
     const el = consoleRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [runLogLines]);
+
+  // PB-F2: once per session per managed instance, call refreshPackMeta.
+  // The backend is throttled to 24h (returns cached with zero network when within 24h).
+  // If checked=true (i.e. it actually polled), invalidate so stored icon/author/latest load.
+  useEffect(() => {
+    if (!slug || !data?.instance.source) return;
+    if (refreshedSlugs.has(slug)) return;
+    refreshedSlugs.add(slug);
+    refreshPackMeta(slug)
+      .then((result) => {
+        if (result.updateAvailable) {
+          setUpdateAvailable(true);
+          setLatestVersion(result.latestVersion ?? null);
+        }
+        if (result.checked) {
+          qc.invalidateQueries({ queryKey: ["instance", slug] });
+        }
+      })
+      .catch((err) => {
+        // Non-fatal — don't surface to the user, just log.
+        console.warn("refreshPackMeta failed:", err);
+        // Allow a retry on next mount if this was transient.
+        refreshedSlugs.delete(slug);
+      });
+  }, [slug, data?.instance.source, qc]);
 
   async function handleLaunch() {
     if (!slug) return;
@@ -100,6 +175,17 @@ export function InstanceDetail() {
     setLaunching(true);
     try {
       await launchInstance(slug);
+      // T6 keep_launcher_open: minimize the window after a successful launch
+      // when the setting is false. Default true = do nothing. Isolated try/catch
+      // so a window-API error here never surfaces as a (false) launch failure.
+      const keepOpen = appSettings?.keepLauncherOpen ?? true;
+      if (!keepOpen) {
+        try {
+          await getCurrentWindow().minimize();
+        } catch (e) {
+          console.warn("minimize after launch failed:", e);
+        }
+      }
     } catch (err) {
       setLaunchError(String(err));
     } finally {
@@ -120,8 +206,12 @@ export function InstanceDetail() {
     qc.invalidateQueries({ queryKey: ["instance", slug] });
   }
 
+  const tabBase =
+    "rounded-md px-4 py-1.5 text-sm font-medium transition-colors text-muted hover:text-foreground";
+  const tabActive = "bg-surface-2 text-foreground";
+
   return (
-    <div className="px-8 py-7">
+    <div className="flex flex-col px-8 py-7">
       <Link
         to="/instances"
         className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted hover:text-foreground"
@@ -136,43 +226,147 @@ export function InstanceDetail() {
         <p className="text-sm text-danger">{String(error)}</p>
       ) : data ? (
         <>
-          <header className="mb-6 flex items-start justify-between gap-4">
-            <div>
-              <h1 className="text-2xl font-semibold">{data.instance.name}</h1>
-              <p className="text-sm text-muted">
-                {labelLoader(data.instance.loader.kind)}
-                {data.instance.loader.version ? ` ${data.instance.loader.version}` : ""} ·
-                Minecraft {data.instance.minecraft}
-              </p>
+          {/* ----------------------------------------------------------------
+              Persistent Bar — always-visible header across all tab switches
+              PB-F1: icon + name + author + clickable version chip + source link
+              PB-F2: updatable banner when refreshPackMeta reports update_available
+          ---------------------------------------------------------------- */}
+          <header className="mb-4 rounded-2xl border border-border bg-surface px-7 py-6">
+            {/* Top row: icon + identity + actions */}
+            <div className="flex items-center gap-6">
+              {/* Pack icon (PB-F1) — grandiose: size-24 */}
+              {data.instance.source?.iconUrl ? (
+                <img
+                  src={data.instance.source.iconUrl}
+                  alt=""
+                  referrerPolicy="no-referrer"
+                  className="size-24 shrink-0 rounded-2xl object-cover shadow-lg"
+                  loading="lazy"
+                />
+              ) : (
+                <div className="grid size-24 shrink-0 place-items-center rounded-2xl bg-surface-2 text-muted shadow-inner">
+                  <Package className="size-12" />
+                </div>
+              )}
+
+              {/* Name + metadata */}
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-3">
+                  <h1 className="text-3xl font-bold leading-tight tracking-tight">{data.instance.name}</h1>
+                  {/* Clickable version chip (PB-F1, PB-F3) — only for managed instances */}
+                  {data.instance.source && (
+                    <button
+                      onClick={() => setVersionModalOpen(true)}
+                      title="View versions / update"
+                      className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-3 py-1 text-sm text-muted font-medium transition-colors hover:border-primary/50 hover:text-foreground"
+                    >
+                      v{data.instance.source.packVersion}
+                    </button>
+                  )}
+                </div>
+
+                {/* Author (PB-F1) — only when present */}
+                {data.instance.source?.author && (
+                  <p className="mt-1 text-base text-muted">by {data.instance.source.author}</p>
+                )}
+
+                {/* Loader / MC subtitle */}
+                <p className="mt-1.5 text-sm text-muted/70">
+                  {labelLoader(data.instance.loader.kind)}
+                  {data.instance.loader.version ? ` ${data.instance.loader.version}` : ""} ·
+                  Minecraft {data.instance.minecraft}
+                </p>
+              </div>
+
+              {/* Right-side controls */}
+              <div className="flex shrink-0 flex-col items-end gap-3">
+                <div className="flex items-center gap-2">
+                  {/* Pack source link (PB-F1) */}
+                  {data.instance.source && (() => {
+                    const src = data.instance.source;
+                    const providerRoute: "modrinth" | "curseforge" =
+                      src.provider === "modrinth"
+                        ? "modrinth"
+                        : "curseforge";
+                    const pageUrl: string | null =
+                      src.pageUrl ?? (providerRoute === "modrinth"
+                        ? `https://modrinth.com/modpack/${src.projectId}`
+                        : null);
+                    return pageUrl ? (
+                      <button
+                        onClick={() => openUrl(pageUrl).catch(console.error)}
+                        title="Open pack page in browser"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm font-medium text-muted transition-colors hover:text-foreground"
+                      >
+                        <ExternalLink className="size-4" />
+                        Pack source
+                      </button>
+                    ) : null;
+                  })()}
+
+                  {/* Running badge */}
+                  {running && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-green-500/15 px-3 py-1.5 text-sm font-medium text-green-400">
+                      <span className="size-2 animate-pulse rounded-full bg-green-400" />
+                      Running
+                    </span>
+                  )}
+                </div>
+
+                {/* Launch / Stop — prominent */}
+                {running ? (
+                  <button
+                    onClick={handleStop}
+                    className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-5 py-2.5 text-base font-medium text-danger hover:bg-surface-2"
+                  >
+                    <Square className="size-5" />
+                    Stop
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleLaunch}
+                    disabled={launching}
+                    className="inline-flex items-center gap-2 rounded-xl bg-accent px-5 py-2.5 text-base font-semibold text-white shadow-md hover:bg-accent/80 disabled:opacity-50"
+                  >
+                    <Play className="size-5" />
+                    {launching ? "Launching…" : "Launch"}
+                  </button>
+                )}
+              </div>
             </div>
 
-            <div className="flex shrink-0 items-center gap-3">
-              {running && (
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-green-500/15 px-2.5 py-1 text-xs font-medium text-green-400">
-                  <span className="size-1.5 animate-pulse rounded-full bg-green-400" />
-                  Running
+            {/* PB-F2: Updatable banner */}
+            {updateAvailable && (
+              <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-primary/30 bg-primary/10 px-4 py-2.5 text-sm">
+                <span className="text-primary font-medium">
+                  Update available{latestVersion ? `: v${latestVersion}` : ""}
                 </span>
-              )}
-              {running ? (
                 <button
-                  onClick={handleStop}
-                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-4 py-2 text-sm font-medium text-danger hover:bg-surface-2"
+                  onClick={() => setVersionModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/20 px-3 py-1.5 text-xs font-medium text-primary transition-colors hover:bg-primary/30"
                 >
-                  <Square className="size-4" />
-                  Stop
+                  <RefreshCw className="size-3.5" />
+                  Update
                 </button>
-              ) : (
-                <button
-                  onClick={handleLaunch}
-                  disabled={launching}
-                  className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/80 disabled:opacity-50"
-                >
-                  <Play className="size-4" />
-                  {launching ? "Launching…" : "Launch"}
-                </button>
-              )}
-            </div>
+              </div>
+            )}
           </header>
+
+          {/* PB-F3: Version / update modal */}
+          {versionModalOpen && data.instance.source && (
+            <VersionUpdateModal
+              slug={slug!}
+              source={data.instance.source}
+              packLocked={data.instance.packLocked ?? false}
+              onClose={() => setVersionModalOpen(false)}
+              onUpdated={() => {
+                setVersionModalOpen(false);
+                setUpdateAvailable(false);
+                qc.invalidateQueries({ queryKey: ["instance", slug] });
+                qc.invalidateQueries({ queryKey: ["instances"] });
+              }}
+            />
+          )}
 
           {launchError && (
             <p className="mb-4 rounded-lg border border-danger/30 bg-danger/10 px-4 py-2 text-sm text-danger">
@@ -180,99 +374,91 @@ export function InstanceDetail() {
             </p>
           )}
 
-          <dl className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <Stat label="Memory" value={`${data.instance.java.memoryMb} MB`} />
-            <Stat
-              label="Java"
-              value={data.instance.java.major ? `Java ${data.instance.java.major}` : "Auto"}
-            />
-            <Stat label="Managed mods" value={`${data.instance.mods.length}`} />
-            <Stat label="Created" value={formatDate(data.instance.created)} />
-          </dl>
+          {/* ----------------------------------------------------------------
+              Tab bar
+          ---------------------------------------------------------------- */}
+          <nav className="mb-6 flex gap-1 rounded-lg border border-border bg-surface p-1 self-start">
+            <NavLink
+              to="info"
+              className={({ isActive }) =>
+                tabBase + (isActive ? " " + tabActive : "")
+              }
+            >
+              Info
+            </NavLink>
+            <NavLink
+              to="modlist"
+              className={({ isActive }) =>
+                tabBase + (isActive ? " " + tabActive : "")
+              }
+            >
+              Mods
+            </NavLink>
+            <NavLink
+              to="tech"
+              className={({ isActive }) =>
+                tabBase + (isActive ? " " + tabActive : "")
+              }
+            >
+              Tech Info
+            </NavLink>
+            <NavLink
+              to="java"
+              className={({ isActive }) =>
+                tabBase + (isActive ? " " + tabActive : "")
+              }
+            >
+              Java
+            </NavLink>
+          </nav>
 
-          <dl className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-2">
-            <Stat
-              label="Last played"
-              value={data.instance.lastPlayed ? formatDate(data.instance.lastPlayed) : "Never"}
+          {/* ----------------------------------------------------------------
+              Tab outlet — receives the instance context
+          ---------------------------------------------------------------- */}
+          <div className="mb-8">
+            <Outlet
+              context={
+                {
+                  slug: slug!,
+                  instance: data.instance,
+                  folderMods: data.folderMods,
+                  invalidate,
+                } satisfies InstanceTabContext
+              }
             />
-            <Stat
-              label="Total playtime"
-              value={formatPlaytime(data.instance.totalPlaytimeSec)}
-            />
-          </dl>
+          </div>
 
+          {/* ----------------------------------------------------------------
+              Console — persistent chrome, shown when the instance is running
+              or has accumulated log lines. T5: collapsible, seeded from
+              showConsoleDefault setting.
+          ---------------------------------------------------------------- */}
           {(running || (runLogLines && runLogLines.length > 0)) && (
             <section className="mb-8">
-              <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-muted">
-                Console
-              </h2>
-              <pre
-                ref={consoleRef}
-                className="h-64 overflow-y-auto rounded-lg border border-border bg-surface p-3 font-mono text-xs text-foreground"
+              <button
+                type="button"
+                onClick={() => setConsoleExpanded((prev) => !(prev ?? false))}
+                className="mb-3 flex items-center gap-2 text-sm font-semibold text-muted hover:text-foreground"
               >
-                {!runLogLines || runLogLines.length === 0
-                  ? "Waiting for output…"
-                  : runLogLines.map((l) => `[${l.stream}] ${l.line}`).join("\n")}
-              </pre>
+                Console
+                {consoleExpanded ?? false ? (
+                  <ChevronUp className="size-3.5" />
+                ) : (
+                  <ChevronDown className="size-3.5" />
+                )}
+              </button>
+              {(consoleExpanded ?? false) && (
+                <pre
+                  ref={consoleRef}
+                  className="h-64 overflow-y-auto rounded-lg border border-border bg-surface p-3 font-mono text-xs text-foreground"
+                >
+                  {!runLogLines || runLogLines.length === 0
+                    ? "Waiting for output…"
+                    : runLogLines.map((l) => `[${l.stream}] ${l.line}`).join("\n")}
+                </pre>
+              )}
             </section>
           )}
-
-          {/* Pack source + Update + Pack Lock (only when installed via Browse) */}
-          {data.instance.source && (
-            <PackSourcePanel
-              slug={slug!}
-              source={data.instance.source}
-              packLocked={data.instance.packLocked ?? false}
-              provider={data.instance.source.provider}
-              projectId={data.instance.source.projectId}
-              onMutate={invalidate}
-            />
-          )}
-
-          {/* Mods summary + Manage installs button */}
-          <section>
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h2 className="flex items-center gap-2 text-sm font-semibold text-muted">
-                  <Package className="size-4" />
-                  Mods
-                </h2>
-                <p className="mt-0.5 text-xs text-muted">
-                  {data.folderMods.length === 0
-                    ? "No mods installed"
-                    : `${data.folderMods.length} file${data.folderMods.length !== 1 ? "s" : ""}` +
-                      (data.instance.mods.length > 0
-                        ? ` · ${data.instance.mods.length} managed`
-                        : "")}
-                </p>
-              </div>
-              <button
-                onClick={() => setSlideOverOpen(true)}
-                className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-4 py-2 text-sm font-medium text-foreground hover:bg-surface-2"
-              >
-                <Settings2 className="size-4" />
-                Manage installs
-              </button>
-            </div>
-          </section>
-
-          {/* Slide-over: manage installs */}
-          <SlideOver
-            open={slideOverOpen}
-            onClose={() => setSlideOverOpen(false)}
-            title="Manage installs"
-            widthClass="w-full max-w-2xl"
-          >
-            <ManageInstallsPanel
-              instanceSlug={slug!}
-              minecraft={data.instance.minecraft}
-              loaderKind={data.instance.loader.kind}
-              folderMods={data.folderMods}
-              modEntries={data.instance.mods}
-              packLocked={data.instance.packLocked ?? false}
-              onMutate={invalidate}
-            />
-          </SlideOver>
         </>
       ) : null}
     </div>
@@ -280,160 +466,159 @@ export function InstanceDetail() {
 }
 
 // ---------------------------------------------------------------------------
-// Pack source panel — shown when instance was installed via Browse
+// PB-F3: Version / update modal
+// Centered modal (reuses the BrowsePackInfo DownloadPrompt pattern):
+//   - lazy getModVersions (fetched only when open)
+//   - current version marked
+//   - Update button → updateModpack → close + invalidate
+//   - pack_locked respected (Update disabled with a note)
 // ---------------------------------------------------------------------------
 
-interface PackSourcePanelProps {
+interface VersionUpdateModalProps {
   slug: string;
-  source: { provider: string; projectId: string; fileId: string; packVersion: string };
+  source: {
+    provider: string;
+    projectId: string;
+    fileId: string;
+    packVersion: string;
+  };
   packLocked: boolean;
-  provider: string;
-  projectId: string;
-  onMutate: () => void;
+  onClose: () => void;
+  onUpdated: () => void;
 }
 
-function PackSourcePanel({
+function VersionUpdateModal({
   slug,
   source,
   packLocked,
-  provider,
-  projectId,
-  onMutate,
-}: PackSourcePanelProps) {
-  const qc = useQueryClient();
-  const [selectedVersionId, setSelectedVersionId] = useState<string>("latest");
+  onClose,
+  onUpdated,
+}: VersionUpdateModalProps) {
+  const [selectedVersionId, setSelectedVersionId] = useState<string>(source.fileId);
+  const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
-  const [lockError, setLockError] = useState<string | null>(null);
 
   // Resolve the provider routing string (InstanceSource stores the wire value).
   const providerRoute: "modrinth" | "curseforge" =
-    provider === "modrinth"
+    source.provider === "modrinth"
       ? "modrinth"
-      : provider === "curseForge"
-        ? "curseforge"
-        : ((_: never) => "curseforge" as const)(provider as never);
+      : "curseforge";
 
-  // Fetch versions for the picker (no MC/loader filter).
+  // Lazy: versions fetched only when modal is open (it's mounted only when open).
   const versionsQuery = useQuery({
-    queryKey: ["packVersions", provider, projectId],
-    queryFn: () => getModVersions(providerRoute, projectId, null, null),
+    queryKey: ["packVersions", source.provider, source.projectId],
+    queryFn: () => getModVersions(providerRoute, source.projectId, null, null),
     staleTime: 30_000,
   });
 
-  const updateMutation = useMutation({
-    mutationFn: () =>
-      updateModpack(slug, selectedVersionId === "latest" ? undefined : selectedVersionId),
-    onSuccess: (_taskId) => {
-      // updateModpack now returns a task id; the result arrives via task://update.
-      // CP-9 wires the completion toast. Invalidate so data refreshes when done.
-      setUpdateError(null);
-      qc.invalidateQueries({ queryKey: ["instance", slug] });
-      qc.invalidateQueries({ queryKey: ["instances"] });
-      onMutate();
-    },
-    onError: (err) => {
+  async function handleUpdate() {
+    if (packLocked) return;
+    setUpdating(true);
+    setUpdateError(null);
+    try {
+      await updateModpack(slug, selectedVersionId === source.fileId ? undefined : selectedVersionId);
+      onUpdated();
+    } catch (err) {
       setUpdateError(err instanceof Error ? err.message : String(err));
-    },
-  });
-
-  const lockMutation = useMutation({
-    mutationFn: () => setPackLock(slug, !packLocked),
-    onSuccess: () => {
-      setLockError(null);
-      qc.invalidateQueries({ queryKey: ["instance", slug] });
-      onMutate();
-    },
-    onError: (err) => {
-      setLockError(err instanceof Error ? err.message : String(err));
-    },
-  });
+    } finally {
+      setUpdating(false);
+    }
+  }
 
   return (
-    <section className="mb-8 rounded-lg border border-border bg-surface px-4 py-4">
-      <div className="mb-3 flex items-center justify-between gap-4">
-        <div>
-          <h2 className="text-sm font-semibold">Pack source</h2>
-          <p className="mt-0.5 text-xs text-muted">
-            <ProviderBadge provider={provider as "modrinth" | "curseForge"} />{" "}
-            <span className="ml-1">Current version: {source.packVersion}</span>
-          </p>
+    /* Backdrop */
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      {/* Modal card */}
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-xl">
+        {/* Header */}
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-base font-semibold">Pack versions</h2>
+          <button
+            onClick={onClose}
+            className="rounded-md p-1 text-muted hover:bg-surface-2 hover:text-foreground"
+          >
+            <X className="size-4" />
+          </button>
         </div>
 
-        {/* Pack Lock toggle */}
-        <button
-          onClick={() => lockMutation.mutate()}
-          disabled={lockMutation.isPending}
-          title={packLocked ? "Unlock pack (allow mod changes)" : "Lock pack (freeze mod list)"}
-          className={
-            "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 " +
-            (packLocked
-              ? "border-amber-500/40 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20"
-              : "border-border bg-surface text-muted hover:bg-surface-2 hover:text-foreground")
-          }
-        >
-          {lockMutation.isPending ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : packLocked ? (
-            <Lock className="size-3.5" />
-          ) : (
-            <Unlock className="size-3.5" />
-          )}
-          {packLocked ? "Locked" : "Lock pack"}
-        </button>
-      </div>
-
-      {/* Lock error */}
-      {lockError && (
-        <p className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger">
-          {lockError}
-        </p>
-      )}
-
-      {/* Update row */}
-      <div className="flex flex-wrap items-center gap-2">
-        {versionsQuery.data && versionsQuery.data.length > 0 && (
-          <select
-            value={selectedVersionId}
-            onChange={(e) => setSelectedVersionId(e.target.value)}
-            disabled={updateMutation.isPending}
-            className="input w-auto max-w-[180px] text-xs disabled:opacity-50"
-          >
-            <option value="latest">Latest</option>
-            {versionsQuery.data.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.name || v.versionNumber}
-              </option>
-            ))}
-          </select>
+        {/* Pack-locked notice */}
+        {packLocked && (
+          <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+            <Lock className="size-3.5 shrink-0" />
+            Pack is locked — unlock to update.
+          </div>
         )}
 
-        <button
-          onClick={() => updateMutation.mutate()}
-          disabled={updateMutation.isPending || versionsQuery.isLoading}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-60"
-        >
-          {updateMutation.isPending ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="size-3.5" />
+        {/* Version list */}
+        <label className="mb-1 block text-xs text-muted">Version</label>
+        <div className="relative mb-4">
+          {versionsQuery.isLoading && (
+            <div className="flex items-center gap-2 py-2 text-xs text-muted">
+              <Loader2 className="size-3.5 animate-spin" />
+              Loading versions…
+            </div>
           )}
-          {updateMutation.isPending ? "Updating…" : "Update"}
-        </button>
+          {versionsQuery.isError && (
+            <p className="text-xs text-danger">{String(versionsQuery.error)}</p>
+          )}
+          {versionsQuery.data && (
+            <select
+              value={selectedVersionId}
+              onChange={(e) => setSelectedVersionId(e.target.value)}
+              disabled={updating || packLocked}
+              className="input w-full disabled:opacity-50"
+            >
+              {versionsQuery.data.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name || v.versionNumber}
+                  {v.id === source.fileId ? " (current)" : ""}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        {/* Error */}
+        {updateError != null && (
+          <div className="mb-3 flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+            <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
+            <span>{updateError}</span>
+          </div>
+        )}
+
+        {/* Actions */}
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 rounded-lg border border-border px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleUpdate}
+            disabled={updating || packLocked || !versionsQuery.data}
+            title={packLocked ? "Unlock the pack to update" : undefined}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-60"
+          >
+            {updating ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <RefreshCw className="size-4" />
+            )}
+            {updating ? "Updating…" : "Update"}
+          </button>
+        </div>
       </div>
-
-      {/* Update error */}
-      {updateError && (
-        <p className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger">
-          {updateError}
-        </p>
-      )}
-
-    </section>
+    </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Manage installs panel (slide-over body)
+// Manage installs panel (full-page tab body for ModlistTab)
+// Exported so ModlistTab can import it.
 // ---------------------------------------------------------------------------
 
 type ManageTab = "installed" | "add";
@@ -448,7 +633,7 @@ interface ManageInstallsPanelProps {
   onMutate: () => void;
 }
 
-function ManageInstallsPanel({
+export function ManageInstallsPanel({
   instanceSlug,
   minecraft,
   loaderKind,
@@ -458,9 +643,50 @@ function ManageInstallsPanel({
   onMutate,
 }: ManageInstallsPanelProps) {
   const [tab, setTab] = useState<ManageTab>("installed");
+  const qc = useQueryClient();
+
+  const lockMutation = useMutation({
+    mutationFn: () => setPackLock(instanceSlug, !packLocked),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["instance", instanceSlug] });
+      onMutate();
+    },
+  });
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Header: tab switcher + Pack Lock toggle */}
+      <div className="flex items-center justify-between gap-4">
+        {/* Tab switcher */}
+        <div className="flex gap-1 rounded-lg border border-border bg-surface p-1 self-start">
+          {(["installed", "add"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={
+                "rounded-md px-4 py-1.5 text-sm font-medium transition-colors " +
+                (tab === t
+                  ? "bg-surface-2 text-foreground"
+                  : "text-muted hover:text-foreground")
+              }
+            >
+              {t === "installed" ? "Installed" : "Add Mods"}
+            </button>
+          ))}
+        </div>
+
+        {/* Pack Lock toggle (LF-2) */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted">Pack locked</span>
+          <Toggle
+            checked={packLocked}
+            onChange={() => lockMutation.mutate()}
+            disabled={lockMutation.isPending}
+            label="Pack locked"
+          />
+        </div>
+      </div>
+
       {/* Pack-locked notice */}
       {packLocked && (
         <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-400">
@@ -468,24 +694,6 @@ function ManageInstallsPanel({
           <span>Pack is locked — mod changes are disabled. Unlock the pack to make changes.</span>
         </div>
       )}
-
-      {/* Tab switcher */}
-      <div className="flex gap-1 rounded-lg border border-border bg-surface p-1 self-start">
-        {(["installed", "add"] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={
-              "rounded-md px-4 py-1.5 text-sm font-medium transition-colors " +
-              (tab === t
-                ? "bg-surface-2 text-foreground"
-                : "text-muted hover:text-foreground")
-            }
-          >
-            {t === "installed" ? "Installed" : "Add mod"}
-          </button>
-        ))}
-      </div>
 
       {tab === "installed" ? (
         <InstalledModsTab
@@ -500,6 +708,7 @@ function ManageInstallsPanel({
           instanceSlug={instanceSlug}
           minecraft={minecraft}
           loaderKind={loaderKind}
+          modEntries={modEntries}
           packLocked={packLocked}
           onMutate={onMutate}
         />
@@ -527,6 +736,25 @@ function InstalledModsTab({
   packLocked,
   onMutate,
 }: InstalledModsTabProps) {
+  // Lazy backfill: modpack-imported mods carry no name/icon/summary. On first view
+  // of an instance with metadata-less mods, fetch it in one batched provider call
+  // (per provider), persist to the manifest, then refetch so icons/names appear.
+  // Runs at most once per instance per session; backend is idempotent.
+  useEffect(() => {
+    if (!instanceSlug || enrichedSlugs.has(instanceSlug)) return;
+    if (!modEntries.some((e) => e.name == null)) return;
+    enrichedSlugs.add(instanceSlug);
+    enrichInstanceMods(instanceSlug)
+      .then((n) => {
+        if (n > 0) onMutate();
+      })
+      .catch((err) => {
+        // Allow a retry on a later view if this was transient.
+        enrichedSlugs.delete(instanceSlug);
+        console.error("enrich mod metadata failed:", err);
+      });
+  }, [instanceSlug, modEntries, onMutate]);
+
   if (folderMods.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border bg-surface/40 px-4 py-8 text-center text-sm text-muted">
@@ -564,11 +792,12 @@ interface AddModTabProps {
   instanceSlug: string;
   minecraft: string;
   loaderKind: string;
+  modEntries: ModEntry[];
   packLocked: boolean;
   onMutate: () => void;
 }
 
-function AddModTab({ instanceSlug, minecraft, loaderKind, packLocked, onMutate }: AddModTabProps) {
+function AddModTab({ instanceSlug, minecraft, loaderKind, modEntries, packLocked, onMutate }: AddModTabProps) {
   const [provider, setProvider] = useState<ModProvider>("modrinth");
   const [rawQuery, setRawQuery] = useState("");
   const [query, setQuery] = useState("");
@@ -631,6 +860,16 @@ function AddModTab({ instanceSlug, minecraft, loaderKind, packLocked, onMutate }
     error.kind === "key_missing";
 
   const hits: ProjectSummary[] = data?.pages.flatMap((p) => p.hits) ?? [];
+
+  if (packLocked) {
+    return (
+      <div className="grid place-items-center rounded-xl border border-amber-500/30 bg-amber-500/5 py-14 text-center text-sm">
+        <Lock className="mb-3 size-8 text-amber-400/60" />
+        <p className="font-medium text-amber-400">Pack is locked</p>
+        <p className="mt-1 text-xs text-muted">Unlock the pack in the header above to add mods.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -732,6 +971,7 @@ function AddModTab({ instanceSlug, minecraft, loaderKind, packLocked, onMutate }
               instanceSlug={instanceSlug}
               minecraft={minecraft}
               loaderKind={loaderKind}
+              modEntries={modEntries}
               packLocked={packLocked}
               onInstalled={onMutate}
             />
@@ -761,6 +1001,7 @@ interface ModSearchCardProps {
   instanceSlug: string;
   minecraft: string;
   loaderKind: string;
+  modEntries: ModEntry[];
   packLocked: boolean;
   onInstalled: () => void;
 }
@@ -770,11 +1011,16 @@ function ModSearchCard({
   instanceSlug,
   minecraft,
   loaderKind,
+  modEntries,
   packLocked,
   onInstalled,
 }: ModSearchCardProps) {
-  const [installing, setInstalling] = useState(false);
-  const [installError, setInstallError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+  const [addTaskId, setAddTaskId] = useState<number | null>(null);
+  // Hover state for "Added" → "Remove" swap on installed mods.
+  const [hoverRemove, setHoverRemove] = useState(false);
+  const qc = useQueryClient();
 
   // Resolve the provider routing string from the ProviderKind response value.
   // ProviderKind serializes as "modrinth" | "curseForge" (camelCase from Rust).
@@ -785,42 +1031,65 @@ function ModSearchCard({
         ? "curseforge"
         : ((_: never) => "curseforge" as const)(mod.provider);
 
-  const versionsQuery = useQuery({
-    queryKey: [
-      "modVersions",
-      mod.provider,
-      mod.id,
-      minecraft,
-      loaderKind,
-    ],
-    queryFn: () =>
-      getModVersions(providerRoute, mod.id, minecraft, loaderKind),
-    staleTime: 30_000,
-    // Fetch eagerly — the user may click Install immediately.
-    enabled: true,
-  });
+  // Check whether this mod is already in the installed list.
+  const installed = modEntries.find((e) => e.projectId === mod.id);
 
-  const primaryVersion = versionsQuery.data?.[0];
+  // Track the enqueued task so the button stays busy until the task is terminal.
+  // AppShell populates the store from task://update — no new subscription needed.
+  const addTask = useAppStore((s) =>
+    addTaskId != null ? s.tasks.get(addTaskId) : undefined,
+  );
 
-  async function handleInstall() {
-    if (!primaryVersion) return;
-    setInstalling(true);
-    setInstallError(null);
+  useEffect(() => {
+    const kind = addTask?.status.kind;
+    if (kind === "done" || kind === "failed" || kind === "cancelled") {
+      setAdding(false);
+      setAddTaskId(null);
+      if (kind === "done") {
+        onInstalled();
+      }
+      // On failed/cancelled: the global toast (D-F1) already reports the failure.
+    }
+  }, [addTask?.status.kind, onInstalled]);
+
+  // AM-F1: versions are fetched ONLY on Add click — zero calls on render.
+  async function handleAdd() {
+    setAdding(true);
+    setAddError(null);
     try {
-      // addMod now returns a task id; result arrives via task://update (CP-9 toast).
-      await addMod(
+      const versions = await getModVersions(providerRoute, mod.id, minecraft, loaderKind);
+      if (!versions || versions.length === 0) {
+        setAddError("No compatible version found for this Minecraft version / loader.");
+        setAdding(false);
+        return;
+      }
+      // addMod returns a task id; keep adding=true until the task is terminal.
+      const taskId = await addMod(
         providerRoute,
         mod.id,
-        primaryVersion.id,
+        versions[0].id,
         instanceSlug,
         minecraft,
         loaderKind,
+        { name: mod.name, iconUrl: mod.iconUrl, summary: mod.summary },
       );
+      setAddTaskId(taskId);
+      // Do NOT call onInstalled() here — wait for the task to reach "done".
+    } catch (err) {
+      // Synchronous reject (e.g. enqueue failure) — stop immediately.
+      setAddError(String(err));
+      setAdding(false);
+    }
+  }
+
+  async function handleRemove() {
+    if (!installed || packLocked) return;
+    try {
+      await removeMod(instanceSlug, installed.fileName);
+      qc.invalidateQueries({ queryKey: ["instance", instanceSlug] });
       onInstalled();
     } catch (err) {
-      setInstallError(String(err));
-    } finally {
-      setInstalling(false);
+      setAddError(String(err));
     }
   }
 
@@ -832,6 +1101,7 @@ function ModSearchCard({
           <img
             src={mod.iconUrl}
             alt=""
+            referrerPolicy="no-referrer"
             className="size-10 shrink-0 rounded-lg object-cover"
             loading="lazy"
           />
@@ -856,49 +1126,60 @@ function ModSearchCard({
           {formatDownloads(mod.downloads)}
         </div>
 
-        {/* Install button */}
-        <button
-          onClick={handleInstall}
-          disabled={installing || versionsQuery.isLoading || !primaryVersion || packLocked}
-          title={
-            packLocked
-              ? "Pack is locked — unlock to add mods"
-              : versionsQuery.isLoading
-                ? "Fetching compatible versions…"
-                : !primaryVersion
-                  ? "No compatible version found"
-                  : `Install ${primaryVersion.versionNumber}`
-          }
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/80 disabled:opacity-50"
-        >
-          {installing ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : versionsQuery.isLoading ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            "Install"
-          )}
-        </button>
+        {/* Action button: Add / spinner / Added (hover → Remove) */}
+        {installed ? (
+          <button
+            onClick={handleRemove}
+            disabled={packLocked}
+            onMouseEnter={() => setHoverRemove(true)}
+            onMouseLeave={() => setHoverRemove(false)}
+            title={packLocked ? "Pack is locked — unlock to remove mods" : "Remove mod"}
+            className={
+              "inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 " +
+              (hoverRemove && !packLocked
+                ? "border-danger/40 bg-danger/10 text-danger hover:bg-danger/20"
+                : "border-green-500/40 bg-green-500/10 text-green-400")
+            }
+          >
+            {hoverRemove && !packLocked ? (
+              <>
+                <X className="size-3.5" />
+                Remove
+              </>
+            ) : (
+              <>
+                <Check className="size-3.5" />
+                Added
+              </>
+            )}
+          </button>
+        ) : (
+          <button
+            onClick={handleAdd}
+            disabled={adding || packLocked}
+            title={packLocked ? "Pack is locked — unlock to add mods" : "Add mod"}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/80 disabled:opacity-50"
+          >
+            {adding ? (
+              <>
+                <Loader2 className="size-3.5 animate-spin" />
+                Adding…
+              </>
+            ) : (
+              "Add"
+            )}
+          </button>
+        )}
       </div>
 
-      {/* Version fetch error */}
-      {versionsQuery.isError && (
-        <p className="text-xs text-danger">
-          Could not fetch compatible versions
-          {versionsQuery.error instanceof Error
-            ? `: ${versionsQuery.error.message}`
-            : "."}
-        </p>
-      )}
-
-      {/* Install error */}
-      {installError && (
+      {/* Add / remove error */}
+      {addError && (
         <p className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger">
-          {installError}
+          {addError}
         </p>
       )}
 
-      {/* Install enqueued — result arrives via task://update (CP-9 toast) */}
+      {/* Add enqueued — result arrives via task://update (CP-9 toast) */}
     </div>
   );
 }
@@ -917,6 +1198,9 @@ interface ModRowProps {
 }
 
 function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps) {
+  const [updateTaskId, setUpdateTaskId] = useState<number | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
+
   const toggleMutation = useMutation({
     mutationFn: () => setModEnabled(instanceSlug, mod.fileName, mod.disabled),
     onSuccess: onMutate,
@@ -927,57 +1211,105 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
     onSuccess: onMutate,
   });
 
-  // updateMod now returns a task id; result arrives via task://update (CP-9 toast).
+  // updateMod returns a task id; keep the spinner until the task is terminal.
   const updateMutation = useMutation({
     mutationFn: () => {
       if (!entry) return Promise.reject(new Error("no mod entry"));
       return updateMod(instanceSlug, entry.projectId);
     },
-    onSuccess: (_taskId) => {
-      // Enqueued — no synchronous result to display.
+    onSuccess: (taskId) => {
+      setUpdateTaskId(taskId);
+      setIsUpdating(true);
+    },
+    onError: () => {
+      setIsUpdating(false);
     },
   });
 
+  // Track the enqueued update task until it reaches a terminal state.
+  const updateTask = useAppStore((s) =>
+    updateTaskId != null ? s.tasks.get(updateTaskId) : undefined,
+  );
+
+  useEffect(() => {
+    const kind = updateTask?.status.kind;
+    if (kind === "done" || kind === "failed" || kind === "cancelled") {
+      setIsUpdating(false);
+      setUpdateTaskId(null);
+      if (kind === "done") {
+        onMutate();
+      }
+      // On failed/cancelled: the global toast (D-F1) already reports the failure.
+    }
+  }, [updateTask?.status.kind, onMutate]);
+
   const isBusy =
-    toggleMutation.isPending || removeMutation.isPending || updateMutation.isPending;
+    toggleMutation.isPending || removeMutation.isPending || updateMutation.isPending || isUpdating;
   const isDisabled = isBusy || packLocked;
 
-  return (
-    <li className="flex flex-col gap-1.5 bg-surface px-4 py-2.5 text-sm">
-      <div className="flex items-center gap-3">
-        <FileBox className="size-4 shrink-0 text-muted" />
-        <span className={`min-w-0 flex-1 truncate ${mod.disabled ? "text-muted line-through" : ""}`}>
-          {mod.fileName}
-        </span>
-        {!mod.managed && (
-          <span className="rounded bg-surface-2 px-1.5 py-0.5 text-xs text-muted">
-            unmanaged
-          </span>
-        )}
-        <span className="shrink-0 text-xs text-muted">{formatBytes(mod.sizeBytes)}</span>
+  // Display name: stored metadata name, else filename.
+  const displayName = entry?.name ?? mod.fileName;
 
-        {entry && (
-          <div className="flex shrink-0 items-center gap-1">
-            {/* Enable / disable toggle */}
-            <button
-              onClick={() => toggleMutation.mutate()}
-              disabled={isDisabled}
-              title={packLocked ? "Pack is locked" : mod.disabled ? "Enable mod" : "Disable mod"}
-              className={
-                "rounded px-2 py-0.5 text-xs font-medium transition-colors disabled:opacity-50 " +
-                (mod.disabled
-                  ? "bg-surface-2 text-muted hover:text-foreground"
-                  : "bg-surface-2 text-foreground hover:text-muted")
-              }
+  return (
+    <li className="flex flex-col gap-1.5 bg-surface px-4 py-4 text-sm">
+      <div className="flex items-center gap-3">
+        {/* Icon: stored iconUrl or fallback */}
+        {entry?.iconUrl ? (
+          <img
+            src={entry.iconUrl}
+            alt=""
+            referrerPolicy="no-referrer"
+            className={`size-16 shrink-0 rounded-lg object-cover ${mod.disabled ? "opacity-50" : ""}`}
+            loading="lazy"
+          />
+        ) : (
+          <div className="grid size-16 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted">
+            <FileBox className="size-8" />
+          </div>
+        )}
+
+        {/* Text block */}
+        <div className="min-w-0 flex-1">
+          {/* Title row */}
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`font-semibold ${mod.disabled ? "text-muted line-through" : "text-foreground"}`}
             >
-              {toggleMutation.isPending ? (
-                <Loader2 className="size-3 animate-spin" />
-              ) : mod.disabled ? (
-                "Enable"
-              ) : (
-                "Disable"
-              )}
-            </button>
+              {displayName}
+            </span>
+            {!mod.managed && (
+              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-xs text-muted">
+                unmanaged
+              </span>
+            )}
+          </div>
+
+          {/* Subtitle: jar filename + size */}
+          <p className="mt-0.5 text-xs text-muted">
+            {mod.fileName} · {formatBytes(mod.sizeBytes)}
+          </p>
+
+          {/* Description: summary when available */}
+          {entry?.summary && (
+            <p className="mt-1 line-clamp-2 text-xs text-muted">{entry.summary}</p>
+          )}
+        </div>
+
+        {/* Actions — only for managed mods that have a mod entry */}
+        {entry && (
+          <div className="flex shrink-0 items-center gap-1 pt-0.5">
+            {/* Enable / disable — Apple-style toggle (LF-4) */}
+            <span
+              title={packLocked ? "Pack is locked" : mod.disabled ? "Enable mod" : "Disable mod"}
+              className="flex items-center px-1"
+            >
+              <Toggle
+                checked={!mod.disabled}
+                onChange={() => toggleMutation.mutate()}
+                disabled={isDisabled}
+                label={mod.disabled ? "Enable mod" : "Disable mod"}
+              />
+            </span>
 
             {/* Update */}
             <button
@@ -986,7 +1318,7 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
               title={packLocked ? "Pack is locked" : "Check for update"}
               className="rounded p-1 text-muted transition-colors hover:bg-surface-2 hover:text-foreground disabled:opacity-50"
             >
-              {updateMutation.isPending ? (
+              {updateMutation.isPending || isUpdating ? (
                 <Loader2 className="size-3.5 animate-spin" />
               ) : (
                 <RefreshCw className="size-3.5" />
@@ -1024,10 +1356,10 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
 
 
 // ---------------------------------------------------------------------------
-// Shared helpers
+// Shared helpers — exported so tab files can import them
 // ---------------------------------------------------------------------------
 
-function Stat({ label, value }: { label: string; value: string }) {
+export function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-border bg-surface px-4 py-3">
       <dt className="text-xs text-muted">{label}</dt>
@@ -1036,11 +1368,11 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function labelLoader(kind: string): string {
+export function labelLoader(kind: string): string {
   return kind === "vanilla" ? "Vanilla" : kind[0].toUpperCase() + kind.slice(1);
 }
 
-function formatDate(iso: string): string {
+export function formatDate(iso: string): string {
   const d = new Date(iso);
   return isNaN(d.getTime()) ? "—" : d.toLocaleDateString();
 }
@@ -1066,7 +1398,7 @@ function isProviderCommandError(v: unknown): v is ProviderCommandError {
 }
 
 /** Convert total seconds to a human-readable string. 0 → "0m". */
-function formatPlaytime(totalSec: number): string {
+export function formatPlaytime(totalSec: number): string {
   if (totalSec === 0) return "0m";
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);

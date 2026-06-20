@@ -7,6 +7,7 @@ import {
   saveSettings,
   type Settings as SettingsModel,
 } from "@/lib/ipc";
+import { Toggle } from "@/components/Toggle";
 
 export function Settings() {
   const qc = useQueryClient();
@@ -110,6 +111,73 @@ export function Settings() {
             </span>
           </SettingRow>
         )}
+      </div>
+
+      <div className="mt-8 space-y-4">
+        <div>
+          <h2 className="text-base font-semibold">Behavior</h2>
+          <p className="text-xs text-muted">UI defaults applied on first launch.</p>
+        </div>
+
+        <SettingRow
+          title="Start with sidebar collapsed"
+          desc="On first launch (before any manual toggle), open the sidebar in compact icon-only mode."
+        >
+          <Toggle
+            checked={form.sidebarStartCollapsed ?? false}
+            onChange={(v) => setForm({ ...form, sidebarStartCollapsed: v })}
+          />
+        </SettingRow>
+
+        <SettingRow
+          title="Play offline"
+          desc="Always use the offline identity at launch, even when a Microsoft account is signed in."
+        >
+          <Toggle
+            checked={form.offlineMode ?? false}
+            onChange={(v) => setForm({ ...form, offlineMode: v })}
+          />
+        </SettingRow>
+
+        <SettingRow
+          title="Auto-download Java"
+          desc="Automatically download and install the required Java version when no compatible JRE is found. Disable to require manual Java configuration."
+        >
+          <Toggle
+            checked={form.autoDownloadJava ?? true}
+            onChange={(v) => setForm({ ...form, autoDownloadJava: v })}
+          />
+        </SettingRow>
+
+        <SettingRow
+          title="Show console by default"
+          desc="Expand the game console panel automatically when launching an instance."
+        >
+          <Toggle
+            checked={form.showConsoleDefault ?? false}
+            onChange={(v) => setForm({ ...form, showConsoleDefault: v })}
+          />
+        </SettingRow>
+
+        <SettingRow
+          title="Keep launcher open after launch"
+          desc="Keep the launcher window visible after starting an instance. When off, the window minimizes to the taskbar (it is not closed — closing would stop run monitoring)."
+        >
+          <Toggle
+            checked={form.keepLauncherOpen ?? true}
+            onChange={(v) => setForm({ ...form, keepLauncherOpen: v })}
+          />
+        </SettingRow>
+
+        <SettingRow
+          title="Maximize on start"
+          desc="Open the launcher window maximized at startup."
+        >
+          <Toggle
+            checked={form.maximizeOnStart ?? true}
+            onChange={(v) => setForm({ ...form, maximizeOnStart: v })}
+          />
+        </SettingRow>
       </div>
 
       <div className="mt-8 space-y-4">

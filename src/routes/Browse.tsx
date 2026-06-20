@@ -1,19 +1,27 @@
 import { useEffect, useRef, useState } from "react";
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Download, ExternalLink, Loader2, Package, Search, X } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useParams } from "react-router-dom";
+import {
+  AlertCircle,
+  Filter,
+  Loader2,
+  Package,
+  Search,
+  X,
+} from "lucide-react";
 import { Link } from "react-router-dom";
 import {
-  getLoaders,
-  getModVersions,
-  installModpack,
-  listMinecraftVersions,
+  listInstances,
   searchMods,
-  type ProjectSummary,
   type ProviderCommandError,
 } from "@/lib/ipc";
 import { META_STALE_TIME } from "@/lib/query";
-import { ProviderBadge } from "@/components/ProviderBadge";
+import { buildInstalledIndex, isInstalled } from "@/lib/installedIndex";
+import { resolveCategoriesFor } from "@/lib/categoryMap";
+import { FiltersPopover, type FiltersState } from "@/components/FiltersPopover";
+import { BrowseCard } from "@/components/BrowseCard";
+import { cn } from "@/lib/utils";
+import { useUiStore } from "@/lib/store";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -22,16 +30,39 @@ import { ProviderBadge } from "@/components/ProviderBadge";
 const PAGE_LIMIT = 20;
 const DEBOUNCE_MS = 400;
 
+const EMPTY_FILTERS: FiltersState = {
+  loaders: new Set<string>(),
+  mcVersion: null,
+  categories: new Set<string>(),
+};
+
 // ---------------------------------------------------------------------------
-// Root component
+// BrowseProvider — per-provider browse page, driven by :provider route param
 // ---------------------------------------------------------------------------
 
-export function Browse() {
+export function BrowseProvider() {
+  const { provider } = useParams<{ provider: string }>();
+  const setBrowseProvider = useUiStore((s) => s.setBrowseProvider);
+
   const [rawQuery, setRawQuery] = useState("");
   const [query, setQuery] = useState("");
-  const [mcVersion, setMcVersion] = useState<string | null>(null);
-  const [loader, setLoader] = useState<string | null>(null);
-  const [cfNoticeDismissed, setCfNoticeDismissed] = useState(false);
+  const [filters, setFilters] = useState<FiltersState>(EMPTY_FILTERS);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  // Remember last-used provider for the two real providers.
+  useEffect(() => {
+    if (provider === "curseforge" || provider === "modrinth") {
+      setBrowseProvider(provider);
+    }
+  }, [provider, setBrowseProvider]);
+
+  // Reset filters when provider changes so stale cross-provider categories are cleared.
+  useEffect(() => {
+    setFilters(EMPTY_FILTERS);
+    setRawQuery("");
+    setQuery("");
+  }, [provider]);
 
   // Debounce: apply the input value after DEBOUNCE_MS of inactivity.
   useEffect(() => {
@@ -39,51 +70,144 @@ export function Browse() {
     return () => clearTimeout(id);
   }, [rawQuery]);
 
-  // Reset loader when MC version changes (selected loader may not exist for new version).
-  function handleMcVersionChange(v: string | null) {
-    setMcVersion(v);
-    setLoader(null);
+  // BR-B: build installed index from the cached ["instances"] query (no new IPC call).
+  const { data: instances } = useQuery({
+    queryKey: ["instances"],
+    queryFn: listInstances,
+    staleTime: META_STALE_TIME,
+  });
+  const installedIndex = instances ? buildInstalledIndex(instances) : new Map<string, string>();
+
+  // Active-filter count for the badge.
+  const activeFilterCount =
+    filters.loaders.size +
+    filters.categories.size +
+    (filters.mcVersion != null ? 1 : 0);
+
+  function removeLoader(l: string) {
+    const next = new Set(filters.loaders);
+    next.delete(l);
+    setFilters((f) => ({ ...f, loaders: next }));
   }
 
-  // Dismiss notice resets when CF error state might have changed (new query/filters).
-  useEffect(() => {
-    setCfNoticeDismissed(false);
-  }, [query, mcVersion, loader]);
+  function removeCategory(c: string) {
+    const next = new Set(filters.categories);
+    next.delete(c);
+    setFilters((f) => ({ ...f, categories: next }));
+  }
+
+  function removeMcVersion() {
+    setFilters((f) => ({ ...f, mcVersion: null }));
+  }
+
+  // Coming-soon placeholder for unimplemented providers.
+  if (provider !== "curseforge" && provider !== "modrinth") {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 px-8 py-7">
+        <Package className="size-12 text-muted" />
+        <div className="text-center">
+          <p className="text-lg font-semibold text-foreground">Coming soon</p>
+          <p className="mt-1 text-sm text-muted">
+            {provider === "ftb"
+              ? "FTB"
+              : provider === "atlauncher"
+                ? "ATLauncher"
+                : "This provider"}{" "}
+            support is not yet available.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col px-8 py-7">
-      <header className="mb-6">
-        <h1 className="text-2xl font-semibold">Browse</h1>
-        <p className="text-sm text-muted">Search modpacks across providers</p>
-      </header>
+      {/* Search + Filters bar */}
+      <div className="mb-4">
+        <div className="flex items-center gap-2">
+          {/* Search field */}
+          <div className="flex min-w-0 flex-1 items-center gap-3 rounded-xl border border-border bg-surface px-4 py-2.5 focus-within:border-primary transition-colors">
+            <Search className="size-5 shrink-0 text-muted" />
+            <input
+              className="w-full bg-transparent text-base outline-none placeholder:text-muted"
+              placeholder="Search modpacks…"
+              value={rawQuery}
+              onChange={(e) => setRawQuery(e.target.value)}
+            />
+            {rawQuery.length > 0 && (
+              <button
+                onClick={() => setRawQuery("")}
+                className="shrink-0 rounded-md p-0.5 text-muted hover:text-foreground"
+                title="Clear search"
+              >
+                <X className="size-4" />
+              </button>
+            )}
+          </div>
 
-      {/* Search bar */}
-      <div className="mb-4 flex min-w-0 items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2">
-        <Search className="size-4 shrink-0 text-muted" />
-        <input
-          className="w-full bg-transparent text-sm outline-none placeholder:text-muted"
-          placeholder="Search modpacks…"
-          value={rawQuery}
-          onChange={(e) => setRawQuery(e.target.value)}
-        />
+          {/* Filters button — with active-filter count badge */}
+          <div className="relative">
+            <button
+              ref={filtersButtonRef}
+              onClick={() => setFiltersOpen((o) => !o)}
+              className={cn(
+                "flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors",
+                filtersOpen || activeFilterCount > 0
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border bg-surface text-foreground hover:border-primary/50",
+              )}
+            >
+              <Filter className="size-4" />
+              Filters
+              {activeFilterCount > 0 && (
+                <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+                  {activeFilterCount}
+                </span>
+              )}
+            </button>
+
+            {/* Anchored popover */}
+            <FiltersPopover
+              anchorRef={filtersButtonRef}
+              open={filtersOpen}
+              onClose={() => setFiltersOpen(false)}
+              filters={filters}
+              onFiltersChange={setFilters}
+              provider={provider}
+            />
+          </div>
+        </div>
+
+        {/* Applied-filter chips */}
+        {activeFilterCount > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {filters.mcVersion != null && (
+              <FilterChip
+                label={`MC ${filters.mcVersion}`}
+                onRemove={removeMcVersion}
+              />
+            )}
+            {Array.from(filters.loaders).map((l) => (
+              <FilterChip
+                key={l}
+                label={l[0].toUpperCase() + l.slice(1)}
+                onRemove={() => removeLoader(l)}
+              />
+            ))}
+            {Array.from(filters.categories).map((c) => (
+              <FilterChip key={c} label={c} onRemove={() => removeCategory(c)} />
+            ))}
+          </div>
+        )}
       </div>
-
-      {/* Facet row */}
-      <FacetRow
-        mcVersion={mcVersion}
-        loader={loader}
-        onMcVersionChange={handleMcVersionChange}
-        onLoaderChange={setLoader}
-      />
 
       {/* Results area */}
-      <div className="mt-5 min-h-0 flex-1 overflow-y-auto">
-        <MergedFeed
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <SingleProviderFeed
+          provider={provider}
           query={query}
-          mcVersion={mcVersion}
-          loader={loader}
-          cfNoticeDismissed={cfNoticeDismissed}
-          onDismissCfNotice={() => setCfNoticeDismissed(true)}
+          filters={filters}
+          installedIndex={installedIndex}
         />
       </div>
     </div>
@@ -91,91 +215,86 @@ export function Browse() {
 }
 
 // ---------------------------------------------------------------------------
-// Facet selectors
+// Applied-filter chip
 // ---------------------------------------------------------------------------
 
-interface FacetRowProps {
-  mcVersion: string | null;
-  loader: string | null;
-  onMcVersionChange: (v: string | null) => void;
-  onLoaderChange: (v: string | null) => void;
-}
-
-function FacetRow({ mcVersion, loader, onMcVersionChange, onLoaderChange }: FacetRowProps) {
-  const { data: versions } = useQuery({
-    queryKey: ["mcVersions"],
-    queryFn: listMinecraftVersions,
-    staleTime: META_STALE_TIME,
-  });
-
-  const { data: loaderOptions } = useQuery({
-    queryKey: ["loaders", mcVersion ?? ""],
-    queryFn: () => getLoaders(mcVersion ?? ""),
-    enabled: mcVersion != null && mcVersion !== "",
-    staleTime: META_STALE_TIME,
-  });
-
-  const loaderNames = loaderOptions?.flatMap((opt) =>
-    opt.kind !== "vanilla" ? [opt.kind] : [],
-  ) ?? [];
-
+function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
   return (
-    <div className="flex flex-wrap gap-2">
-      <select
-        value={mcVersion ?? ""}
-        onChange={(e) => onMcVersionChange(e.target.value || null)}
-        className="input w-auto min-w-[140px]"
+    <span className="inline-flex items-center gap-1 rounded-lg border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
+      {label}
+      <button
+        onClick={onRemove}
+        className="ml-0.5 rounded-sm hover:text-foreground"
+        title="Remove filter"
       >
-        <option value="">Any MC version</option>
-        {versions?.map((v) => (
-          <option key={v.id} value={v.id}>
-            {v.id}
-          </option>
-        ))}
-      </select>
-
-      <select
-        value={loader ?? ""}
-        onChange={(e) => onLoaderChange(e.target.value || null)}
-        disabled={loaderNames.length === 0}
-        className="input w-auto min-w-[120px] disabled:opacity-50"
-      >
-        <option value="">Any loader</option>
-        {loaderNames.map((name) => (
-          <option key={name} value={name}>
-            {name[0].toUpperCase() + name.slice(1)}
-          </option>
-        ))}
-      </select>
-    </div>
+        <X className="size-3" />
+      </button>
+    </span>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Merged feed: two independent infinite queries, merged + sorted client-side
+// Single-provider infinite feed
 // ---------------------------------------------------------------------------
 
-interface MergedFeedProps {
+interface SingleProviderFeedProps {
+  provider: "curseforge" | "modrinth";
   query: string;
-  mcVersion: string | null;
-  loader: string | null;
-  cfNoticeDismissed: boolean;
-  onDismissCfNotice: () => void;
+  filters: FiltersState;
+  installedIndex: Map<string, string>;
 }
 
-function MergedFeed({
+function SingleProviderFeed({
+  provider,
   query,
-  mcVersion,
-  loader,
-  cfNoticeDismissed,
-  onDismissCfNotice,
-}: MergedFeedProps) {
+  filters,
+  installedIndex,
+}: SingleProviderFeedProps) {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
-  const modrinth = useInfiniteQuery({
-    queryKey: ["modpacks", "modrinth", query, mcVersion, loader],
+  const loadersArr = Array.from(filters.loaders);
+
+  // Resolve categories for the active provider.
+  const resolvedCategories = resolveCategoriesFor(provider, filters.categories);
+  // CurseForge ANDs categoryIds → send at most one.
+  const queryCategories =
+    provider === "curseforge"
+      ? resolvedCategories.length > 0
+        ? [resolvedCategories[0]]
+        : []
+      : resolvedCategories;
+
+  // Loader arg: CurseForge singular-or-Any rule (>1 selected → omit); Modrinth ORs all.
+  const queryLoaders =
+    provider === "curseforge"
+      ? loadersArr.length === 1
+        ? loadersArr
+        : []
+      : loadersArr;
+
+  const queryKey = [
+    "modpacks",
+    provider,
+    query,
+    filters.mcVersion,
+    loadersArr.join(","),
+    queryCategories.join(","),
+  ] as const;
+
+  const feed = useInfiniteQuery({
+    queryKey,
     queryFn: ({ pageParam }) =>
-      searchMods("modrinth", query, mcVersion, loader, pageParam, PAGE_LIMIT, "modpack"),
+      searchMods(
+        provider,
+        query,
+        filters.mcVersion,
+        null,
+        pageParam,
+        PAGE_LIMIT,
+        "modpack",
+        queryLoaders,
+        queryCategories,
+      ),
     initialPageParam: 0,
     getNextPageParam: (lastPage) => {
       if (lastPage.hits.length === 0) return undefined;
@@ -185,83 +304,36 @@ function MergedFeed({
     staleTime: 30_000,
   });
 
-  const curseforge = useInfiniteQuery({
-    queryKey: ["modpacks", "curseforge", query, mcVersion, loader],
-    queryFn: ({ pageParam }) =>
-      searchMods("curseforge", query, mcVersion, loader, pageParam, PAGE_LIMIT, "modpack"),
-    initialPageParam: 0,
-    getNextPageParam: (lastPage) => {
-      if (lastPage.hits.length === 0) return undefined;
-      const fetched = lastPage.offset + lastPage.hits.length;
-      return fetched < lastPage.total ? fetched : undefined;
-    },
-    staleTime: 30_000,
-  });
-
-  // CF key-missing is a non-fatal condition — surface an inline notice only.
-  const cfKeyMissing =
-    curseforge.isError &&
-    isProviderCommandError(curseforge.error) &&
-    curseforge.error.kind === "key_missing";
-
-  const cfOtherError =
-    curseforge.isError && !cfKeyMissing;
-
-  // Infinite scroll: when sentinel enters view, advance both providers.
-  const fetchBoth = () => {
-    if (modrinth.hasNextPage && !modrinth.isFetchingNextPage) {
-      modrinth.fetchNextPage();
-    }
-    if (curseforge.hasNextPage && !curseforge.isFetchingNextPage) {
-      curseforge.fetchNextPage();
-    }
-  };
-
+  // Infinite scroll sentinel
   useEffect(() => {
     const el = sentinelRef.current;
     if (!el) return;
-
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting) fetchBoth();
+        if (
+          entries[0].isIntersecting &&
+          feed.hasNextPage &&
+          !feed.isFetchingNextPage
+        ) {
+          feed.fetchNextPage();
+        }
       },
       { threshold: 0.1 },
     );
-
     observer.observe(el);
     return () => observer.disconnect();
-  }, [
-    modrinth.hasNextPage,
-    modrinth.isFetchingNextPage,
-    curseforge.hasNextPage,
-    curseforge.isFetchingNextPage,
-    modrinth.fetchNextPage,
-    curseforge.fetchNextPage,
-  ]);
+  }, [feed.hasNextPage, feed.isFetchingNextPage, feed.fetchNextPage]);
 
-  // Collect and merge hits from both loaded buffers, dedupe by `provider:id`, sort downloads desc.
-  const modrinthHits: ProjectSummary[] = modrinth.data?.pages.flatMap((p) => p.hits) ?? [];
-  const curseforgeHits: ProjectSummary[] = curseforge.isError
-    ? []
-    : curseforge.data?.pages.flatMap((p) => p.hits) ?? [];
+  const cfKeyMissing =
+    feed.isError &&
+    isProviderCommandError(feed.error) &&
+    feed.error.kind === "key_missing";
 
-  const seen = new Set<string>();
-  const merged: ProjectSummary[] = [];
+  const otherError = feed.isError && !cfKeyMissing;
 
-  for (const hit of [...modrinthHits, ...curseforgeHits]) {
-    const key = `${hit.provider}:${hit.id}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(hit);
-    }
-  }
+  const hits = feed.data?.pages.flatMap((p) => p.hits) ?? [];
 
-  merged.sort((a, b) => b.downloads - a.downloads);
-
-  const isInitialLoading = modrinth.isLoading && (cfKeyMissing || curseforge.isLoading);
-  const isFetchingMore = modrinth.isFetchingNextPage || curseforge.isFetchingNextPage;
-
-  if (isInitialLoading) {
+  if (feed.isLoading) {
     return (
       <div className="flex items-center gap-2 py-8 text-sm text-muted">
         <Loader2 className="size-4 animate-spin" />
@@ -271,10 +343,11 @@ function MergedFeed({
   }
 
   return (
-    <div className="flex flex-col gap-2">
-      {/* CF key-missing inline notice */}
-      {cfKeyMissing && !cfNoticeDismissed && (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-surface/60 px-4 py-3 text-sm text-muted">
+    <div className="flex flex-col gap-3">
+      {/* CF key-missing notice */}
+      {cfKeyMissing && (
+        <div className="flex items-center gap-3 rounded-xl border border-border bg-surface/60 px-4 py-3 text-sm text-muted">
+          <AlertCircle className="size-4 shrink-0" />
           <span>
             CurseForge results hidden — add an API key in{" "}
             <Link to="/settings" className="text-primary hover:underline">
@@ -282,50 +355,35 @@ function MergedFeed({
             </Link>
             .
           </span>
-          <button
-            onClick={onDismissCfNotice}
-            className="shrink-0 rounded-md p-0.5 hover:bg-surface-2 hover:text-foreground"
-            title="Dismiss"
-          >
-            <X className="size-4" />
-          </button>
         </div>
       )}
 
-      {/* CF non-key error inline notice */}
-      {cfOtherError && (
+      {/* Other error */}
+      {otherError && (
         <div className="flex items-center gap-3 rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
           <AlertCircle className="size-4 shrink-0" />
           <span>
-            CurseForge error:{" "}
-            {isProviderCommandError(curseforge.error)
-              ? curseforge.error.message
-              : String(curseforge.error)}
+            Error:{" "}
+            {isProviderCommandError(feed.error)
+              ? feed.error.message
+              : String(feed.error)}
           </span>
         </div>
       )}
 
-      {/* Modrinth error inline notice */}
-      {modrinth.isError && (
-        <div className="flex items-center gap-3 rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-          <AlertCircle className="size-4 shrink-0" />
-          <span>
-            Modrinth error:{" "}
-            {isProviderCommandError(modrinth.error)
-              ? modrinth.error.message
-              : String(modrinth.error)}
-          </span>
-        </div>
-      )}
+      {/* Responsive grid of cards */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {hits.map((pack) => (
+          <BrowseCard
+            key={`${pack.provider}:${pack.id}`}
+            pack={pack}
+            installedSlug={isInstalled(installedIndex, pack.provider, pack.id)}
+          />
+        ))}
+      </div>
 
-      {/* Result cards */}
-      {merged.map((pack) => (
-        <ModpackCard key={`${pack.provider}:${pack.id}`} pack={pack} />
-      ))}
-
-      {/* Empty state — only when both providers yielded nothing (and not still loading).
-          CF key-missing counts as settled; exclude its loading flag in that case. */}
-      {merged.length === 0 && !modrinth.isLoading && (cfKeyMissing || !curseforge.isLoading) && (
+      {/* Empty state */}
+      {hits.length === 0 && !feed.isLoading && !feed.isFetching && (
         <div className="grid place-items-center rounded-xl border border-dashed border-border bg-surface/40 py-12 text-center text-sm text-muted">
           <Package className="mb-3 size-8" />
           No modpacks found
@@ -335,203 +393,13 @@ function MergedFeed({
       {/* Scroll sentinel */}
       <div ref={sentinelRef} className="h-4" />
 
-      {isFetchingMore && (
+      {feed.isFetchingNextPage && (
         <div className="flex items-center justify-center gap-2 py-2 text-sm text-muted">
           <Loader2 className="size-4 animate-spin" />
           Loading more…
         </div>
       )}
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Modpack result card — Install (primary) + open page (secondary)
-// ---------------------------------------------------------------------------
-
-interface ModpackCardProps {
-  pack: ProjectSummary;
-}
-
-function ModpackCard({ pack }: ModpackCardProps) {
-  const qc = useQueryClient();
-  const [installQueued, setInstallQueued] = useState(false);
-  const [installError, setInstallError] = useState<string | null>(null);
-  // "latest" sentinel means pass undefined → backend picks first version.
-  const [selectedVersionId, setSelectedVersionId] = useState<string>("latest");
-  // Versions are fetched lazily on first card hover to avoid N requests on Browse load.
-  const [versionsEnabled, setVersionsEnabled] = useState(false);
-
-  // Resolve the provider routing string (response casing → routing param).
-  const providerRoute: "modrinth" | "curseforge" =
-    pack.provider === "modrinth"
-      ? "modrinth"
-      : pack.provider === "curseForge"
-        ? "curseforge"
-        : ((_: never) => "curseforge" as const)(pack.provider);
-
-  // Fetch versions (no MC/loader filter — a pack defines its own).
-  // Only enabled after first hover so Browse load doesn't fire N simultaneous requests.
-  const versionsQuery = useQuery({
-    queryKey: ["packVersions", pack.provider, pack.id],
-    queryFn: () => getModVersions(providerRoute, pack.id, null, null),
-    staleTime: 30_000,
-    enabled: versionsEnabled,
-  });
-
-  const install = useMutation({
-    mutationFn: () =>
-      installModpack(
-        pack.provider,
-        pack.id,
-        pack.pageUrl ?? undefined,
-        selectedVersionId === "latest" ? undefined : selectedVersionId,
-      ),
-    onSuccess: (_taskId) => {
-      // Command returns a task id; the terminal result arrives via task://update
-      // and is handled by the store subscriber. CP-9 wires the completion toast.
-      setInstallQueued(true);
-      qc.invalidateQueries({ queryKey: ["instances"] });
-    },
-    onError: (err) => {
-      const raw = err instanceof Error ? err.message : String(err);
-      // Distribution-disabled pack: backend returns Err("MANUAL:<json>") where
-      // json is {"pageUrl":"...","fileName":"..."}. Open the page and show a
-      // targeted message instead of surfacing the raw error string.
-      if (raw.startsWith("MANUAL:")) {
-        try {
-          const payload = JSON.parse(raw.slice("MANUAL:".length)) as {
-            pageUrl?: string;
-            fileName?: string;
-          };
-          if (payload.pageUrl) {
-            openUrl(payload.pageUrl).catch(console.error);
-          }
-          setInstallError(
-            `This pack cannot be auto-downloaded. Opening the page${payload.fileName ? ` to download "${payload.fileName}"` : ""} manually.`,
-          );
-        } catch {
-          // JSON parse failed — fall through to generic error display.
-          setInstallError(raw);
-        }
-        return;
-      }
-      setInstallError(raw);
-    },
-  });
-
-  function handleOpenPage() {
-    if (pack.pageUrl == null) return;
-    openUrl(pack.pageUrl).catch(console.error);
-  }
-
-  return (
-    <>
-      <div
-        className="flex w-full items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 text-sm transition-colors hover:border-primary"
-        onMouseEnter={() => setVersionsEnabled(true)}
-      >
-        {/* Icon */}
-        {pack.iconUrl ? (
-          <img
-            src={pack.iconUrl}
-            alt=""
-            className="size-10 shrink-0 rounded-lg object-cover"
-            loading="lazy"
-          />
-        ) : (
-          <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted">
-            <Package className="size-5" />
-          </div>
-        )}
-
-        {/* Text */}
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <p className="truncate font-medium text-foreground">{pack.name}</p>
-            <ProviderBadge provider={pack.provider} />
-          </div>
-          <p className="mt-0.5 line-clamp-2 text-xs text-muted">{pack.summary}</p>
-        </div>
-
-        {/* Downloads */}
-        <div className="flex shrink-0 items-center gap-1 text-muted">
-          <Download className="size-3.5" />
-          <span>{formatDownloads(pack.downloads)}</span>
-        </div>
-
-        {/* Actions */}
-        <div className="flex shrink-0 items-center gap-2">
-          {/* Version picker */}
-          {versionsQuery.data && versionsQuery.data.length > 0 && (
-            <select
-              value={selectedVersionId}
-              onChange={(e) => setSelectedVersionId(e.target.value)}
-              disabled={install.isPending}
-              className="input w-auto max-w-[140px] text-xs disabled:opacity-50"
-            >
-              <option value="latest">Latest</option>
-              {versionsQuery.data.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name || v.versionNumber}
-                </option>
-              ))}
-            </select>
-          )}
-
-          {/* Primary: Install */}
-          <button
-            onClick={() => install.mutate()}
-            disabled={install.isPending}
-            className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-60"
-          >
-            {install.isPending ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Download className="size-3.5" />
-            )}
-            {install.isPending ? "Installing…" : "Install"}
-          </button>
-
-          {/* Secondary: open provider page */}
-          {pack.pageUrl != null && (
-            <button
-              onClick={handleOpenPage}
-              title="Open project page"
-              className="rounded-lg p-1.5 text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
-            >
-              <ExternalLink className="size-4" />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Inline error (mutation failure) */}
-      {installError != null && (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger/10 px-4 py-2 text-xs text-danger">
-          <span className="truncate">{installError}</span>
-          <button
-            onClick={() => setInstallError(null)}
-            className="shrink-0 rounded-md p-0.5 hover:bg-danger/20"
-          >
-            <X className="size-3.5" />
-          </button>
-        </div>
-      )}
-
-      {/* Install queued notice — transient acknowledgement until CP-9 wires the toast */}
-      {installQueued && (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-surface/60 px-4 py-2 text-xs text-muted">
-          <span>Install queued — check progress in the Download Manager.</span>
-          <button
-            onClick={() => setInstallQueued(false)}
-            className="shrink-0 rounded-md p-0.5 hover:bg-surface-2 hover:text-foreground"
-          >
-            <X className="size-3.5" />
-          </button>
-        </div>
-      )}
-    </>
   );
 }
 
@@ -548,10 +416,4 @@ function isProviderCommandError(v: unknown): v is ProviderCommandError {
     typeof v.kind === "string" &&
     typeof v.message === "string"
   );
-}
-
-function formatDownloads(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
 }

@@ -40,6 +40,19 @@ impl ProviderHttpClient for MockProviderClient {
             .expect("MockProviderClient: no more canned responses");
         Ok((s, b))
     }
+
+    async fn post(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+        _body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        let mut q = self.responses.lock().await;
+        let MockResp(s, b) = q
+            .pop_front()
+            .expect("MockProviderClient: no more canned responses");
+        Ok((s, b))
+    }
 }
 
 // ── Mock provider ─────────────────────────────────────────────────────────
@@ -78,6 +91,30 @@ impl crate::core::providers::ModProvider for MockProvider {
         let mut q = self.version_lists.lock().await;
         q.pop_front()
             .expect("MockProvider: no more canned version lists")
+    }
+
+    async fn get_project(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _project_id: &str,
+    ) -> Result<crate::core::providers::PackInfo, ProviderError> {
+        unimplemented!("get_project not used by mod installer")
+    }
+
+    async fn get_projects_brief(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _ids: &[String],
+    ) -> Result<Vec<crate::core::providers::ModBrief>, ProviderError> {
+        unimplemented!("get_projects_brief not used by mod installer")
+    }
+
+    async fn get_pack_summary(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _project_id: &str,
+    ) -> Result<crate::core::providers::PackSummary, ProviderError> {
+        unimplemented!("get_pack_summary not used by mod installer")
     }
 }
 
@@ -1039,6 +1076,9 @@ fn stub_mod_entry(version_id: &str, file_name: &str, enabled: bool) -> ModEntry 
         enabled,
         side: "unknown".to_string(),
         from_pack: false,
+        name: None,
+        icon_url: None,
+        summary: None,
     }
 }
 
@@ -1167,4 +1207,156 @@ fn apply_swap_preserves_enabled_true() {
     let new_file = stub_version_file(Some("https://dl.example.com/mod-v2.jar"), "mod-v2.jar");
     apply_swap(&mut entry, &new_file, "v2");
     assert!(entry.enabled, "enabled state must be preserved (was true)");
+}
+
+// ── F4-1: concurrent frontier fetch ──────────────────────────────────────
+
+/// A mock provider that tracks the peak number of concurrent in-flight `get_versions`
+/// calls, proving `resolve_install` issues multiple fetches concurrently via `buffered`.
+///
+/// Each call: atomically increments an in-flight counter, yields once (giving other
+/// futures a chance to run), then decrements.  The peak counter records the max
+/// observed value of the in-flight counter.
+struct ConcurrencyTrackingProvider {
+    /// Canned responses; each `get_versions` call pops the next response.
+    version_lists: Arc<Mutex<VecDeque<Result<Vec<ProjectVersion>, ProviderError>>>>,
+    /// Counts currently in-flight `get_versions` calls (incremented on entry, decremented on exit).
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    /// Peak observed `in_flight` count (monotonically increases).
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ConcurrencyTrackingProvider {
+    fn new(version_lists: Vec<Result<Vec<ProjectVersion>, ProviderError>>) -> Self {
+        Self {
+            version_lists: Arc::new(Mutex::new(version_lists.into_iter().collect())),
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            peak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn peak_concurrent(&self) -> usize {
+        self.peak.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::core::providers::ModProvider for ConcurrencyTrackingProvider {
+    async fn search(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _params: &SearchParams,
+    ) -> Result<SearchResult, ProviderError> {
+        unimplemented!()
+    }
+
+    async fn get_versions(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _project_id: &str,
+        _mc_version: Option<&str>,
+        _loader: Option<&str>,
+    ) -> Result<Vec<ProjectVersion>, ProviderError> {
+        // Increment in-flight counter and record peak.
+        let prev = self
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let current = prev + 1;
+        self.peak
+            .fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+
+        // Yield to the executor so other futures buffered in the same level can start.
+        tokio::task::yield_now().await;
+
+        // Decrement and return the canned response.
+        self.in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        let mut q = self.version_lists.lock().await;
+        q.pop_front()
+            .expect("ConcurrencyTrackingProvider: no more canned version lists")
+    }
+
+    async fn get_project(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _project_id: &str,
+    ) -> Result<crate::core::providers::PackInfo, ProviderError> {
+        unimplemented!()
+    }
+
+    async fn get_projects_brief(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _ids: &[String],
+    ) -> Result<Vec<crate::core::providers::ModBrief>, ProviderError> {
+        unimplemented!("get_projects_brief not used by mod installer")
+    }
+
+    async fn get_pack_summary(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _project_id: &str,
+    ) -> Result<crate::core::providers::PackSummary, ProviderError> {
+        unimplemented!("get_pack_summary not used by mod installer")
+    }
+}
+
+/// F4-1 concurrency gate: root with 3 required deps at the same BFS level
+/// must issue all 3 `get_versions` calls concurrently (peak in-flight >= 2).
+///
+/// With the old serial BFS, each dep was fetched one at a time (peak = 1).
+/// With the new frontier-parallel BFS using `buffered(8)`, all 3 deps in
+/// the first level are submitted together; the `yield_now` inside the mock
+/// lets the tokio runtime interleave them so peak ≥ 2.
+#[tokio::test]
+async fn f4_1_concurrent_dep_fetches_on_same_frontier_level() {
+    let make_dep_version = |vid: &str| {
+        make_version(
+            vid,
+            vid,
+            vec![make_file(Some(&format!("https://dl.example.com/{vid}.jar")), true)],
+            vec![],
+        )
+    };
+
+    let root = make_version(
+        "root",
+        "root-v1",
+        vec![make_file(Some("https://dl.example.com/root.jar"), true)],
+        vec![req_dep("dep-a"), req_dep("dep-b"), req_dep("dep-c")],
+    );
+
+    let provider = ConcurrencyTrackingProvider::new(vec![
+        Ok(vec![make_dep_version("dep-a-v1")]),
+        Ok(vec![make_dep_version("dep-b-v1")]),
+        Ok(vec![make_dep_version("dep-c-v1")]),
+    ]);
+    let client = MockProviderClient::new(vec![]);
+
+    let plan = resolve_install(
+        &provider,
+        &client,
+        root,
+        "root",
+        "root",
+        "1.21",
+        "fabric",
+        &HashSet::new(),
+    )
+    .await;
+
+    // All 4 mods resolved (root + 3 deps).
+    assert_eq!(plan.downloads.len(), 4, "root + 3 deps all downloaded");
+    assert!(plan.unresolved.is_empty());
+
+    // root is first.
+    assert_eq!(plan.downloads[0].version_id, "root-v1");
+
+    // Peak concurrent in-flight must be ≥ 2, proving parallelism.
+    let peak = provider.peak_concurrent();
+    assert!(
+        peak >= 2,
+        "expected at least 2 concurrent in-flight fetches (got peak = {peak}); \
+         the frontier-parallel BFS must issue deps concurrently via buffered(8)"
+    );
 }

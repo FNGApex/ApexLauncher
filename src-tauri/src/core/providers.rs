@@ -165,7 +165,23 @@ pub struct SearchParams {
     /// Filter to a specific Minecraft version (e.g. `"1.21"`); `None` = any.
     pub mc_version: Option<String>,
     /// Filter to a specific loader (e.g. `"fabric"`); `None` = any.
+    ///
+    /// Kept for back-compat with older callers; new callers should prefer `loaders`.
     pub loader: Option<String>,
+    /// Multi-loader filter (e.g. `["fabric", "forge"]`). Empty = any.
+    ///
+    /// Provider-neutral loader names. Each provider maps them to its own form:
+    /// - Modrinth: emitted as a single OR'd inner facet array (`categories:fabric`, …).
+    /// - CurseForge: singular-or-Any rule (exactly one → `modLoaderType=<id>`;
+    ///   more than one → CF `Any`/omit; zero → omit).
+    #[serde(default)]
+    pub loaders: Vec<String>,
+    /// Per-provider category values (already resolved by the frontend). Empty = any.
+    ///
+    /// Modrinth: facet strings (e.g. `"technology"`, `"magic"`) — OR'd in one inner array.
+    /// CurseForge: numeric category id strings (e.g. `"4472"`) — send at most one.
+    #[serde(default)]
+    pub categories: Vec<String>,
     /// Pagination offset (first result index).
     pub offset: u32,
     /// Maximum number of results to return.
@@ -212,6 +228,18 @@ pub trait ProviderHttpClient: Send + Sync {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<(u16, String), reqwest::Error>;
+
+    /// POST a URL with optional extra headers and a string body. Returns `(status, body)`.
+    ///
+    /// `headers`: slice of `(name, value)` pairs added verbatim to the request.
+    /// `body`: request body string (typically JSON).
+    /// `Content-Type: application/json` should be included in `headers` by the caller.
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: String,
+    ) -> Result<(u16, String), reqwest::Error>;
 }
 
 /// Production implementation backed by a shared `reqwest::Client`.
@@ -225,6 +253,22 @@ impl ProviderHttpClient for ReqwestProviderClient {
         headers: &[(&str, &str)],
     ) -> Result<(u16, String), reqwest::Error> {
         let mut req = self.0.get(url);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let resp = req.send().await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await?;
+        Ok((status, body))
+    }
+
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        let mut req = self.0.post(url).body(body);
         for (name, value) in headers {
             req = req.header(*name, *value);
         }
@@ -265,6 +309,60 @@ impl From<reqwest::Error> for ProviderError {
     }
 }
 
+/// Minimal project metadata for mod-metadata backfill (MM-B2).
+///
+/// Internal type — NOT a Tauri DTO. Carries only the fields needed to populate
+/// `ModEntry.name`, `ModEntry.icon_url`, and `ModEntry.summary` for modpack-
+/// imported mods that were added without metadata.
+///
+/// Fetched via `ModProvider::get_projects_brief` (one batched call per provider).
+#[derive(Debug, Clone)]
+pub struct ModBrief {
+    /// Provider-specific project id (Modrinth: base62 string; CF: numeric id as string).
+    pub project_id: String,
+    /// Display name.
+    pub name: String,
+    /// Icon URL, if any.
+    pub icon_url: Option<String>,
+    /// Short human-readable summary (NOT the long markdown/HTML body).
+    pub summary: String,
+}
+
+/// Rich project info for the Info tab — title, long description, and icon.
+///
+/// Returned by `ModProvider::get_project`. The `description` field carries the
+/// full body: Markdown for Modrinth (`body_is_html: false`) or HTML for
+/// CurseForge (`body_is_html: true`).
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PackInfo {
+    /// Display name of the project.
+    pub title: String,
+    /// Full long description (Markdown or HTML depending on `body_is_html`).
+    pub description: String,
+    /// Icon URL, if available.
+    pub icon_url: Option<String>,
+    /// `true` if `description` is HTML (CurseForge); `false` if Markdown (Modrinth).
+    pub body_is_html: bool,
+}
+
+/// Lightweight pack summary for the Persistent Bar update-check (PB-B2).
+///
+/// Fetched by `ModProvider::get_pack_summary`. Contains only the fields needed
+/// to populate icon/author on first open — NO full description to avoid the
+/// extra `/description` call on CurseForge.
+///
+/// NOT a Tauri DTO — internal type used between lib.rs command and the provider.
+#[derive(Debug, Clone)]
+pub struct PackSummary {
+    /// Display name (pack title).
+    pub name: String,
+    /// Icon URL, if available.
+    pub icon_url: Option<String>,
+    /// Author string (CF: first author or comma-joined; Modrinth: owner username or first member).
+    pub author: Option<String>,
+}
+
 /// A mod provider capable of searching mods and fetching version lists.
 ///
 /// Object-safe: `Box<dyn ModProvider>` is valid. HTTP is injected via
@@ -289,6 +387,45 @@ pub trait ModProvider: Send + Sync {
         mc_version: Option<&str>,
         loader: Option<&str>,
     ) -> Result<Vec<ProjectVersion>, ProviderError>;
+
+    /// Fetch rich project info (title, long description, icon) for the Info tab.
+    ///
+    /// Object-safe: no generics — `client` is passed as `&dyn ProviderHttpClient`.
+    async fn get_project(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackInfo, ProviderError>;
+
+    /// Batch-fetch minimal metadata for a set of project ids in ONE provider call.
+    ///
+    /// Used by `enrich_instance_mods` (MM-B3) to back-fill `name`/`icon_url`/`summary`
+    /// on modpack-imported `ModEntry`s that were added without metadata.
+    ///
+    /// Frugality contract:
+    /// - Issues **exactly one** HTTP call for any non-empty `ids` slice.
+    /// - Returns only entries the provider responded with (subset of `ids` is valid).
+    /// - Callers must pass a deduplicated slice; no dedup is done here.
+    async fn get_projects_brief(
+        &self,
+        client: &dyn ProviderHttpClient,
+        ids: &[String],
+    ) -> Result<Vec<ModBrief>, ProviderError>;
+
+    /// Fetch lightweight pack summary (name, icon, author) for a single project.
+    ///
+    /// Used by `refresh_pack_meta` (PB-B3) to populate icon/author on first open
+    /// and on the 24h refresh cycle. Intentionally avoids the full description call
+    /// (no extra `/description` endpoint on CurseForge, no `body` field on Modrinth).
+    ///
+    /// CurseForge: one GET `/v1/mods/{id}` call — name, logo.url, authors[0].name.
+    /// Modrinth: two calls — GET `/v2/project/{id}` (title, icon_url) +
+    ///           GET `/v2/project/{id}/members` (find role="Owner" → user.username).
+    async fn get_pack_summary(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackSummary, ProviderError>;
 }
 
 // ── Raw Modrinth deserialization types ────────────────────────────────────────

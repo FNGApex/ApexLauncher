@@ -744,6 +744,48 @@ pub async fn ensure_java(
 }
 
 // ---------------------------------------------------------------------------
+// D-3 — JavaProbe + parse_java_version_output + validate_java_path
+// ---------------------------------------------------------------------------
+
+/// Result of probing a Java binary by running `java -version`.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct JavaProbe {
+    /// Major version number (e.g. 8, 17, 21).
+    pub major: u32,
+    /// Full version string as emitted by `java -version` (e.g. `"21.0.1"`).
+    pub version: String,
+}
+
+/// Parse the output of `java -version` (written to *stderr* by all JVMs) and
+/// extract the major version number and the full version string.
+///
+/// Handles both formats:
+/// - Modern:  `openjdk version "21.0.1" …`  → `(21, "21.0.1")`
+/// - Legacy:  `java version "1.8.0_392" …`  → `(8,  "1.8.0_392")`
+///
+/// Returns `None` when no recognisable `… version "…"` line is found.
+pub fn parse_java_version_output(stderr: &str) -> Option<(u32, String)> {
+    for line in stderr.lines() {
+        // Both "java version" and "openjdk version" have the version string as
+        // the third whitespace-delimited token inside double-quotes.
+        if !(line.contains("java version") || line.contains("openjdk version")) {
+            continue;
+        }
+        // Find the quoted version string.
+        let start = line.find('"')? + 1;
+        let rest = &line[start..];
+        let end = rest.find('"')?;
+        let ver = &rest[..end];
+
+        // Reuse the existing per-version-string parser.
+        let major = parse_major_from_version_string(ver)?;
+        return Some((major, ver.to_string()));
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

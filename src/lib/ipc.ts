@@ -76,8 +76,10 @@ export type {
   CfImportResult,
   ModpackInstallResult,
   PackUpdateResult,
+  PackInfo,
   RunInfoPayload,
   RunLogPayload,
+  JavaProbe,
   // Event payload type still referenced by name in a component (`Sidebar`);
   // channels themselves are subscribed via the generated `events.*`.
   DeviceCodePayload,
@@ -235,9 +237,23 @@ export function searchMods(
   offset: number,
   limit: number,
   projectType: "mod" | "modpack" = "mod",
+  // BR-A: multi-loader + category filters (kept at the end so existing 7-arg
+  // callers don't break; reordered to the command's arg order internally).
+  loaders: string[] = [],
+  categories: string[] = [],
 ) {
   return unwrap(
-    commands.searchMods(provider, query, mcVersion, loader, offset, limit, projectType),
+    commands.searchMods(
+      provider,
+      query,
+      mcVersion,
+      loader,
+      loaders,
+      categories,
+      offset,
+      limit,
+      projectType,
+    ),
   );
 }
 
@@ -249,6 +265,11 @@ export function getModVersions(
   loader: string | null,
 ) {
   return unwrap(commands.getModVersions(provider, projectId, mcVersion, loader));
+}
+
+/** Fetch the title, icon, and long description for a pack project. */
+export function getPackInfo(provider: "modrinth" | "curseforge", projectId: string) {
+  return unwrap(commands.getPackInfo(provider, projectId));
 }
 
 // --- Phase 5 slice B: mod install ---
@@ -265,8 +286,17 @@ export function addMod(
   slug: string,
   mcVersion: string,
   loader: string,
+  // Display metadata captured at add-time from the search result, persisted on the
+  // mod entry so the Installed list never re-fetches it (api-frugality rule).
+  meta?: { name?: string | null; iconUrl?: string | null; summary?: string | null },
 ) {
-  return unwrap(commands.addMod(provider, projectId, versionId, slug, mcVersion, loader));
+  return unwrap(
+    commands.addMod(provider, projectId, versionId, slug, mcVersion, loader, {
+      name: meta?.name ?? null,
+      iconUrl: meta?.iconUrl ?? null,
+      summary: meta?.summary ?? null,
+    }),
+  );
 }
 
 /** Enable or disable an installed mod by toggling the `.disabled` suffix on its file. */
@@ -289,6 +319,16 @@ export async function removeMod(slug: string, fileName: string): Promise<void> {
  */
 export function updateMod(slug: string, projectId: string) {
   return unwrap(commands.updateMod(slug, projectId));
+}
+
+/**
+ * Backfill missing display metadata (name/icon/summary) for an instance's mods —
+ * e.g. modpack-imported mods, which carry no metadata. One batched provider call
+ * per provider; persisted to the manifest. Returns the count enriched. Idempotent:
+ * returns 0 with NO network call when nothing is missing (api-frugality).
+ */
+export function enrichInstanceMods(slug: string): Promise<number> {
+  return unwrap(commands.enrichInstanceMods(slug));
 }
 
 // --- Phase 6 slice A: mrpack import ---
@@ -346,6 +386,40 @@ export function updateModpack(slug: string, versionId?: string) {
  */
 export async function setPackLock(slug: string, locked: boolean): Promise<void> {
   await unwrap(commands.setPackLock(slug, locked));
+}
+
+/**
+ * Refresh a managed instance's pack metadata (icon / author / latest version) and
+ * check for an update. Throttled to once per 24h in the BACKEND (zero network when
+ * within 24h — it returns the cached result). Returns `{ updateAvailable, latestVersion,
+ * checked }`. `checked: true` means it actually polled (so stored fields changed → refetch
+ * the instance). Safe to call on every managed-instance open.
+ */
+export function refreshPackMeta(slug: string) {
+  return unwrap(commands.refreshPackMeta(slug));
+}
+
+// --- D-3: Per-instance Java settings ---
+
+/**
+ * Persist a JavaCfg override to an instance's manifest. When
+ * `java.usePackSettings` is `true` the launcher uses these per-instance
+ * settings at launch; when `false` it falls back to the global default.
+ */
+export async function setInstanceJava(
+  slug: string,
+  java: Parameters<typeof commands.setInstanceJava>[1],
+): Promise<void> {
+  await unwrap(commands.setInstanceJava(slug, java));
+}
+
+/**
+ * Probe a Java binary by running `<path> -version` and parsing its stderr.
+ * Resolves with a `JavaProbe` (`major` + `version`) on success, or rejects with
+ * a human-readable message when the binary cannot be spawned or parsed.
+ */
+export function validateJavaPath(path: string) {
+  return unwrap(commands.validateJavaPath(path));
 }
 
 // --- Run query commands ---

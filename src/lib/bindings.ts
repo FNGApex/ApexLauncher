@@ -141,18 +141,44 @@ export const commands = {
 	 *  Unknown provider strings return a typed `unknown_provider` error rather than panicking.
 	 *  The CF key is resolved from `MODLOADER_CF_API_KEY` env or `settings.curseforge_api_key`.
 	 *  `project_type` selects the content class: `"mod"` (default) or `"modpack"`.
+	 * 
+	 *  `loaders` is an optional multi-loader filter (e.g. `["fabric","forge"]`).
+	 *  `categories` carries per-provider category values already resolved by the
+	 *  frontend (Modrinth: slug strings; CurseForge: numeric id strings).
+	 *  Both default to empty (= no filter) when `None`.
 	 */
-	searchMods: (provider: string, query: string, mcVersion: string | null, loader: string | null, offset: number, limit: number, projectType: 
+	searchMods: (provider: string, query: string, mcVersion: string | null, loader: string | null, loaders: string[] | null, categories: string[] | null, offset: number, limit: number, projectType: 
 /**  Standard mods (default). */
 "mod" | 
 /**  Modpacks. */
-"modpack" | null) => typedError<SearchResult, ProviderCommandError>(__TAURI_INVOKE("search_mods", { provider, query, mcVersion, loader, offset, limit, projectType })),
+"modpack" | null) => typedError<SearchResult, ProviderCommandError>(__TAURI_INVOKE("search_mods", { provider, query, mcVersion, loader, loaders, categories, offset, limit, projectType })),
 	/**
 	 *  Fetch versions of a mod project compatible with the supplied MC version + loader.
 	 * 
 	 *  `provider` must be `"modrinth"` or `"curseforge"`.
 	 */
 	getModVersions: (provider: string, projectId: string, mcVersion: string | null, loader: string | null) => typedError<ProjectVersion[], ProviderCommandError>(__TAURI_INVOKE("get_mod_versions", { provider, projectId, mcVersion, loader })),
+	/**
+	 *  Fetch rich project info (title, long description, icon) for the Info tab.
+	 * 
+	 *  `provider` must be `"modrinth"` or `"curseforge"` (case-sensitive).
+	 *  Modrinth returns Markdown (`body_is_html: false`); CurseForge returns HTML
+	 *  (`body_is_html: true`). The CF key is resolved exactly like `search_mods`.
+	 */
+	getPackInfo: (provider: string, projectId: string) => typedError<PackInfo, ProviderCommandError>(__TAURI_INVOKE("get_pack_info", { provider, projectId })),
+	/**
+	 *  Back-fill metadata (`name`, `icon_url`, `summary`) for modpack-imported mods that
+	 *  were added without display metadata (only search-added mods capture it at add-time).
+	 * 
+	 *  ## Frugality contract
+	 *  - If all mods already have `name` set → returns `Ok(0)` with **zero** network calls.
+	 *  - Otherwise issues **exactly one** batched call per provider with missing entries.
+	 *  - Persists enriched metadata to the manifest so subsequent calls skip already-filled entries.
+	 * 
+	 *  ## Returns
+	 *  The count of `ModEntry`s that were actually enriched.
+	 */
+	enrichInstanceMods: (slug: string) => typedError<number, string>(__TAURI_INVOKE("enrich_instance_mods", { slug })),
 	/**
 	 *  Install a mod (and its required transitive dependencies) into an instance.
 	 * 
@@ -173,7 +199,7 @@ export const commands = {
 	 *  locked instance errors without touching the queue. All download work runs
 	 *  inside [`ModAddJob`].
 	 */
-	addMod: (provider: string, projectId: string, versionId: string, slug: string, mcVersion: string, loader: string) => typedError<number, string>(__TAURI_INVOKE("add_mod", { provider, projectId, versionId, slug, mcVersion, loader })),
+	addMod: (provider: string, projectId: string, versionId: string, slug: string, mcVersion: string, loader: string, meta: ModMetadata) => typedError<number, string>(__TAURI_INVOKE("add_mod", { provider, projectId, versionId, slug, mcVersion, loader, meta })),
 	/**
 	 *  Enable or disable an installed mod by renaming its file and flipping the
 	 *  `enabled` flag in the manifest.
@@ -210,6 +236,23 @@ export const commands = {
 	 */
 	setPackLock: (slug: string, locked: boolean) => typedError<null, string>(__TAURI_INVOKE("set_pack_lock", { slug, locked })),
 	/**
+	 *  Persist a `JavaCfg` override to an instance's manifest.
+	 * 
+	 *  When `cfg.use_pack_settings` is `true` the launcher uses this instance's own
+	 *  Java/memory settings at launch; when `false` it falls back to the global
+	 *  default from `Settings`. Resolution is handled by `resolve_effective_java`
+	 *  (WS-A) — this command only persists the user's choice.
+	 */
+	setInstanceJava: (slug: string, java: JavaCfg) => typedError<null, string>(__TAURI_INVOKE("set_instance_java", { slug, java })),
+	/**
+	 *  Probe a Java binary by running `<path> -version` and parsing its stderr.
+	 * 
+	 *  Returns a [`JavaProbe`] with the major version and full version string on
+	 *  success, or a human-readable `Err` when the binary cannot be spawned or its
+	 *  output doesn't contain a recognisable `java version "…"` line.
+	 */
+	validateJavaPath: (path: string) => typedError<JavaProbe, string>(__TAURI_INVOKE("validate_java_path", { path })),
+	/**
 	 *  Enqueue an `.mrpack` import task and return its id synchronously.
 	 * 
 	 *  The task runs Plan → Download (staged) → Apply (promote + overrides + manifest).
@@ -240,6 +283,16 @@ export const commands = {
 	 *  (plan execution, promote, overrides) runs in the task.
 	 */
 	updateModpack: (slug: string, versionId: string | null) => typedError<number, string>(__TAURI_INVOKE("update_modpack", { slug, versionId })),
+	/**
+	 *  Check whether a managed instance has an update available, throttled to once per 24h.
+	 * 
+	 *  Behaviour (spec PB-B3):
+	 *  - No `source` on instance → `{ false, None, false }` (not a managed pack).
+	 *  - `needs_update_check` returns false (within 24h) → return cached result, `checked: false`.
+	 *  - Otherwise: fetch `get_pack_summary` (name/icon/author) + `get_versions` (newest [0]);
+	 *    store results on `source`; `save_manifest`; return `{ update_available, latest_version, checked: true }`.
+	 */
+	refreshPackMeta: (slug: string) => typedError<PackMetaRefresh, string>(__TAURI_INVOKE("refresh_pack_meta", { slug })),
 };
 
 /** Events */
@@ -536,7 +589,17 @@ export type ItemStatus =
 export type JavaCfg = {
 	major: number | null,
 	argsOverride: string | null,
+	/**  Max heap (`-Xmx`). Also used as the instance's global-default value at create time. */
 	memoryMb: number,
+	/**  Min heap (`-Xms`). `None` = omit `-Xms` entirely (§8 Q5). */
+	minMemoryMb?: number | null,
+	/**  Custom java binary path. `None` = auto-provision via `ensure_java(major)`. */
+	pathOverride?: string | null,
+	/**
+	 *  When `true`, this instance's saved Java/RAM override is used; when `false`,
+	 *  the global default from `Settings` is used. Old manifests load as `false`.
+	 */
+	usePackSettings?: boolean,
 };
 
 /**  A located JRE. */
@@ -547,6 +610,14 @@ export type JavaInstallation = {
 	path: string,
 	/**  How this installation was discovered. */
 	source: JavaSource,
+};
+
+/**  Result of probing a Java binary by running `java -version`. */
+export type JavaProbe = {
+	/**  Major version number (e.g. 8, 17, 21). */
+	major: number,
+	/**  Full version string as emitted by `java -version` (e.g. `"21.0.1"`). */
+	version: string,
 };
 
 /**  How a [`JavaInstallation`] was found. */
@@ -658,6 +729,34 @@ export type ModEntry = {
 	 *  deserialize as `false` — no schema bump required.
 	 */
 	fromPack?: boolean,
+	/**
+	 *  Display name captured at add-time from the search result (`ProjectSummary.name`).
+	 *  `None` for dependency-added mods and old manifests (no re-fetch to display).
+	 */
+	name?: string | null,
+	/**
+	 *  Icon URL captured at add-time from the search result (`ProjectSummary.icon_url`).
+	 *  `None` for dependency-added mods and old manifests.
+	 */
+	iconUrl?: string | null,
+	/**
+	 *  Short description captured at add-time from the search result (`ProjectSummary.description`).
+	 *  `None` for dependency-added mods and old manifests.
+	 */
+	summary?: string | null,
+};
+
+/**
+ *  Display metadata captured at add-time from the search `ProjectSummary`.
+ * 
+ *  Passed as a single struct to `add_mod` to stay within specta's 10-arg limit.
+ *  The frontend passes the `ProjectSummary`'s `name`, `icon_url`, and `description`
+ *  fields. All are `None` for callers that don't have this data (e.g. tests).
+ */
+export type ModMetadata = {
+	name: string | null,
+	iconUrl: string | null,
+	summary: string | null,
 };
 
 /**
@@ -703,6 +802,38 @@ export type MrpackImportResult = {
 	skipped: number,
 	/**  File paths of any downloads that failed (empty on full success). */
 	failedFiles: string[],
+};
+
+/**
+ *  Rich project info for the Info tab — title, long description, and icon.
+ * 
+ *  Returned by `ModProvider::get_project`. The `description` field carries the
+ *  full body: Markdown for Modrinth (`body_is_html: false`) or HTML for
+ *  CurseForge (`body_is_html: true`).
+ */
+export type PackInfo = {
+	/**  Display name of the project. */
+	title: string,
+	/**  Full long description (Markdown or HTML depending on `body_is_html`). */
+	description: string,
+	/**  Icon URL, if available. */
+	iconUrl: string | null,
+	/**  `true` if `description` is HTML (CurseForge); `false` if Markdown (Modrinth). */
+	bodyIsHtml: boolean,
+};
+
+/**
+ *  Response DTO for `refresh_pack_meta`.
+ * 
+ *  `update_available` — whether a newer version exists (latest_version_id != file_id).
+ *  `latest_version`  — human-readable version string of the newest available release.
+ *  `checked`         — `true` when this call actually polled the network (24h throttle expired
+ *                      or first call); `false` when the cached result was returned without I/O.
+ */
+export type PackMetaRefresh = {
+	updateAvailable: boolean,
+	latestVersion: string | null,
+	checked: boolean,
 };
 
 /**
@@ -830,6 +961,16 @@ export type ProviderCommandError = {
 /**  Identifies which provider owns a result. */
 export type ProviderKind = "modrinth" | "curseForge";
 
+/**
+ *  Pack-recommended Java/memory hint embedded in the instance source.
+ *  All fields are optional so a partial recommendation is valid.
+ *  Currently always `None` — providers don't expose it yet (design §5).
+ */
+export type RecommendedJava = {
+	memoryMb: number | null,
+	javaArgs: string | null,
+};
+
 /**  Returned by `resolve_vanilla`: the download plan + launch metadata. */
 export type ResolveResult = {
 	plan: DownloadPlan,
@@ -904,6 +1045,35 @@ export type Settings = {
 	 *  Preserves existing offline behavior for users with no account configured.
 	 */
 	offlineMode?: boolean,
+	/**
+	 *  When true, the sidebar starts collapsed on first launch (before the user has
+	 *  manually toggled it). The live collapsed state is persisted in localStorage
+	 *  (`apex-ui`); this setting is the initial seed applied on first run only.
+	 */
+	sidebarStartCollapsed?: boolean,
+	/**
+	 *  When true, `ensure_java` is called at launch to auto-download a JRE if none
+	 *  is detected. When false, only detection is attempted; if no JRE is found the
+	 *  launch is aborted with a message directing the user to configure Java manually.
+	 *  Default: true (preserves existing behavior).
+	 */
+	autoDownloadJava?: boolean,
+	/**
+	 *  When true, the instance console panel starts expanded. When false, it starts
+	 *  collapsed and the user must click to reveal it. Default: false.
+	 */
+	showConsoleDefault?: boolean,
+	/**
+	 *  When true (default), the launcher window stays open after launching an
+	 *  instance. When false, the window is minimized immediately after a successful
+	 *  launch (not closed — closing would kill run monitoring).
+	 */
+	keepLauncherOpen?: boolean,
+	/**
+	 *  When true (default), the launcher window is maximized on startup. Replaces
+	 *  the static `"maximized": true` in `tauri.conf.json` with a dynamic check.
+	 */
+	maximizeOnStart?: boolean,
 };
 
 export type Source = {
@@ -911,6 +1081,27 @@ export type Source = {
 	projectId: string,
 	fileId: string,
 	packVersion: string,
+	/**  Pack-recommended Java/RAM hint. Always `None` today — plumbing only. */
+	recommended?: RecommendedJava | null,
+	/**
+	 *  Provider project page URL, captured at install-time from the browse/install
+	 *  flow. `None` for instances imported via file drop or old manifests.
+	 *  Used by AM-F3 "Open project page" button.
+	 */
+	pageUrl?: string | null,
+	/**  Pack icon URL, populated by `refresh_pack_meta`. `None` until first refresh. */
+	iconUrl?: string | null,
+	/**
+	 *  Pack author (CF: first/joined author name; Modrinth: owner username).
+	 *  Populated by `refresh_pack_meta`. `None` until first refresh.
+	 */
+	author?: string | null,
+	/**  RFC3339 timestamp of the last successful update-check. `None` if never checked. */
+	lastUpdateCheck?: string | null,
+	/**  Newest available version number (human-readable display), from last check. */
+	latestVersion?: string | null,
+	/**  Newest available version id (for the update action), from last check. */
+	latestVersionId?: string | null,
 };
 
 /**  An optional dependency surfaced as a suggestion. */

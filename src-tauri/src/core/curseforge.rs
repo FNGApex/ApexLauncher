@@ -22,8 +22,8 @@
 use serde::Deserialize;
 
 use crate::core::providers::{
-    Dependency, ModProvider, ProjectType, ProjectVersion, ProviderError, ProviderHttpClient,
-    ProviderKind, SearchParams, SearchResult, VersionFile,
+    Dependency, ModBrief, ModProvider, PackInfo, PackSummary, ProjectType, ProjectVersion,
+    ProviderError, ProviderHttpClient, ProviderKind, SearchParams, SearchResult, VersionFile,
 };
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -240,6 +240,59 @@ impl CfFile {
     }
 }
 
+/// Raw CF `/v1/mods/{id}` response (subset of fields needed for `PackInfo` and `PackSummary`).
+#[derive(Debug, Deserialize)]
+struct CfModResponse {
+    data: CfModData,
+}
+
+#[derive(Debug, Deserialize)]
+struct CfModData {
+    name: String,
+    logo: Option<CfModLogo>,
+    /// Author list — present on the single-mod endpoint. Used for pack summary author.
+    #[serde(default)]
+    authors: Vec<CfAuthor>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CfModLogo {
+    url: String,
+}
+
+/// Author record from CF `/v1/mods/{id}`.
+#[derive(Debug, Deserialize)]
+struct CfAuthor {
+    name: String,
+}
+
+/// Raw CF `/v1/mods/{id}/description` response.
+/// The `data` field is the full HTML body as a string.
+#[derive(Debug, Deserialize)]
+struct CfDescriptionResponse {
+    data: String,
+}
+
+/// Raw CF POST `/v1/mods` batch response item.
+#[derive(Debug, Deserialize)]
+struct CfBatchMod {
+    id: u64,
+    name: String,
+    summary: String,
+    logo: Option<CfBatchLogo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CfBatchLogo {
+    url: String,
+}
+
+/// Raw CF POST `/v1/mods` batch response.
+#[derive(Debug, Deserialize)]
+struct CfModsBatchResponse {
+    data: Vec<CfBatchMod>,
+}
+
 // ── CurseForgeProvider ─────────────────────────────────────────────────────────
 
 /// CurseForge implementation of `ModProvider`.
@@ -268,6 +321,27 @@ impl CurseForgeProvider {
     }
 
     /// Build the CF `/v1/mods/search` URL from `SearchParams`.
+    ///
+    /// ## Multi-loader rule (singular-or-Any — Q1 locked decision)
+    /// CF's `modLoaderType` accepts a single numeric enum value.
+    /// - 0 loaders (empty `loaders` vec **and** no legacy `loader` field) → omit `modLoaderType`.
+    /// - Exactly 1 loader → `modLoaderType=<id>` (Forge=1, Fabric=4, Quilt=5, NeoForge=6).
+    /// - >1 loaders → omit `modLoaderType` (equivalent to Any=0).
+    ///   The unreliable `modLoaderTypes` plural is intentionally NOT used (spec Q1).
+    ///
+    /// Note: CF silently ignores `modLoaderType` unless `gameVersion` is also set.
+    ///
+    /// ## Category rule (at-most-one `categoryId` — Q7 locked decision)
+    /// CF ANDs multiple `categoryIds`, which with >1 id yields a near-empty feed.
+    ///
+    /// Assumption (verified against CF API docs §4.1, design §5.3): CF's `categoryId`
+    /// (singular) applies a single-category filter. When multiple categories are selected
+    /// by the user, the frontend sends only one per CF call (the first resolved CF value)
+    /// to avoid the AND-narrowing trap. This is the "send at most one CF categoryId" rule.
+    ///
+    /// CF docs are ambiguous about `categoryIds` plural ("filter by a list" without
+    /// specifying AND/OR); the design doc §5.3 records this as treat-as-AND based on a
+    /// second research pass. Live verification before final ship is required (Q7).
     fn build_search_url(params: &SearchParams) -> String {
         let class_id = match params.project_type {
             ProjectType::Mod => MODS_CLASS_ID,
@@ -288,12 +362,41 @@ impl CurseForgeProvider {
         if let Some(mc) = &params.mc_version {
             url.push_str(&format!("&gameVersion={}", mc));
         }
-        if let Some(loader) = &params.loader {
-            if let Some(type_id) = loader_type_id(loader) {
+
+        // Multi-loader: singular-or-Any rule.
+        // Prefer `loaders` vec; fall back to legacy `loader` field if `loaders` is empty.
+        let effective_loaders: Vec<&str> = if !params.loaders.is_empty() {
+            params.loaders.iter().map(|s| s.as_str()).collect()
+        } else if let Some(l) = params.loader.as_deref() {
+            vec![l]
+        } else {
+            vec![]
+        };
+
+        if effective_loaders.len() == 1 {
+            // Exactly one loader → send the singular param.
+            if let Some(type_id) = loader_type_id(effective_loaders[0]) {
                 url.push_str(&format!("&modLoaderType={}", type_id));
             }
         }
+        // 0 loaders → omit; >1 loaders → omit (equivalent to Any; no unreliable plural).
+
+        // Category: at most one `categoryId` (CF ANDs multiple ids → near-empty feed).
+        if let Some(cat) = params.categories.first() {
+            url.push_str(&format!("&categoryId={}", percent_encode(cat)));
+        }
+
         url
+    }
+
+    /// Build the CF `/v1/mods/{id}` URL (project metadata).
+    fn build_mod_url(mod_id: &str) -> String {
+        format!("{}/v1/mods/{}", BASE_URL, mod_id)
+    }
+
+    /// Build the CF `/v1/mods/{id}/description` URL (full HTML body).
+    fn build_description_url(mod_id: &str) -> String {
+        format!("{}/v1/mods/{}/description", BASE_URL, mod_id)
     }
 
     /// Build the CF `/v1/mods/{id}/files` URL.
@@ -304,6 +407,11 @@ impl CurseForgeProvider {
     /// Build the CF `/v1/mods/{project_id}/files/{file_id}` URL.
     fn build_file_url(project_id: u32, file_id: u32) -> String {
         format!("{}/v1/mods/{}/files/{}", BASE_URL, project_id, file_id)
+    }
+
+    /// Build the CF POST `/v1/mods` URL for batch metadata fetch.
+    fn build_mods_batch_url() -> String {
+        format!("{}/v1/mods", BASE_URL)
     }
 
     /// Resolve a single `(project_id, file_id)` to a normalized `VersionFile`.
@@ -424,6 +532,155 @@ impl ModProvider for CurseForgeProvider {
             .collect();
 
         Ok(versions)
+    }
+
+    async fn get_project(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackInfo, ProviderError> {
+        let key = self.require_key()?;
+
+        // Call 1: mod metadata (name + logo).
+        let mod_url = Self::build_mod_url(project_id);
+        let (status, body) = client
+            .get(&mod_url, &[("x-api-key", key)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw_mod: CfModResponse =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        // Call 2: full HTML description.
+        let desc_url = Self::build_description_url(project_id);
+        let (desc_status, desc_body) = client
+            .get(&desc_url, &[("x-api-key", key)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if desc_status != 200 {
+            return Err(ProviderError::HttpStatus {
+                status: desc_status,
+                body: desc_body,
+            });
+        }
+
+        let raw_desc: CfDescriptionResponse = serde_json::from_str(&desc_body)
+            .map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        Ok(PackInfo {
+            title: raw_mod.data.name,
+            description: raw_desc.data,
+            icon_url: raw_mod.data.logo.map(|l| l.url),
+            body_is_html: true,
+        })
+    }
+
+    async fn get_projects_brief(
+        &self,
+        client: &dyn ProviderHttpClient,
+        ids: &[String],
+    ) -> Result<Vec<ModBrief>, ProviderError> {
+        let key = self.require_key()?;
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Parse ids to integers; skip non-numeric ones defensively.
+        let numeric_ids: Vec<u64> = ids
+            .iter()
+            .filter_map(|id| id.parse::<u64>().ok())
+            .collect();
+
+        if numeric_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Serialize body: {"modIds":[...]}
+        let ids_json = numeric_ids
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let request_body = format!("{{\"modIds\":[{}]}}", ids_json);
+
+        let url = Self::build_mods_batch_url();
+        let (status, body) = client
+            .post(
+                &url,
+                &[
+                    ("x-api-key", key),
+                    ("Content-Type", "application/json"),
+                ],
+                request_body,
+            )
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw: CfModsBatchResponse =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        Ok(raw
+            .data
+            .into_iter()
+            .map(|m| ModBrief {
+                project_id: m.id.to_string(),
+                name: m.name,
+                icon_url: m.logo.map(|l| l.url),
+                summary: m.summary,
+            })
+            .collect())
+    }
+
+    async fn get_pack_summary(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackSummary, ProviderError> {
+        let key = self.require_key()?;
+        // One call only: GET /v1/mods/{id} — name, logo.url, authors[].name.
+        // No /description call (spec PB-B2: "NO description").
+        let url = Self::build_mod_url(project_id);
+        let (status, body) = client
+            .get(&url, &[("x-api-key", key)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw: CfModResponse =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        let author = if raw.data.authors.is_empty() {
+            None
+        } else {
+            // Join all author names; the most common case is a single author.
+            Some(
+                raw.data
+                    .authors
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        };
+
+        Ok(PackSummary {
+            name: raw.data.name,
+            icon_url: raw.data.logo.map(|l| l.url),
+            author,
+        })
     }
 }
 

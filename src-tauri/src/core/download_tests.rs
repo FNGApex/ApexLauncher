@@ -1377,3 +1377,136 @@ fn progress_sink_impls_compile() {
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].bytes_done, 100);
 }
+
+// -----------------------------------------------------------------------
+// F2-1: item_done fires once per plan item (success / fail / skip mix)
+// -----------------------------------------------------------------------
+
+/// `item_done` fires exactly once per plan item for a mix of success, skip,
+/// and fail outcomes.  Uses a 3-item plan: one already-on-disk (Skipped), one
+/// normal download (Ok), one bad URL (Failed).
+///
+/// The skipped item fires `item_done(url, true)` in the early-dedup path.
+/// The ok item fires `item_done(url, true)` after the download completes.
+/// The bad item fires `item_done(url, false)` after the 404.
+#[tokio::test]
+async fn f2_1_item_done_fires_once_per_item_success_fail_skip_mix() {
+    let body = b"item_done test body".to_vec();
+    let hash = sha1_hex(&body);
+    let server = MultiMockServer::start(body.clone(), 0).await;
+
+    let dir = test_tmp_dir("f2_1_item_done_mix");
+    let client = build_client().unwrap();
+
+    // Item 0: pre-populate on disk so it gets Skipped (dedupe).
+    let skipped_dest = dir.join("skipped.bin");
+    std::fs::write(&skipped_dest, &body).unwrap();
+
+    // Item 1: normal download (Ok).
+    let ok_dest = dir.join("ok.bin");
+
+    // Item 2: bad URL → 404 → Failed.
+    let bad_dest = dir.join("bad.bin");
+
+    let items = vec![
+        DownloadItem {
+            url: server.url("skipped"),
+            dest: skipped_dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha1(hash.clone())),
+            size: None,
+        },
+        DownloadItem {
+            url: server.url("ok"),
+            dest: ok_dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha1(hash.clone())),
+            size: None,
+        },
+        DownloadItem {
+            url: server.url("bad"),
+            dest: bad_dest.clone(),
+            expected_hash: Some(ExpectedHash::Sha1(hash.clone())),
+            size: None,
+        },
+    ];
+
+    let plan = DownloadPlan::new(items.clone());
+    let sink = CapturingItemSink::new();
+    let cancel = CancelToken::new();
+    let result = execute_plan_cancellable(&client, &plan, &sink, 4, &cancel).await;
+
+    // All three items must be in the result.
+    assert_eq!(result.outcomes.len(), 3, "expected 3 outcomes");
+
+    // item_done must fire exactly once per item — 3 total.
+    let recorded = sink.items.lock().unwrap();
+    assert_eq!(recorded.len(), 3, "item_done must fire exactly 3 times, got {}", recorded.len());
+
+    // Verify per-item URLs and success flags.
+    // The skipped item is processed before the download phase, so it appears
+    // first in recorded order; ok and bad order is non-deterministic (concurrent),
+    // so we match by URL.
+    let find = |url_suffix: &str| recorded.iter().find(|(u, _)| u.contains(url_suffix)).cloned();
+
+    let (_, skipped_ok) = find("skipped").expect("skipped item_done missing");
+    assert!(skipped_ok, "skipped item must be success=true");
+
+    let (_, ok_ok) = find("/ok").expect("ok item_done missing");
+    assert!(ok_ok, "ok item must be success=true");
+
+    let (_, bad_ok) = find("bad").expect("bad item_done missing");
+    assert!(!bad_ok, "bad (404) item must be success=false");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `item_done` fires for cancelled items (success=false) and the total count
+/// still equals the plan length.
+#[tokio::test]
+async fn f2_1_item_done_fires_for_cancelled_items() {
+    let body = b"cancel item_done body".to_vec();
+    let hash = sha1_hex(&body);
+    // 200 ms hold: ensures the cancel token trips before item 1 starts.
+    let server = MultiMockServer::start(body.clone(), 200).await;
+
+    let dir = test_tmp_dir("f2_1_item_done_cancel");
+    let client = build_client().unwrap();
+
+    // 3 items; concurrency = 1 so item 0 holds the permit while 1 and 2 wait.
+    let items: Vec<DownloadItem> = (0..3)
+        .map(|i| DownloadItem {
+            url: server.url(&format!("ci{i}")),
+            dest: dir.join(format!("ci{i}.bin")),
+            expected_hash: Some(ExpectedHash::Sha1(hash.clone())),
+            size: None,
+        })
+        .collect();
+
+    let plan = DownloadPlan::new(items.clone());
+    let cancel = CancelToken::new();
+    let cancel_trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel_trigger.cancel();
+    });
+
+    let sink = CapturingItemSink::new();
+    let result = execute_plan_cancellable(&client, &plan, &sink, 1, &cancel).await;
+
+    assert!(result.cancelled, "run must be flagged cancelled");
+
+    // item_done must fire for every item in the plan — including cancelled ones.
+    let recorded = sink.items.lock().unwrap();
+    assert_eq!(
+        recorded.len(),
+        items.len(),
+        "item_done must fire for all {} items, got {}",
+        items.len(),
+        recorded.len()
+    );
+
+    // At least one cancelled item must have success=false.
+    let false_count = recorded.iter().filter(|(_, ok)| !ok).count();
+    assert!(false_count >= 1, "expected ≥1 success=false from cancelled items");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
