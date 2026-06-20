@@ -4,19 +4,31 @@
  *
  * BP-2: header + lazy getPackInfo → PackDescription
  * BP-3: Download button → version-select modal, lazy getModVersions
+ * BR-B-3: "Installed" pill in the header when the pack matches an installed instance.
  */
 
 import { useState } from "react";
-import { Link, useLocation, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, ArrowLeft, Download, Loader2, Package, X } from "lucide-react";
+import {
+  AlertCircle,
+  ArrowLeft,
+  CheckCircle,
+  Download,
+  Loader2,
+  Package,
+  X,
+} from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   getModVersions,
   getPackInfo,
   installModpack,
+  listInstances,
   type ProjectSummary,
 } from "@/lib/ipc";
+import { META_STALE_TIME } from "@/lib/query";
+import { buildInstalledIndex, isInstalled } from "@/lib/installedIndex";
 import { ProviderBadge } from "@/components/ProviderBadge";
 import { PackDescription } from "@/components/PackDescription";
 
@@ -45,6 +57,7 @@ function toWireProvider(routeProvider: string): string {
 export function BrowsePackInfo() {
   const { provider = "", id = "" } = useParams<{ provider: string; id: string }>();
   const location = useLocation();
+  const navigate = useNavigate();
   const pack = (location.state as { pack?: ProjectSummary } | null)?.pack;
 
   // provider is the routing string "modrinth" | "curseforge"
@@ -60,9 +73,19 @@ export function BrowsePackInfo() {
     enabled: !!provider && !!id,
   });
 
+  // BR-B-3: build installed index from the cached ["instances"] query (no new IPC call).
+  const { data: instances } = useQuery({
+    queryKey: ["instances"],
+    queryFn: listInstances,
+    staleTime: META_STALE_TIME,
+  });
+  const installedIndex = instances ? buildInstalledIndex(instances) : new Map<string, string>();
+  // The card wire provider is "modrinth" / "curseForge" (camelCase for CF).
+  const wireProvider = pack?.provider ?? toWireProvider(provider);
+  const installedSlug = isInstalled(installedIndex, wireProvider, id);
+
   const title = pack?.name ?? infoQuery.data?.title ?? id;
   const iconUrl = pack?.iconUrl ?? infoQuery.data?.iconUrl ?? null;
-  const providerWire = pack?.provider ?? toWireProvider(provider);
 
   return (
     <div className="flex h-full flex-col px-8 py-7">
@@ -94,7 +117,17 @@ export function BrowsePackInfo() {
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-2xl font-semibold">{title}</h1>
-            <ProviderBadge provider={providerWire as "modrinth" | "curseForge"} />
+            <ProviderBadge provider={wireProvider as "modrinth" | "curseForge"} />
+            {/* BR-B-3: installed pill */}
+            {installedSlug != null && (
+              <button
+                onClick={() => navigate(`/instances/${installedSlug}`)}
+                className="inline-flex items-center gap-1 rounded-md bg-success/15 px-2 py-1 text-xs font-medium text-success ring-1 ring-inset ring-success/20 hover:bg-success/25 transition-colors"
+              >
+                <CheckCircle className="size-3.5" />
+                Installed — Open instance
+              </button>
+            )}
           </div>
           {pack?.summary && (
             <p className="mt-1 text-sm text-muted">{pack.summary}</p>
@@ -145,7 +178,7 @@ export function BrowsePackInfo() {
       {promptOpen && (
         <DownloadPrompt
           provider={provider}
-          providerWire={providerWire}
+          providerWire={wireProvider}
           id={id}
           pack={pack}
           onClose={() => setPromptOpen(false)}
