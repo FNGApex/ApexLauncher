@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
+use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 
 use crate::core::download::{DownloadItem, ExpectedHash, PlanResult};
@@ -173,120 +174,151 @@ pub async fn resolve_install(
     // to the root project is skipped.
     visited.insert(root_project_id.to_string());
 
-    // Queue entries: (version, project_id, slug_or_id_for_page_url).
-    let mut queue: Vec<(ProjectVersion, String, String)> =
+    // Frontier entries: (version, project_id, slug_or_id_for_page_url).
+    // Each iteration processes one complete BFS level and fetches the NEXT level
+    // concurrently (bounded, order-preserving via `buffered`).
+    let mut frontier: Vec<(ProjectVersion, String, String)> =
         vec![(root_version, root_project_id.to_string(), root_slug.to_string())];
     let mut dep_count: usize = 0; // number of transitive deps resolved (root excluded)
 
-    while !queue.is_empty() {
-        let (version, project_id, slug) = queue.remove(0);
-        let provider_kind = version.provider;
-        let version_id = version.id.clone();
+    while !frontier.is_empty() {
+        // ── Step A: process this frontier level synchronously ──────────────
+        // Collect (project_id, preferred_version_id) for every NEW required dep
+        // discovered across all entries in this frontier level. Dedup via `visited`
+        // (including same-frontier duplicates: two entries pointing at the same dep
+        // both see it in `visited` because we insert immediately on discovery).
+        let mut next_requests: Vec<(String, Option<String>)> = Vec::new();
 
-        // Find the primary file (or first file).
-        let primary_file = version
-            .files
-            .iter()
-            .find(|f| f.primary)
-            .or_else(|| version.files.first());
+        for (version, project_id, slug) in frontier {
+            let provider_kind = version.provider;
+            let version_id = version.id.clone();
 
-        if let Some(file) = primary_file {
-            let page = page_url_for(provider_kind, &slug);
-            if let Some(url) = &file.url {
-                plan.downloads.push(PlannedMod {
-                    provider: provider_kind,
-                    project_id: project_id.clone(),
-                    version_id: version_id.clone(),
-                    file_name: file.file_name.clone(),
-                    url: url.clone(),
-                    hashes: file.hashes.clone(),
-                    primary: file.primary,
-                    side: "unknown".to_string(), // providers don't surface per-file side yet
-                    page_url: page,
-                });
-            } else {
-                plan.manual.push(ManualMod {
-                    provider: provider_kind,
-                    project_id: project_id.clone(),
-                    version_id: version_id.clone(),
-                    file_name: file.file_name.clone(),
-                    page_url: page_url_for(provider_kind, &slug),
-                });
+            // Find the primary file (or first file).
+            let primary_file = version
+                .files
+                .iter()
+                .find(|f| f.primary)
+                .or_else(|| version.files.first());
+
+            if let Some(file) = primary_file {
+                let page = page_url_for(provider_kind, &slug);
+                if let Some(url) = &file.url {
+                    plan.downloads.push(PlannedMod {
+                        provider: provider_kind,
+                        project_id: project_id.clone(),
+                        version_id: version_id.clone(),
+                        file_name: file.file_name.clone(),
+                        url: url.clone(),
+                        hashes: file.hashes.clone(),
+                        primary: file.primary,
+                        side: "unknown".to_string(), // providers don't surface per-file side yet
+                        page_url: page,
+                    });
+                } else {
+                    plan.manual.push(ManualMod {
+                        provider: provider_kind,
+                        project_id: project_id.clone(),
+                        version_id: version_id.clone(),
+                        file_name: file.file_name.clone(),
+                        page_url: page_url_for(provider_kind, &slug),
+                    });
+                }
             }
-        }
-        // (If there are no files at all we still process deps — unusual but not fatal.)
+            // (If there are no files at all we still process deps — unusual but not fatal.)
 
-        // Walk dependencies.
-        for dep in &version.dependencies {
-            match dep.dependency_type.as_str() {
-                "optional" => {
-                    if let Some(pid) = &dep.project_id {
-                        plan.suggestions.push(Suggestion {
-                            project_id: pid.clone(),
-                            version_id: dep.version_id.clone(),
-                        });
-                    }
-                }
-                "incompatible" => {
-                    if let Some(pid) = &dep.project_id {
-                        plan.warnings.push(IncompatibleWarning {
-                            project_id: pid.clone(),
-                        });
-                    }
-                }
-                "embedded" => {
-                    // Ignore embedded — bundled inside the parent jar.
-                }
-                "required" => {
-                    let Some(pid) = &dep.project_id else {
-                        // No project_id on a required dep — nothing we can do.
-                        continue;
-                    };
-
-                    // Dedup: already in manifest or already visited in this BFS.
-                    if already_installed.contains(pid) || visited.contains(pid) {
-                        continue;
-                    }
-                    visited.insert(pid.clone());
-
-                    // If the dep specifies an exact version_id, use it.
-                    let resolved = if let Some(vid) = &dep.version_id {
-                        // Fetch the specific version by getting all versions and
-                        // filtering — providers don't expose a single-version endpoint
-                        // in the current trait.  Fall back to newest-compatible.
-                        fetch_newest_compatible(provider, client, pid, mc_version, loader, Some(vid))
-                            .await
-                    } else {
-                        fetch_newest_compatible(provider, client, pid, mc_version, loader, None)
-                            .await
-                    };
-
-                    match resolved {
-                        Some(dep_version) => {
-                            log::debug!(
-                                "resolve: dep {} -> version {}",
-                                pid,
-                                dep_version.id
-                            );
-                            dep_count += 1;
-                            // page URL for a dep uses its project_id as the slug
-                            // (best effort; slug not available from Dependency struct).
-                            queue.push((dep_version, pid.clone(), pid.clone()));
-                        }
-                        None => {
-                            log::debug!("resolve: dep {} -> unresolved (no compatible version)", pid);
-                            plan.unresolved.push(UnresolvedDep {
+            // Walk dependencies.
+            for dep in &version.dependencies {
+                match dep.dependency_type.as_str() {
+                    "optional" => {
+                        if let Some(pid) = &dep.project_id {
+                            plan.suggestions.push(Suggestion {
                                 project_id: pid.clone(),
-                                reason: "no compatible version found".to_string(),
+                                version_id: dep.version_id.clone(),
                             });
                         }
                     }
-                }
-                _ => {
-                    // Unknown dep type — ignore defensively.
+                    "incompatible" => {
+                        if let Some(pid) = &dep.project_id {
+                            plan.warnings.push(IncompatibleWarning {
+                                project_id: pid.clone(),
+                            });
+                        }
+                    }
+                    "embedded" => {
+                        // Ignore embedded — bundled inside the parent jar.
+                    }
+                    "required" => {
+                        let Some(pid) = &dep.project_id else {
+                            // No project_id on a required dep — nothing we can do.
+                            continue;
+                        };
+
+                        // Dedup: already in manifest or already visited in this BFS.
+                        // Insert into `visited` immediately so same-frontier duplicates
+                        // (two entries in this level both requiring the same pid) are
+                        // also deduplicated without fetching twice.
+                        if already_installed.contains(pid) || visited.contains(pid) {
+                            continue;
+                        }
+                        visited.insert(pid.clone());
+
+                        next_requests.push((pid.clone(), dep.version_id.clone()));
+                    }
+                    _ => {
+                        // Unknown dep type — ignore defensively.
+                    }
                 }
             }
         }
+
+        // ── Step B: fetch the next frontier level concurrently (bounded, ordered) ──
+        // `buffered(8)` drives up to 8 futures concurrently while yielding results in
+        // request order (deterministic). `provider` and `client` are `&dyn (Send+Sync)`
+        // so they are safe to borrow across the concurrent futures.
+        let fetch_results: Vec<(String, Option<ProjectVersion>)> =
+            futures_util::stream::iter(next_requests.into_iter().map(|(pid, vid)| {
+                let preferred = vid.as_deref().map(|s| s.to_string());
+                async move {
+                    let resolved = fetch_newest_compatible(
+                        provider,
+                        client,
+                        &pid,
+                        mc_version,
+                        loader,
+                        preferred.as_deref(),
+                    )
+                    .await;
+                    (pid, resolved)
+                }
+            }))
+            .buffered(8)
+            .collect()
+            .await;
+
+        // ── Step C: build the next frontier from ordered results ───────────
+        let mut next_frontier: Vec<(ProjectVersion, String, String)> = Vec::new();
+        for (pid, resolved) in fetch_results {
+            match resolved {
+                Some(dep_version) => {
+                    log::debug!("resolve: dep {} -> version {}", pid, dep_version.id);
+                    dep_count += 1;
+                    // page URL for a dep uses its project_id as the slug
+                    // (best effort; slug not available from Dependency struct).
+                    next_frontier.push((dep_version, pid.clone(), pid));
+                }
+                None => {
+                    log::debug!(
+                        "resolve: dep {} -> unresolved (no compatible version)",
+                        pid
+                    );
+                    plan.unresolved.push(UnresolvedDep {
+                        project_id: pid.clone(),
+                        reason: "no compatible version found".to_string(),
+                    });
+                }
+            }
+        }
+        frontier = next_frontier;
     }
 
     log::info!(
