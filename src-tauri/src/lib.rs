@@ -357,6 +357,72 @@ impl ProgressSink for TauriEventSink {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Task-progress bridge: sync ProgressSink → async TaskContext::finish_child
+// ---------------------------------------------------------------------------
+
+/// A [`ProgressSink`] that bridges the engine's synchronous [`item_done`] hook
+/// to the async [`TaskContext::finish_child`] call, without spawning `ctx`
+/// (which is borrowed, not `'static`).
+///
+/// **Design:** `CtxProgressSink` holds the sending half of an unbounded mpsc
+/// channel.  Each [`item_done`] call sends a unit through it — the send is
+/// sync and infallible for an unbounded channel.  Callers use
+/// [`drive_with_progress`] rather than constructing this type directly;
+/// that helper ensures the sender is dropped exactly when the download future
+/// completes, closing the channel and letting the drain see `None`.
+struct CtxProgressSink {
+    tx: tokio::sync::mpsc::UnboundedSender<()>,
+}
+
+impl download::ProgressSink for CtxProgressSink {
+    fn report(&self, _update: download::ProgressUpdate) {
+        // chunk-level progress is not forwarded through TaskContext — the
+        // task://progress event only tracks per-item completion, not bytes.
+    }
+
+    fn item_done(&self, _url: &str, _success: bool) {
+        // Unbounded send is infallible; if the receiver is already dropped
+        // (shouldn't happen before downloads finish), silently swallow.
+        let _ = self.tx.send(());
+    }
+}
+
+/// Run a download future concurrently with a drain loop that calls
+/// [`TaskContext::finish_child`] once per item completion.
+///
+/// # Deadlock-free contract
+///
+/// `run` receives the [`CtxProgressSink`] **by value** and must move it into
+/// the future it returns (typically by passing it to `execute_plan_cancellable`
+/// as the `sink` argument via a local borrow inside the async block).  When
+/// `run`'s future completes, the sink — and thus the underlying
+/// `UnboundedSender` — is dropped, which closes the channel.  The drain loop
+/// then sees `recv()` → `None` and terminates, allowing `tokio::join!` to
+/// resolve without deadlock.
+///
+/// If `bridge_sink` were kept alive in the outer scope (the pre-fix pattern),
+/// the sender would not be dropped when the download finished, so
+/// `item_rx.recv()` would block forever and the `join!` would hang.
+async fn drive_with_progress<F, Fut>(ctx: &core::task_manager::TaskContext, run: F) -> Fut::Output
+where
+    F: FnOnce(CtxProgressSink) -> Fut,
+    Fut: std::future::Future,
+{
+    let (item_tx, mut item_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let sink = CtxProgressSink { tx: item_tx };
+    // `run(sink)` moves `sink` (and therefore the sender) into the returned
+    // future.  When that future finishes the sender is dropped → channel closes.
+    let dl_fut = run(sink);
+    let drain_fut = async {
+        while item_rx.recv().await.is_some() {
+            ctx.finish_child().await;
+        }
+    };
+    let (result, ()) = tokio::join!(dl_fut, drain_fut);
+    result
+}
+
 /// Execute a [`DownloadPlan`] concurrently, emitting per-chunk progress on
 /// the `download://progress` Tauri event channel.
 ///
@@ -1525,13 +1591,9 @@ impl TaskJob for ModAddJob {
             }
         };
 
-        let dl_result = execute_plan_cancellable(
-            &http_client,
-            &staged_plan,
-            &core::download::NoOpSink,
-            8,
-            ctx.cancel_token(),
-        ).await;
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 8, ctx.cancel_token()).await
+        }).await;
 
         if dl_result.cancelled || ctx.is_cancelled() {
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -1800,13 +1862,9 @@ impl TaskJob for ModUpdateJob {
             }
         };
 
-        let dl_result = execute_plan_cancellable(
-            &http_client,
-            &staged_plan,
-            &core::download::NoOpSink,
-            1,
-            ctx.cancel_token(),
-        ).await;
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 1, ctx.cancel_token()).await
+        }).await;
 
         if dl_result.cancelled || ctx.is_cancelled() {
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -2107,14 +2165,9 @@ impl TaskJob for ImportMrpackJob {
             }
         };
 
-        let dl_result = execute_plan_cancellable(
-            &http_client,
-            &staged_plan,
-            &core::download::NoOpSink,
-            8,
-            ctx.cancel_token(),
-        )
-        .await;
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 8, ctx.cancel_token()).await
+        }).await;
 
         if dl_result.cancelled || ctx.is_cancelled() {
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -2396,14 +2449,9 @@ impl TaskJob for ImportCfZipJob {
             }
         };
 
-        let dl_result = execute_plan_cancellable(
-            &http_client,
-            &staged_plan,
-            &core::download::NoOpSink,
-            8,
-            ctx.cancel_token(),
-        )
-        .await;
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 8, ctx.cancel_token()).await
+        }).await;
 
         if dl_result.cancelled || ctx.is_cancelled() {
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -2845,14 +2893,9 @@ impl TaskJob for UpdateModpackJob {
             }
         };
 
-        let dl_result = execute_plan_cancellable(
-            &http_client,
-            &staged_plan,
-            &core::download::NoOpSink,
-            8,
-            ctx.cancel_token(),
-        )
-        .await;
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 8, ctx.cancel_token()).await
+        }).await;
 
         if dl_result.cancelled || ctx.is_cancelled() {
             let _ = std::fs::remove_dir_all(&staging_dir);

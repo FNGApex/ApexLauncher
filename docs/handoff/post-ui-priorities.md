@@ -32,9 +32,23 @@ Symptom (human): the app makes far more provider/API calls than it should. Likel
   doesn't refetch on every tab switch.
 - Consider a provider-call rate limiter / dedupe layer in the Rust provider seam.
 
-## P2 · Download Manager reliability ("failing quite often")
+## P2 · Download Manager reliability + feedback (active focus)
 
-Symptom (human): downloads/tasks fail frequently. Need a real repro + the failure mode.
+**Human-reported symptoms (2026-06-19), ranked by their priority:**
+1. **No real install feedback / instant false success** — clicking Install on a mod just queues a task;
+   the button instantly shows green "mod installed" and ALL mods immediately report installing, with no
+   tie to the actual task outcome. (Add reflects enqueue, not completion.)
+2. **Silent failures** — some mods fail to install with no user-visible indication.
+3. **More logging needed** in the Download Manager / download+task backend to diagnose.
+4. **Installs are slow.**
+5. **CF opt-out mods** (`allowModDistribution:false`) — single-mod add path may not surface the
+   "open project page / manual download" affordance that the modpack path has (`MANUAL:` handling).
+
+Likely root cause: the task-queue contract returns a task id on enqueue and results arrive async via
+`task://update`; the per-instance install UI (ModSearchCard) doesn't observe the task's terminal status,
+and the completion/failure toast ("CP-9") may be unwired → successes look instant, failures are silent.
+
+Original note: downloads/tasks fail frequently. Need a real repro + the failure mode.
 
 **Investigate:**
 - Reproduce a failing download; capture the `task://update` terminal payload + backend logs. Is it a

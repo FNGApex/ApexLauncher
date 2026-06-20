@@ -545,3 +545,99 @@ fn f1_1_added_nonzero_overrides_failure_count() {
         "added=1 failed=99 must produce Done (partial; result reaches toast for enumeration)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// F2-1: drive_with_progress — deadlock regression
+// ---------------------------------------------------------------------------
+
+/// Regression test for the F2-1 deadlock fix.
+///
+/// The OLD pattern kept `bridge_sink` (and thus the `UnboundedSender`) alive in
+/// the outer scope of the `tokio::join!`, so `item_rx.recv()` blocked forever
+/// after the download future finished → the drain never saw `None` → `join!`
+/// never resolved → the task hung in `Downloading` indefinitely.
+///
+/// The fix: `drive_with_progress` passes the sink **by value** into the
+/// download future (the `run` closure), so the sender is dropped exactly when
+/// that future completes, closing the channel and letting the drain terminate.
+///
+/// This test uses `tokio::time::timeout(5s)` so the buggy version FAILS (times
+/// out) instead of hanging the suite. It also asserts that `task.done == N`
+/// after the job completes, confirming every `item_done` call was forwarded
+/// through `TaskContext::finish_child`.
+#[tokio::test]
+async fn f2_1_drive_with_progress_terminates_and_counts_children() {
+    use self::core::task_manager::{
+        ChildItem, NoOpObserver, TaskContext, TaskJob, TaskKind, TaskSpec, TaskStatus,
+    };
+    use std::sync::Arc;
+
+    const N: u32 = 5;
+
+    // Custom job that uses drive_with_progress with a fake "download" closure
+    // that fires item_done N times, then finishes Done.
+    struct FakeDownloadJob {
+        n: u32,
+    }
+
+    #[async_trait::async_trait]
+    impl TaskJob for FakeDownloadJob {
+        async fn run(self: Box<Self>, ctx: &TaskContext) {
+            let n = self.n;
+            let children: Vec<ChildItem> = (0..n)
+                .map(|i| ChildItem { label: format!("item-{i}") })
+                .collect();
+            ctx.enter_downloading(children).await;
+
+            // drive_with_progress: sink is moved into the async block so it
+            // drops when the block completes → channel closes → drain terminates.
+            // With the OLD pattern (outer-scope sink) this join! would never resolve.
+            drive_with_progress(ctx, move |sink| async move {
+                for i in 0..n {
+                    sink.item_done(&format!("fake://item-{i}"), true);
+                }
+                // sink drops here → UnboundedSender closed → recv() → None
+            })
+            .await;
+
+            ctx.enter_applying().await;
+            ctx.finish_done().await;
+        }
+    }
+
+    let mgr = core::task_manager::TaskManager::new(Arc::new(NoOpObserver));
+    let spec = TaskSpec {
+        kind: TaskKind::Synthetic,
+        parent_label: "deadlock-regression".to_owned(),
+        job: Box::new(FakeDownloadJob { n: N }),
+    };
+    let id = mgr.enqueue(spec).await;
+
+    // Poll until the task reaches Done, guarded by a 5-second timeout.
+    // If drive_with_progress deadlocks the task stays in Downloading forever
+    // and the timeout converts that into a test failure (not a hang).
+    let timeout_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        async {
+            loop {
+                let snap = mgr.list().await;
+                if let Some(t) = snap.iter().find(|t| t.id == id) {
+                    if t.status == TaskStatus::Done {
+                        return t.done;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        },
+    )
+    .await;
+
+    let done = timeout_result.expect(
+        "drive_with_progress must let the task reach Done within 5 s (deadlock regression guard)",
+    );
+
+    assert_eq!(
+        done, N,
+        "all {N} item_done calls must be forwarded to ctx.finish_child (done={done})"
+    );
+}
