@@ -1588,9 +1588,27 @@ impl TaskJob for ModAddJob {
             result.added.len(), result.failed.len(), result.manual.len()
         );
 
-        match serde_json::to_value(&result) {
-            Ok(v) => ctx.finish_done_with_result(v).await,
-            Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+        // F1-1: honest terminal status.
+        match mod_install_outcome(result.added.len(), result.failed.len(), result.manual.len()) {
+            ModInstallOutcome::Failed(_base_msg) => {
+                // Build a detail message: count + first failure reason.
+                let count = result.failed.len();
+                let first_detail = result.failed.first().map(|f| {
+                    format!(" ({})", f.error)
+                }).unwrap_or_default();
+                let msg = if count == 1 {
+                    format!("1 file failed to download{first_detail}")
+                } else {
+                    format!("{count} files failed to download{first_detail}")
+                };
+                ctx.finish_failed(msg).await;
+            }
+            ModInstallOutcome::Done => {
+                match serde_json::to_value(&result) {
+                    Ok(v) => ctx.finish_done_with_result(v).await,
+                    Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                }
+            }
         }
     }
 }
@@ -1810,11 +1828,8 @@ impl TaskJob for ModUpdateJob {
                 }
             }).unwrap_or_else(|| "download failed: no outcome recorded".to_string());
             log::warn!("mod-update: project_id={} download failed — {err}", self.project_id);
-            let result = UpdateModResult { status: "failed".to_string(), entry: None, page_url: None, error: Some(err) };
-            match serde_json::to_value(&result) {
-                Ok(v) => ctx.finish_done_with_result(v).await,
-                Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
-            }
+            // F1-1: a download failure with nothing updated is a hard fail — report red.
+            ctx.finish_failed(format!("mod update download failed: {err}")).await;
             return;
         }
 
@@ -1908,6 +1923,53 @@ fn tally_cancellable(
         }
     }
     (installed, failed, failed_files)
+}
+
+// ---------------------------------------------------------------------------
+// F1-1: Honest terminal-status decision helper
+// ---------------------------------------------------------------------------
+
+/// Outcome of a mod-install/pack-import job after tallying `added`, `failed`, and `manual`.
+///
+/// This is a pure, unit-testable decision — it has no AppHandle dependency and
+/// can be called from any job impl. The `run()` body maps this to the appropriate
+/// `ctx.finish_*` call.
+///
+/// Decision contract (locked 2026-06-19, see `docs/spec/download-feedback.md` D-F1):
+/// - **Hard fail**: `added == 0 && failed > 0` → `Failed(msg)` (real errors, nothing installed).
+/// - **All-manual**: `added == 0 && failed == 0 && manual > 0` → `Done` (structured result
+///   must reach the frontend so the toast can offer "Open page"). Amber, not red.
+/// - **Partial or clean success**: `added > 0` → `Done` (some or all installs succeeded).
+pub(crate) enum ModInstallOutcome {
+    Done,
+    Failed(String),
+}
+
+/// Compute the terminal-status outcome for a mod-add / pack-import job.
+///
+/// `added_len`   — number of successfully installed mods/files
+/// `failed_len`  — number of download/resolve failures
+/// `manual_len`  — number of distribution-disabled files (manual download required)
+///
+/// See [`ModInstallOutcome`] for the decision contract.
+pub(crate) fn mod_install_outcome(
+    added_len: usize,
+    failed_len: usize,
+    manual_len: usize,
+) -> ModInstallOutcome {
+    if added_len == 0 && failed_len > 0 {
+        // Build a concise message: count + contextual hint.
+        let msg = if failed_len == 1 {
+            "1 file failed to download".to_string()
+        } else {
+            format!("{failed_len} files failed to download")
+        };
+        ModInstallOutcome::Failed(msg)
+    } else {
+        // Covers: all-manual (added==0, failed==0, manual>0) and partial/clean success.
+        let _ = manual_len; // manual list stays in the result payload, not in the outcome
+        ModInstallOutcome::Done
+    }
 }
 
 /// Build a [`ChildItem`] list from plan items (basename of each dest path).
@@ -2115,9 +2177,22 @@ impl TaskJob for ImportMrpackJob {
                     "modpack: ImportMrpackJob done — slug='{}' installed={} failed={}",
                     r.slug, r.installed, r.failed
                 );
-                match serde_json::to_value(&r) {
-                    Ok(v) => ctx.finish_done_with_result(v).await,
-                    Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                // F1-1: no `manual` for mrpack; hard-fail when nothing installed and errors exist.
+                match mod_install_outcome(r.installed as usize, r.failed as usize, 0) {
+                    ModInstallOutcome::Failed(_) => {
+                        let msg = if r.failed == 1 {
+                            format!("1 file failed to download; pack may be incomplete")
+                        } else {
+                            format!("{} files failed to download; pack may be incomplete", r.failed)
+                        };
+                        ctx.finish_failed(msg).await;
+                    }
+                    ModInstallOutcome::Done => {
+                        match serde_json::to_value(&r) {
+                            Ok(v) => ctx.finish_done_with_result(v).await,
+                            Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                        }
+                    }
                 }
             }
             Err(e) => ctx.finish_failed(e).await,
@@ -2388,9 +2463,23 @@ impl TaskJob for ImportCfZipJob {
                     "modpack: ImportCfZipJob done — slug='{}' installed={} failed={}",
                     r.slug, r.installed, r.failed
                 );
-                match serde_json::to_value(&r) {
-                    Ok(v) => ctx.finish_done_with_result(v).await,
-                    Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                // F1-1: all-manual (installed==0, failed==0, manual>0) stays Done so the
+                // structured manual list reaches the frontend toast. Hard-fail otherwise.
+                match mod_install_outcome(r.installed as usize, r.failed as usize, r.manual.len()) {
+                    ModInstallOutcome::Failed(_) => {
+                        let msg = if r.failed == 1 {
+                            format!("1 file failed to download; pack may be incomplete")
+                        } else {
+                            format!("{} files failed to download; pack may be incomplete", r.failed)
+                        };
+                        ctx.finish_failed(msg).await;
+                    }
+                    ModInstallOutcome::Done => {
+                        match serde_json::to_value(&r) {
+                            Ok(v) => ctx.finish_done_with_result(v).await,
+                            Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                        }
+                    }
                 }
             }
             Err(e) => ctx.finish_failed(e).await,
@@ -2771,7 +2860,7 @@ impl TaskJob for UpdateModpackJob {
             return;
         }
 
-        let (_, dl_failed, _) = tally_cancellable(&dl_result.outcomes);
+        let (dl_installed, dl_failed, _) = tally_cancellable(&dl_result.outcomes);
         let download_failed = resolve_failed_count + dl_failed;
 
         // --- APPLY ---
@@ -2824,9 +2913,24 @@ impl TaskJob for UpdateModpackJob {
             result.added, result.removed, result.kept, result.failed
         );
 
-        match serde_json::to_value(&result) {
-            Ok(v) => ctx.finish_done_with_result(v).await,
-            Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+        // F1-1: use download-level installed count (not plan-level added_count) for the
+        // terminal-status decision — added_count can be 0 on a valid "remove-only" update.
+        // Hard-fail only when NO download succeeded AND there were failures.
+        match mod_install_outcome(dl_installed as usize, download_failed as usize, result.manual.len()) {
+            ModInstallOutcome::Failed(_) => {
+                let msg = if download_failed == 1 {
+                    format!("1 file failed to download; pack update may be incomplete")
+                } else {
+                    format!("{download_failed} files failed to download; pack update may be incomplete")
+                };
+                ctx.finish_failed(msg).await;
+            }
+            ModInstallOutcome::Done => {
+                match serde_json::to_value(&result) {
+                    Ok(v) => ctx.finish_done_with_result(v).await,
+                    Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                }
+            }
         }
     }
 }

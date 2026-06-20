@@ -421,3 +421,127 @@ fn d1_local_import_pack_source_is_none() {
     assert!(mrpack_local.is_none(), "import_mrpack must pass None pack_source");
     assert!(cf_local.is_none(), "import_curseforge_zip must pass None pack_source");
 }
+
+// ---------------------------------------------------------------------------
+// F1-1: mod_install_outcome — honest terminal-status decision
+// ---------------------------------------------------------------------------
+
+/// Helper: returns true iff `outcome` is the `Failed` variant.
+fn is_failed(outcome: &super::ModInstallOutcome) -> bool {
+    matches!(outcome, super::ModInstallOutcome::Failed(_))
+}
+
+/// Helper: returns true iff `outcome` is the `Done` variant.
+fn is_done(outcome: &super::ModInstallOutcome) -> bool {
+    matches!(outcome, super::ModInstallOutcome::Done)
+}
+
+/// (a) added==0 AND failed>0 → hard fail (the core bug scenario: mod 404'd).
+#[test]
+fn f1_1_zero_added_with_failures_is_hard_fail() {
+    let outcome = super::mod_install_outcome(0, 1, 0);
+    assert!(
+        is_failed(&outcome),
+        "added=0 failed=1 manual=0 must produce Failed, not Done"
+    );
+}
+
+/// (a) same with multiple failures.
+#[test]
+fn f1_1_zero_added_multiple_failures_is_hard_fail() {
+    let outcome = super::mod_install_outcome(0, 3, 0);
+    assert!(
+        is_failed(&outcome),
+        "added=0 failed=3 manual=0 must produce Failed"
+    );
+}
+
+/// Failed message includes the count.
+#[test]
+fn f1_1_hard_fail_message_names_count() {
+    // Single failure.
+    let outcome = super::mod_install_outcome(0, 1, 0);
+    if let super::ModInstallOutcome::Failed(msg) = outcome {
+        assert!(
+            msg.contains('1'),
+            "failure message for 1 failure must mention '1': {msg}"
+        );
+    } else {
+        panic!("expected Failed variant");
+    }
+
+    // Multiple failures.
+    let outcome_multi = super::mod_install_outcome(0, 5, 0);
+    if let super::ModInstallOutcome::Failed(msg) = outcome_multi {
+        assert!(
+            msg.contains('5'),
+            "failure message for 5 failures must mention '5': {msg}"
+        );
+    } else {
+        panic!("expected Failed variant for 5 failures");
+    }
+}
+
+/// (b) added==0 AND failed==0 AND manual>0 → Done (all-manual; structured result
+/// must reach the frontend toast so it can offer "Open page" links).
+#[test]
+fn f1_1_all_manual_is_done_not_failed() {
+    let outcome = super::mod_install_outcome(0, 0, 2);
+    assert!(
+        is_done(&outcome),
+        "added=0 failed=0 manual=2 must produce Done (all-manual path)"
+    );
+}
+
+/// (b) all-manual with a single manual entry.
+#[test]
+fn f1_1_single_manual_is_done() {
+    let outcome = super::mod_install_outcome(0, 0, 1);
+    assert!(
+        is_done(&outcome),
+        "added=0 failed=0 manual=1 must produce Done"
+    );
+}
+
+/// (c) some added + some failed → Done (partial success; result payload carries
+/// the failed list so the frontend amber-toast can enumerate them).
+#[test]
+fn f1_1_partial_success_is_done() {
+    let outcome = super::mod_install_outcome(3, 1, 0);
+    assert!(
+        is_done(&outcome),
+        "added=3 failed=1 manual=0 must produce Done (partial success)"
+    );
+}
+
+/// (c) clean full success → Done.
+#[test]
+fn f1_1_clean_success_is_done() {
+    let outcome = super::mod_install_outcome(5, 0, 0);
+    assert!(
+        is_done(&outcome),
+        "added=5 failed=0 manual=0 must produce Done (clean success)"
+    );
+}
+
+/// Edge: added==0 AND failed==0 AND manual==0 → Done (pack update no-op: no new
+/// files to download, nothing failed — the update itself is valid).
+#[test]
+fn f1_1_empty_result_is_done() {
+    let outcome = super::mod_install_outcome(0, 0, 0);
+    assert!(
+        is_done(&outcome),
+        "added=0 failed=0 manual=0 must produce Done (no-op update)"
+    );
+}
+
+/// added>0 takes precedence over failures (partial-success rule from spec).
+#[test]
+fn f1_1_added_nonzero_overrides_failure_count() {
+    // Even with many failures, if at least one mod was added → Done with result payload.
+    let outcome = super::mod_install_outcome(1, 99, 0);
+    assert!(
+        is_done(&outcome),
+        "added=1 failed=99 must produce Done (partial; result reaches toast for enumeration)"
+    );
+}
