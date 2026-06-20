@@ -2,6 +2,7 @@ import { createBrowserRouter, Navigate } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { Home } from "@/routes/Home";
 import { Browse } from "@/routes/Browse";
+import { BrowsePackInfo } from "@/routes/BrowsePackInfo";
 import { Settings } from "@/routes/Settings";
 import { InstanceDetail } from "@/routes/InstanceDetail";
 import { InfoTab } from "@/routes/instance-tabs/InfoTab";
@@ -28,6 +29,7 @@ export const router = createBrowserRouter([
         ],
       },
       { path: "browse", element: <Browse /> },
+      { path: "browse/:provider/:id", element: <BrowsePackInfo /> },
       { path: "settings", element: <Settings /> },
     ],
   },

@@ -1,12 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { AlertCircle, Download, ExternalLink, Loader2, Package, Search, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Link } from "react-router-dom";
 import {
   getLoaders,
-  getModVersions,
-  installModpack,
   listMinecraftVersions,
   searchMods,
   type ProjectSummary,
@@ -348,7 +346,7 @@ function MergedFeed({
 }
 
 // ---------------------------------------------------------------------------
-// Modpack result card — Install (primary) + open page (secondary)
+// Modpack result card — navigation-only, links to the pack info page
 // ---------------------------------------------------------------------------
 
 interface ModpackCardProps {
@@ -356,15 +354,7 @@ interface ModpackCardProps {
 }
 
 function ModpackCard({ pack }: ModpackCardProps) {
-  const qc = useQueryClient();
-  const [installQueued, setInstallQueued] = useState(false);
-  const [installError, setInstallError] = useState<string | null>(null);
-  // "latest" sentinel means pass undefined → backend picks first version.
-  const [selectedVersionId, setSelectedVersionId] = useState<string>("latest");
-  // Versions are fetched lazily on first card hover to avoid N requests on Browse load.
-  const [versionsEnabled, setVersionsEnabled] = useState(false);
-
-  // Resolve the provider routing string (response casing → routing param).
+  // Resolve the provider routing string (wire value → routing param).
   const providerRoute: "modrinth" | "curseforge" =
     pack.provider === "modrinth"
       ? "modrinth"
@@ -372,168 +362,58 @@ function ModpackCard({ pack }: ModpackCardProps) {
         ? "curseforge"
         : ((_: never) => "curseforge" as const)(pack.provider);
 
-  // Fetch versions (no MC/loader filter — a pack defines its own).
-  // Only enabled after first hover so Browse load doesn't fire N simultaneous requests.
-  const versionsQuery = useQuery({
-    queryKey: ["packVersions", pack.provider, pack.id],
-    queryFn: () => getModVersions(providerRoute, pack.id, null, null),
-    staleTime: 30_000,
-    enabled: versionsEnabled,
-  });
-
-  const install = useMutation({
-    mutationFn: () =>
-      installModpack(
-        pack.provider,
-        pack.id,
-        pack.pageUrl ?? undefined,
-        selectedVersionId === "latest" ? undefined : selectedVersionId,
-      ),
-    onSuccess: (_taskId) => {
-      // Command returns a task id; the terminal result arrives via task://update
-      // and is handled by the store subscriber. CP-9 wires the completion toast.
-      setInstallQueued(true);
-      qc.invalidateQueries({ queryKey: ["instances"] });
-    },
-    onError: (err) => {
-      const raw = err instanceof Error ? err.message : String(err);
-      // Distribution-disabled pack: backend returns Err("MANUAL:<json>") where
-      // json is {"pageUrl":"...","fileName":"..."}. Open the page and show a
-      // targeted message instead of surfacing the raw error string.
-      if (raw.startsWith("MANUAL:")) {
-        try {
-          const payload = JSON.parse(raw.slice("MANUAL:".length)) as {
-            pageUrl?: string;
-            fileName?: string;
-          };
-          if (payload.pageUrl) {
-            openUrl(payload.pageUrl).catch(console.error);
-          }
-          setInstallError(
-            `This pack cannot be auto-downloaded. Opening the page${payload.fileName ? ` to download "${payload.fileName}"` : ""} manually.`,
-          );
-        } catch {
-          // JSON parse failed — fall through to generic error display.
-          setInstallError(raw);
-        }
-        return;
-      }
-      setInstallError(raw);
-    },
-  });
-
-  function handleOpenPage() {
+  function handleOpenPage(e: React.MouseEvent) {
+    e.preventDefault();
     if (pack.pageUrl == null) return;
     openUrl(pack.pageUrl).catch(console.error);
   }
 
   return (
-    <>
-      <div
-        className="flex w-full items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 text-sm transition-colors hover:border-primary"
-        onMouseEnter={() => setVersionsEnabled(true)}
-      >
-        {/* Icon */}
-        {pack.iconUrl ? (
-          <img
-            src={pack.iconUrl}
-            alt=""
-            className="size-10 shrink-0 rounded-lg object-cover"
-            loading="lazy"
-          />
-        ) : (
-          <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted">
-            <Package className="size-5" />
-          </div>
-        )}
-
-        {/* Text */}
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <p className="truncate font-medium text-foreground">{pack.name}</p>
-            <ProviderBadge provider={pack.provider} />
-          </div>
-          <p className="mt-0.5 line-clamp-2 text-xs text-muted">{pack.summary}</p>
+    <Link
+      to={`/browse/${providerRoute}/${pack.id}`}
+      state={{ pack }}
+      className="flex w-full items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 text-sm transition-colors hover:border-primary"
+    >
+      {/* Icon */}
+      {pack.iconUrl ? (
+        <img
+          src={pack.iconUrl}
+          alt=""
+          className="size-10 shrink-0 rounded-lg object-cover"
+          loading="lazy"
+        />
+      ) : (
+        <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted">
+          <Package className="size-5" />
         </div>
+      )}
 
-        {/* Downloads */}
-        <div className="flex shrink-0 items-center gap-1 text-muted">
-          <Download className="size-3.5" />
-          <span>{formatDownloads(pack.downloads)}</span>
+      {/* Text */}
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <p className="truncate font-medium text-foreground">{pack.name}</p>
+          <ProviderBadge provider={pack.provider} />
         </div>
-
-        {/* Actions */}
-        <div className="flex shrink-0 items-center gap-2">
-          {/* Version picker */}
-          {versionsQuery.data && versionsQuery.data.length > 0 && (
-            <select
-              value={selectedVersionId}
-              onChange={(e) => setSelectedVersionId(e.target.value)}
-              disabled={install.isPending}
-              className="input w-auto max-w-[140px] text-xs disabled:opacity-50"
-            >
-              <option value="latest">Latest</option>
-              {versionsQuery.data.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name || v.versionNumber}
-                </option>
-              ))}
-            </select>
-          )}
-
-          {/* Primary: Install */}
-          <button
-            onClick={() => install.mutate()}
-            disabled={install.isPending}
-            className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-60"
-          >
-            {install.isPending ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Download className="size-3.5" />
-            )}
-            {install.isPending ? "Installing…" : "Install"}
-          </button>
-
-          {/* Secondary: open provider page */}
-          {pack.pageUrl != null && (
-            <button
-              onClick={handleOpenPage}
-              title="Open project page"
-              className="rounded-lg p-1.5 text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
-            >
-              <ExternalLink className="size-4" />
-            </button>
-          )}
-        </div>
+        <p className="mt-0.5 line-clamp-2 text-xs text-muted">{pack.summary}</p>
       </div>
 
-      {/* Inline error (mutation failure) */}
-      {installError != null && (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger/10 px-4 py-2 text-xs text-danger">
-          <span className="truncate">{installError}</span>
-          <button
-            onClick={() => setInstallError(null)}
-            className="shrink-0 rounded-md p-0.5 hover:bg-danger/20"
-          >
-            <X className="size-3.5" />
-          </button>
-        </div>
-      )}
+      {/* Downloads */}
+      <div className="flex shrink-0 items-center gap-1 text-muted">
+        <Download className="size-3.5" />
+        <span>{formatDownloads(pack.downloads)}</span>
+      </div>
 
-      {/* Install queued notice — transient acknowledgement until CP-9 wires the toast */}
-      {installQueued && (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-surface/60 px-4 py-2 text-xs text-muted">
-          <span>Install queued — check progress in the Download Manager.</span>
-          <button
-            onClick={() => setInstallQueued(false)}
-            className="shrink-0 rounded-md p-0.5 hover:bg-surface-2 hover:text-foreground"
-          >
-            <X className="size-3.5" />
-          </button>
-        </div>
+      {/* Open provider page (secondary action) */}
+      {pack.pageUrl != null && (
+        <button
+          onClick={handleOpenPage}
+          title="Open project page"
+          className="shrink-0 rounded-lg p-1.5 text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+        >
+          <ExternalLink className="size-4" />
+        </button>
       )}
-    </>
+    </Link>
   );
 }
 
