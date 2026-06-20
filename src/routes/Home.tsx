@@ -94,7 +94,7 @@ export function Home() {
         <p className="text-sm text-muted">Loading…</p>
       ) : instances && instances.length > 0 ? (
         filtered.length > 0 ? (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <div className="grid w-4/5 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {filtered.map((inst) => (
               <InstanceCard key={inst.id} instance={inst} />
             ))}
