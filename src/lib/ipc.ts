@@ -307,6 +307,16 @@ export function updateMod(slug: string, projectId: string) {
   return unwrap(commands.updateMod(slug, projectId));
 }
 
+/**
+ * Backfill missing display metadata (name/icon/summary) for an instance's mods —
+ * e.g. modpack-imported mods, which carry no metadata. One batched provider call
+ * per provider; persisted to the manifest. Returns the count enriched. Idempotent:
+ * returns 0 with NO network call when nothing is missing (api-frugality).
+ */
+export function enrichInstanceMods(slug: string): Promise<number> {
+  return unwrap(commands.enrichInstanceMods(slug));
+}
+
 // --- Phase 6 slice A: mrpack import ---
 
 /**

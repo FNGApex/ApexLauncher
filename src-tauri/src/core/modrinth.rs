@@ -14,8 +14,8 @@
 use serde::Deserialize;
 
 use crate::core::providers::{
-    Dependency, ModProvider, MrSearchResponse, PackInfo, ProjectType, ProjectVersion, ProviderError,
-    ProviderHttpClient, ProviderKind, SearchParams, SearchResult, VersionFile,
+    Dependency, ModBrief, ModProvider, MrSearchResponse, PackInfo, ProjectType, ProjectVersion,
+    ProviderError, ProviderHttpClient, ProviderKind, SearchParams, SearchResult, VersionFile,
 };
 
 // ── Percent-encoding helper ────────────────────────────────────────────────────
@@ -163,6 +163,18 @@ struct MrProject {
     icon_url: Option<String>,
 }
 
+/// Raw Modrinth `/v2/projects?ids=[...]` response item (for batch metadata fetch).
+///
+/// Uses the short `description` field — NOT `body` — per MM-B2 spec.
+#[derive(Debug, Deserialize)]
+struct MrProjectBrief {
+    id: String,
+    title: String,
+    icon_url: Option<String>,
+    /// Short description (not the long Markdown body).
+    description: String,
+}
+
 // ── ModrinthProvider ───────────────────────────────────────────────────────────
 
 /// Modrinth implementation of `ModProvider`.
@@ -226,6 +238,22 @@ impl ModrinthProvider {
     /// Build the Modrinth `/v2/project/{id}` URL.
     fn build_project_url(project_id: &str) -> String {
         format!("{}/project/{}", BASE_URL, project_id)
+    }
+
+    /// Build the Modrinth `/v2/projects?ids=[...]` URL for batch metadata fetch.
+    ///
+    /// The `ids` array is serialized as a JSON array string and percent-encoded
+    /// as the `ids` query parameter value per Modrinth API convention.
+    fn build_projects_brief_url(ids: &[String]) -> String {
+        // Build a JSON array: ["id1","id2",...]
+        let ids_json = format!(
+            "[{}]",
+            ids.iter()
+                .map(|id| format!(r#""{}""#, id))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        format!("{}/projects?ids={}", BASE_URL, percent_encode(&ids_json))
     }
 }
 
@@ -320,6 +348,38 @@ impl ModProvider for ModrinthProvider {
             icon_url: raw.icon_url,
             body_is_html: false,
         })
+    }
+
+    async fn get_projects_brief(
+        &self,
+        client: &dyn ProviderHttpClient,
+        ids: &[String],
+    ) -> Result<Vec<ModBrief>, ProviderError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let url = Self::build_projects_brief_url(ids);
+        let (status, body) = client
+            .get(&url, &[("User-Agent", USER_AGENT)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw: Vec<MrProjectBrief> =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        Ok(raw
+            .into_iter()
+            .map(|p| ModBrief {
+                project_id: p.id,
+                name: p.title,
+                icon_url: p.icon_url,
+                summary: p.description,
+            })
+            .collect())
     }
 }
 

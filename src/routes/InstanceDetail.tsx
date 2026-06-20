@@ -30,6 +30,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   addMod,
+  enrichInstanceMods,
   getInstance,
   getModVersions,
   getSettings,
@@ -53,6 +54,12 @@ import { ProviderBadge } from "@/components/ProviderBadge";
 
 const PAGE_LIMIT = 20;
 const DEBOUNCE_MS = 400;
+
+// Tracks instances whose mod metadata backfill has been triggered this session, so
+// the lazy enrich (for modpack-imported mods without metadata) runs at most once per
+// instance. The backend enrich is also idempotent (0 network calls when nothing is
+// missing); this just avoids redundant in-flight calls before the refetch lands.
+const enrichedSlugs = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Outlet context type — consumed by the four tab components
@@ -600,6 +607,25 @@ function InstalledModsTab({
   packLocked,
   onMutate,
 }: InstalledModsTabProps) {
+  // Lazy backfill: modpack-imported mods carry no name/icon/summary. On first view
+  // of an instance with metadata-less mods, fetch it in one batched provider call
+  // (per provider), persist to the manifest, then refetch so icons/names appear.
+  // Runs at most once per instance per session; backend is idempotent.
+  useEffect(() => {
+    if (!instanceSlug || enrichedSlugs.has(instanceSlug)) return;
+    if (!modEntries.some((e) => e.name == null)) return;
+    enrichedSlugs.add(instanceSlug);
+    enrichInstanceMods(instanceSlug)
+      .then((n) => {
+        if (n > 0) onMutate();
+      })
+      .catch((err) => {
+        // Allow a retry on a later view if this was transient.
+        enrichedSlugs.delete(instanceSlug);
+        console.error("enrich mod metadata failed:", err);
+      });
+  }, [instanceSlug, modEntries, onMutate]);
+
   if (folderMods.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border bg-surface/40 px-4 py-8 text-center text-sm text-muted">

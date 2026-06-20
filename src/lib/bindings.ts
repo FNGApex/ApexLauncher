@@ -162,6 +162,19 @@ export const commands = {
 	 */
 	getPackInfo: (provider: string, projectId: string) => typedError<PackInfo, ProviderCommandError>(__TAURI_INVOKE("get_pack_info", { provider, projectId })),
 	/**
+	 *  Back-fill metadata (`name`, `icon_url`, `summary`) for modpack-imported mods that
+	 *  were added without display metadata (only search-added mods capture it at add-time).
+	 * 
+	 *  ## Frugality contract
+	 *  - If all mods already have `name` set → returns `Ok(0)` with **zero** network calls.
+	 *  - Otherwise issues **exactly one** batched call per provider with missing entries.
+	 *  - Persists enriched metadata to the manifest so subsequent calls skip already-filled entries.
+	 * 
+	 *  ## Returns
+	 *  The count of `ModEntry`s that were actually enriched.
+	 */
+	enrichInstanceMods: (slug: string) => typedError<number, string>(__TAURI_INVOKE("enrich_instance_mods", { slug })),
+	/**
 	 *  Install a mod (and its required transitive dependencies) into an instance.
 	 * 
 	 *  # Flow

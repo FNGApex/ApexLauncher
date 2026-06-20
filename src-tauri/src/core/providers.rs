@@ -212,6 +212,18 @@ pub trait ProviderHttpClient: Send + Sync {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<(u16, String), reqwest::Error>;
+
+    /// POST a URL with optional extra headers and a string body. Returns `(status, body)`.
+    ///
+    /// `headers`: slice of `(name, value)` pairs added verbatim to the request.
+    /// `body`: request body string (typically JSON).
+    /// `Content-Type: application/json` should be included in `headers` by the caller.
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: String,
+    ) -> Result<(u16, String), reqwest::Error>;
 }
 
 /// Production implementation backed by a shared `reqwest::Client`.
@@ -225,6 +237,22 @@ impl ProviderHttpClient for ReqwestProviderClient {
         headers: &[(&str, &str)],
     ) -> Result<(u16, String), reqwest::Error> {
         let mut req = self.0.get(url);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let resp = req.send().await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await?;
+        Ok((status, body))
+    }
+
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        let mut req = self.0.post(url).body(body);
         for (name, value) in headers {
             req = req.header(*name, *value);
         }
@@ -263,6 +291,25 @@ impl From<reqwest::Error> for ProviderError {
     fn from(e: reqwest::Error) -> Self {
         ProviderError::Network(e.to_string())
     }
+}
+
+/// Minimal project metadata for mod-metadata backfill (MM-B2).
+///
+/// Internal type — NOT a Tauri DTO. Carries only the fields needed to populate
+/// `ModEntry.name`, `ModEntry.icon_url`, and `ModEntry.summary` for modpack-
+/// imported mods that were added without metadata.
+///
+/// Fetched via `ModProvider::get_projects_brief` (one batched call per provider).
+#[derive(Debug, Clone)]
+pub struct ModBrief {
+    /// Provider-specific project id (Modrinth: base62 string; CF: numeric id as string).
+    pub project_id: String,
+    /// Display name.
+    pub name: String,
+    /// Icon URL, if any.
+    pub icon_url: Option<String>,
+    /// Short human-readable summary (NOT the long markdown/HTML body).
+    pub summary: String,
 }
 
 /// Rich project info for the Info tab — title, long description, and icon.
@@ -316,6 +363,21 @@ pub trait ModProvider: Send + Sync {
         client: &dyn ProviderHttpClient,
         project_id: &str,
     ) -> Result<PackInfo, ProviderError>;
+
+    /// Batch-fetch minimal metadata for a set of project ids in ONE provider call.
+    ///
+    /// Used by `enrich_instance_mods` (MM-B3) to back-fill `name`/`icon_url`/`summary`
+    /// on modpack-imported `ModEntry`s that were added without metadata.
+    ///
+    /// Frugality contract:
+    /// - Issues **exactly one** HTTP call for any non-empty `ids` slice.
+    /// - Returns only entries the provider responded with (subset of `ids` is valid).
+    /// - Callers must pass a deduplicated slice; no dedup is done here.
+    async fn get_projects_brief(
+        &self,
+        client: &dyn ProviderHttpClient,
+        ids: &[String],
+    ) -> Result<Vec<ModBrief>, ProviderError>;
 }
 
 // ── Raw Modrinth deserialization types ────────────────────────────────────────

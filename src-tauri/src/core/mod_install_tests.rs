@@ -40,6 +40,19 @@ impl ProviderHttpClient for MockProviderClient {
             .expect("MockProviderClient: no more canned responses");
         Ok((s, b))
     }
+
+    async fn post(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+        _body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        let mut q = self.responses.lock().await;
+        let MockResp(s, b) = q
+            .pop_front()
+            .expect("MockProviderClient: no more canned responses");
+        Ok((s, b))
+    }
 }
 
 // ── Mock provider ─────────────────────────────────────────────────────────
@@ -86,6 +99,14 @@ impl crate::core::providers::ModProvider for MockProvider {
         _project_id: &str,
     ) -> Result<crate::core::providers::PackInfo, ProviderError> {
         unimplemented!("get_project not used by mod installer")
+    }
+
+    async fn get_projects_brief(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _ids: &[String],
+    ) -> Result<Vec<crate::core::providers::ModBrief>, ProviderError> {
+        unimplemented!("get_projects_brief not used by mod installer")
     }
 }
 
@@ -1253,6 +1274,14 @@ impl crate::core::providers::ModProvider for ConcurrencyTrackingProvider {
         _project_id: &str,
     ) -> Result<crate::core::providers::PackInfo, ProviderError> {
         unimplemented!()
+    }
+
+    async fn get_projects_brief(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _ids: &[String],
+    ) -> Result<Vec<crate::core::providers::ModBrief>, ProviderError> {
+        unimplemented!("get_projects_brief not used by mod installer")
     }
 }
 

@@ -548,6 +548,186 @@ fn f1_1_added_nonzero_overrides_failure_count() {
 }
 
 // ---------------------------------------------------------------------------
+// MM-B3: enrich_instance_mods helpers — collect_missing_ids + apply_briefs
+// ---------------------------------------------------------------------------
+
+/// Build a minimal `ModEntry` for enrichment tests.
+fn enrich_mod_entry(
+    provider: &str,
+    project_id: &str,
+    name: Option<&str>,
+) -> instances::ModEntry {
+    use std::collections::BTreeMap;
+    instances::ModEntry {
+        provider: provider.to_string(),
+        project_id: project_id.to_string(),
+        version_id: "v1".to_string(),
+        file_name: format!("{}.jar", project_id),
+        hashes: BTreeMap::new(),
+        enabled: true,
+        side: "both".to_string(),
+        from_pack: true,
+        name: name.map(str::to_string),
+        icon_url: None,
+        summary: None,
+    }
+}
+
+/// Build a `ModBrief` for use in apply_briefs tests.
+fn make_brief(project_id: &str, name: &str, icon: Option<&str>, summary: &str) -> core::providers::ModBrief {
+    core::providers::ModBrief {
+        project_id: project_id.to_string(),
+        name: name.to_string(),
+        icon_url: icon.map(str::to_string),
+        summary: summary.to_string(),
+    }
+}
+
+#[test]
+fn mm_b3_collect_missing_ids_separates_modrinth_and_cf() {
+    let mods = vec![
+        enrich_mod_entry("modrinth", "mr-proj-1", None),
+        // ModEntry.provider is the lowercase provider_kind_str form ("curseforge").
+        enrich_mod_entry("curseforge", "12345", None),
+        enrich_mod_entry("modrinth", "mr-proj-2", None),
+    ];
+    let (mr_ids, cf_ids) = super::collect_missing_ids(&mods);
+    assert_eq!(mr_ids, vec!["mr-proj-1", "mr-proj-2"]);
+    assert_eq!(cf_ids, vec!["12345"]);
+}
+
+#[test]
+fn mm_b3_collect_missing_ids_skips_entries_with_name() {
+    let mods = vec![
+        enrich_mod_entry("modrinth", "mr-proj-1", Some("Already Named")),
+        enrich_mod_entry("modrinth", "mr-proj-2", None),
+    ];
+    let (mr_ids, cf_ids) = super::collect_missing_ids(&mods);
+    // mr-proj-1 has a name → skipped; mr-proj-2 doesn't → included.
+    assert_eq!(mr_ids, vec!["mr-proj-2"], "entries with name must be skipped");
+    assert!(cf_ids.is_empty());
+}
+
+#[test]
+fn mm_b3_collect_missing_ids_deduplicates() {
+    // Two entries with the same project_id (e.g. same mod referenced twice from pack).
+    let mods = vec![
+        enrich_mod_entry("modrinth", "dup-id", None),
+        enrich_mod_entry("modrinth", "dup-id", None),
+    ];
+    let (mr_ids, _) = super::collect_missing_ids(&mods);
+    assert_eq!(mr_ids.len(), 1, "duplicate project_id must appear only once");
+    assert_eq!(mr_ids[0], "dup-id");
+}
+
+#[test]
+fn mm_b3_collect_missing_ids_empty_when_all_have_names() {
+    let mods = vec![
+        enrich_mod_entry("modrinth", "p1", Some("Mod One")),
+        enrich_mod_entry("curseforge", "99", Some("Mod Two")),
+    ];
+    let (mr_ids, cf_ids) = super::collect_missing_ids(&mods);
+    assert!(mr_ids.is_empty(), "all have names → no modrinth ids");
+    assert!(cf_ids.is_empty(), "all have names → no cf ids");
+}
+
+#[test]
+fn mm_b3_collect_missing_ids_empty_when_no_mods() {
+    let (mr_ids, cf_ids) = super::collect_missing_ids(&[]);
+    assert!(mr_ids.is_empty());
+    assert!(cf_ids.is_empty());
+}
+
+#[test]
+fn mm_b3_apply_briefs_populates_name_icon_summary() {
+    let mut mods = vec![
+        enrich_mod_entry("modrinth", "sodium", None),
+        enrich_mod_entry("modrinth", "lithium", None),
+    ];
+    let mut brief_map = std::collections::HashMap::new();
+    brief_map.insert(
+        "sodium".to_string(),
+        make_brief("sodium", "Sodium", Some("https://icon.png"), "A rendering mod"),
+    );
+    brief_map.insert(
+        "lithium".to_string(),
+        make_brief("lithium", "Lithium", None, "An optimization mod"),
+    );
+
+    let enriched = super::apply_briefs(&mut mods, &brief_map);
+
+    assert_eq!(enriched, 2, "both entries should be enriched");
+    assert_eq!(mods[0].name.as_deref(), Some("Sodium"));
+    assert_eq!(mods[0].icon_url.as_deref(), Some("https://icon.png"));
+    assert_eq!(mods[0].summary.as_deref(), Some("A rendering mod"));
+    assert_eq!(mods[1].name.as_deref(), Some("Lithium"));
+    assert!(mods[1].icon_url.is_none());
+    assert_eq!(mods[1].summary.as_deref(), Some("An optimization mod"));
+}
+
+#[test]
+fn mm_b3_apply_briefs_skips_entries_with_existing_name() {
+    let mut mods = vec![
+        enrich_mod_entry("modrinth", "sodium", Some("Already Has Name")),
+    ];
+    let mut brief_map = std::collections::HashMap::new();
+    brief_map.insert(
+        "sodium".to_string(),
+        make_brief("sodium", "Sodium", Some("https://icon.png"), "A rendering mod"),
+    );
+
+    let enriched = super::apply_briefs(&mut mods, &brief_map);
+
+    assert_eq!(enriched, 0, "entry with existing name must not be overwritten");
+    assert_eq!(
+        mods[0].name.as_deref(),
+        Some("Already Has Name"),
+        "existing name must be preserved"
+    );
+}
+
+#[test]
+fn mm_b3_apply_briefs_idempotent_second_call_returns_zero() {
+    // Simulate the two-call idempotency: first call enriches, second finds nothing missing.
+    let mut mods = vec![
+        enrich_mod_entry("modrinth", "sodium", None),
+    ];
+    let mut brief_map = std::collections::HashMap::new();
+    brief_map.insert(
+        "sodium".to_string(),
+        make_brief("sodium", "Sodium", Some("https://icon.png"), "A rendering mod"),
+    );
+
+    // First call: enriches.
+    let first = super::apply_briefs(&mut mods, &brief_map);
+    assert_eq!(first, 1, "first call should enrich 1 entry");
+
+    // Second call with same map: name is now set → 0 enriched.
+    let second = super::apply_briefs(&mut mods, &brief_map);
+    assert_eq!(second, 0, "second call must be a no-op (idempotent)");
+    // Name must not have changed.
+    assert_eq!(mods[0].name.as_deref(), Some("Sodium"));
+}
+
+#[test]
+fn mm_b3_apply_briefs_returns_zero_on_empty_mods() {
+    let mut mods: Vec<instances::ModEntry> = vec![];
+    let brief_map = std::collections::HashMap::new();
+    let enriched = super::apply_briefs(&mut mods, &brief_map);
+    assert_eq!(enriched, 0);
+}
+
+#[test]
+fn mm_b3_apply_briefs_returns_zero_when_no_matching_briefs() {
+    let mut mods = vec![enrich_mod_entry("modrinth", "unknown-id", None)];
+    let brief_map = std::collections::HashMap::new(); // empty — provider returned nothing
+
+    let enriched = super::apply_briefs(&mut mods, &brief_map);
+    assert_eq!(enriched, 0, "no matching briefs → 0 enriched");
+    assert!(mods[0].name.is_none(), "name must remain None");
+}
+
+// ---------------------------------------------------------------------------
 // F2-1: drive_with_progress — deadlock regression
 // ---------------------------------------------------------------------------
 

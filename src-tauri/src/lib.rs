@@ -1242,6 +1242,138 @@ async fn get_pack_info(
     }
 }
 
+/// Collect the project ids of mods lacking a `name`, grouped by provider.
+///
+/// Returns `(modrinth_ids, cf_ids)` both deduplicated. Used by
+/// `enrich_instance_mods` and its tests.
+fn collect_missing_ids(mods: &[instances::ModEntry]) -> (Vec<String>, Vec<String>) {
+    let mut modrinth_ids: Vec<String> = Vec::new();
+    let mut cf_ids: Vec<String> = Vec::new();
+    for m in mods {
+        if m.name.is_none() {
+            match m.provider.as_str() {
+                "modrinth" => {
+                    if !modrinth_ids.contains(&m.project_id) {
+                        modrinth_ids.push(m.project_id.clone());
+                    }
+                }
+                // ModEntry.provider stores the lowercase `provider_kind_str` form
+                // ("curseforge"), NOT the camelCase ProviderKind DTO casing.
+                "curseforge" => {
+                    if !cf_ids.contains(&m.project_id) {
+                        cf_ids.push(m.project_id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (modrinth_ids, cf_ids)
+}
+
+/// Apply a `project_id → ModBrief` map to a mutable slice of `ModEntry`s.
+///
+/// Fills `name`, `icon_url`, and `summary` on any entry where `name.is_none()`
+/// and the entry's `project_id` is present in `brief_map`.
+/// Returns the count of entries that were updated.
+fn apply_briefs(
+    mods: &mut Vec<instances::ModEntry>,
+    brief_map: &std::collections::HashMap<String, core::providers::ModBrief>,
+) -> u32 {
+    let mut enriched = 0u32;
+    for m in mods.iter_mut() {
+        if m.name.is_none() {
+            if let Some(brief) = brief_map.get(&m.project_id) {
+                m.name = Some(brief.name.clone());
+                m.icon_url = brief.icon_url.clone();
+                m.summary = Some(brief.summary.clone());
+                enriched += 1;
+            }
+        }
+    }
+    enriched
+}
+
+/// Back-fill metadata (`name`, `icon_url`, `summary`) for modpack-imported mods that
+/// were added without display metadata (only search-added mods capture it at add-time).
+///
+/// ## Frugality contract
+/// - If all mods already have `name` set → returns `Ok(0)` with **zero** network calls.
+/// - Otherwise issues **exactly one** batched call per provider with missing entries.
+/// - Persists enriched metadata to the manifest so subsequent calls skip already-filled entries.
+///
+/// ## Returns
+/// The count of `ModEntry`s that were actually enriched.
+#[tauri::command]
+#[specta::specta]
+async fn enrich_instance_mods(
+    app: tauri::AppHandle,
+    slug: String,
+) -> Result<u32, String> {
+    use std::collections::HashMap;
+
+    // 1. Load manifest.
+    let mut inst = instances::get(&app, &slug)
+        .map_err(|e| e.to_string())?
+        .instance;
+
+    // 2. Collect mods where name is None, grouped by provider.
+    let (modrinth_ids, cf_ids) = collect_missing_ids(&inst.mods);
+
+    // Idempotent fast path: nothing needs enriching.
+    if modrinth_ids.is_empty() && cf_ids.is_empty() {
+        log::info!("enrich: instance {slug} — 0 mods enriched (0 provider calls)");
+        return Ok(0);
+    }
+
+    let http = ReqwestProviderClient(reqwest::Client::new());
+    let mut brief_map: HashMap<String, core::providers::ModBrief> = HashMap::new();
+    let mut calls = 0u32;
+
+    // 3a. Modrinth batch.
+    if !modrinth_ids.is_empty() {
+        let p = ModrinthProvider;
+        let briefs = p
+            .get_projects_brief(&http, &modrinth_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        calls += 1;
+        for b in briefs {
+            brief_map.insert(b.project_id.clone(), b);
+        }
+    }
+
+    // 3b. CurseForge batch.
+    if !cf_ids.is_empty() {
+        let settings = settings::load(&app).unwrap_or_default();
+        let key = cf_api_key_from(
+            std::env::var(providers::CF_API_KEY_ENV).ok(),
+            settings.curseforge_api_key,
+            option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+        );
+        let p = CurseForgeProvider::new(key);
+        let briefs = p
+            .get_projects_brief(&http, &cf_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        calls += 1;
+        for b in briefs {
+            brief_map.insert(b.project_id.clone(), b);
+        }
+    }
+
+    // 4. Populate metadata on each ModEntry that is still missing name.
+    let enriched = apply_briefs(&mut inst.mods, &brief_map);
+
+    // 5. Save manifest.
+    instances::save_manifest(&app, &slug, &inst).map_err(|e| e.to_string())?;
+
+    log::info!(
+        "enrich: instance {slug} — {enriched} mods enriched ({calls} provider calls)"
+    );
+    Ok(enriched)
+}
+
 /// Display metadata captured at add-time from the search `ProjectSummary`.
 ///
 /// Passed as a single struct to `add_mod` to stay within specta's 10-arg limit.
@@ -3216,6 +3348,7 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             search_mods,
             get_mod_versions,
             get_pack_info,
+            enrich_instance_mods,
             add_mod,
             set_mod_enabled,
             remove_mod,

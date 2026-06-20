@@ -53,6 +53,15 @@ impl ProviderHttpClient for MockProviderClient {
     ) -> Result<(u16, String), reqwest::Error> {
         Ok(self.pop().await)
     }
+
+    async fn post(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+        _body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        Ok(self.pop().await)
+    }
 }
 
 // ── Fixture loaders ───────────────────────────────────────────────────────

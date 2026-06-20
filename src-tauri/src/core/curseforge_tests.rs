@@ -26,6 +26,8 @@ struct CapturingMockClient {
     responses: Arc<Mutex<VecDeque<MockResp>>>,
     /// Captured (url, headers) pairs in call order.
     captured: Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>,
+    /// Captured POST bodies in call order (parallel index to `captured`; empty string for GETs).
+    captured_bodies: Arc<Mutex<Vec<String>>>,
 }
 
 impl CapturingMockClient {
@@ -33,6 +35,7 @@ impl CapturingMockClient {
         Self {
             responses: Arc::new(Mutex::new(responses.into_iter().collect())),
             captured: Arc::new(Mutex::new(Vec::new())),
+            captured_bodies: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -57,6 +60,10 @@ impl CapturingMockClient {
     async fn request_count(&self) -> usize {
         self.captured.lock().await.len()
     }
+
+    async fn captured_post_bodies(&self) -> Vec<String> {
+        self.captured_bodies.lock().await.clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -67,17 +74,36 @@ impl ProviderHttpClient for CapturingMockClient {
         headers: &[(&str, &str)],
     ) -> Result<(u16, String), reqwest::Error> {
         // Record the call.
-        {
-            let mut cap = self.captured.lock().await;
-            cap.push((
-                url.to_string(),
-                headers
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
-            ));
-        }
+        self.captured.lock().await.push((
+            url.to_string(),
+            headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        ));
+        self.captured_bodies.lock().await.push(String::new());
         // Pop next canned response.
+        let mut q = self.responses.lock().await;
+        let MockResp(s, b) = q
+            .pop_front()
+            .expect("CapturingMockClient: no more canned responses");
+        Ok((s, b))
+    }
+
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        self.captured.lock().await.push((
+            url.to_string(),
+            headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        ));
+        self.captured_bodies.lock().await.push(body);
         let mut q = self.responses.lock().await;
         let MockResp(s, b) = q
             .pop_front()
@@ -736,6 +762,26 @@ impl ProviderHttpClient for RoutingMockClient {
         };
         Ok((200, body))
     }
+
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        _body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        {
+            let mut cap = self.captured.lock().await;
+            cap.push((
+                url.to_string(),
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+        }
+        // RoutingMockClient is for get_project only; POST should not be called here.
+        panic!("RoutingMockClient: unexpected POST call to {}", url);
+    }
 }
 
 #[tokio::test]
@@ -994,5 +1040,149 @@ async fn search_page_url_none_when_website_url_absent() {
         hit.page_url.is_none(),
         "page_url should be None when websiteUrl is null: {:?}",
         hit.page_url
+    );
+}
+
+// ── get_projects_brief: batch metadata fetch via POST /v1/mods (MM-B2) ────
+
+const CF_MODS_BATCH_FIXTURE: &str = include_str!("fixtures/cf_mods_batch.json");
+
+#[tokio::test]
+async fn get_projects_brief_issues_one_post_call() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MODS_BATCH_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let ids = vec!["238222".to_string(), "454158".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 1, "must issue exactly ONE HTTP call; got {:?}", urls);
+    assert!(
+        urls[0].ends_with("/v1/mods"),
+        "URL should target /v1/mods: {}",
+        urls[0]
+    );
+}
+
+#[tokio::test]
+async fn get_projects_brief_maps_fixture_to_briefs() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MODS_BATCH_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let ids = vec!["238222".to_string(), "454158".to_string()];
+    let briefs = provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    assert_eq!(briefs.len(), 2, "should return 2 briefs from fixture");
+
+    let jei = briefs.iter().find(|b| b.project_id == "238222").unwrap();
+    assert_eq!(jei.name, "Just Enough Items (JEI)");
+    assert_eq!(
+        jei.summary,
+        "JEI is an item and recipe viewing mod for Minecraft, built from the ground up for stability and performance."
+    );
+    assert_eq!(
+        jei.icon_url,
+        Some("https://media.forgecdn.net/avatars/29/69/636346904411966716.png".to_string())
+    );
+
+    let sodium = briefs.iter().find(|b| b.project_id == "454158").unwrap();
+    assert_eq!(sodium.name, "Sodium");
+    assert!(sodium.icon_url.is_none(), "fixture sodium has null logo");
+}
+
+#[tokio::test]
+async fn get_projects_brief_post_body_contains_mod_ids() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MODS_BATCH_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("test-key".to_string()));
+
+    let ids = vec!["238222".to_string(), "454158".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let bodies = client.captured_post_bodies().await;
+    assert_eq!(bodies.len(), 1);
+    let body = &bodies[0];
+    assert!(body.contains("238222"), "body must contain first id: {body}");
+    assert!(body.contains("454158"), "body must contain second id: {body}");
+    assert!(body.contains("modIds"), "body must contain modIds key: {body}");
+}
+
+#[tokio::test]
+async fn get_projects_brief_carries_api_key_and_content_type() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MODS_BATCH_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("my-cf-key".to_string()));
+
+    let ids = vec!["238222".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let all_headers = client.captured_headers().await;
+    let headers = &all_headers[0];
+    let has_key = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-api-key") && v == "my-cf-key");
+    let has_ct = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("Content-Type") && v.contains("application/json"));
+    assert!(has_key, "x-api-key header missing: {:?}", headers);
+    assert!(has_ct, "Content-Type header missing: {:?}", headers);
+}
+
+#[tokio::test]
+async fn get_projects_brief_key_absent_returns_key_missing_without_http() {
+    let client = CapturingMockClient::new(vec![]);
+    let provider = CurseForgeProvider::new(None);
+
+    let ids = vec!["238222".to_string()];
+    let err = provider
+        .get_projects_brief(&client, &ids)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::KeyMissing),
+        "expected KeyMissing, got {:?}",
+        err
+    );
+    assert_eq!(client.request_count().await, 0, "no HTTP call when key absent");
+}
+
+#[tokio::test]
+async fn get_projects_brief_empty_ids_returns_empty_no_http() {
+    let client = CapturingMockClient::new(vec![]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let briefs = provider.get_projects_brief(&client, &[]).await.unwrap();
+
+    assert!(briefs.is_empty(), "empty ids → empty result");
+    assert_eq!(client.request_count().await, 0, "empty ids → zero HTTP calls");
+}
+
+#[tokio::test]
+async fn get_projects_brief_non_numeric_ids_skipped() {
+    // CF ids must be numeric; passing non-numeric ids should not result in any
+    // HTTP call (all ids would parse to nothing → treat as empty).
+    let client = CapturingMockClient::new(vec![]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let ids = vec!["not-a-number".to_string(), "also-not".to_string()];
+    let briefs = provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    assert!(briefs.is_empty(), "non-numeric ids → empty result");
+    assert_eq!(client.request_count().await, 0, "non-numeric ids → zero HTTP calls");
+}
+
+#[tokio::test]
+async fn get_projects_brief_returns_http_error_on_non_200() {
+    let client = CapturingMockClient::new(vec![MockResp(403, "Forbidden".to_string())]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let ids = vec!["238222".to_string()];
+    let err = provider
+        .get_projects_brief(&client, &ids)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 403, .. }),
+        "expected HttpStatus(403), got {:?}",
+        err
     );
 }

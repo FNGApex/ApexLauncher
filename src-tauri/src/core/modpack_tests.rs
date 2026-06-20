@@ -887,6 +887,19 @@ impl ProviderHttpClient for MockCfClient {
             .expect("MockCfClient: no more canned responses");
         Ok((s, b))
     }
+
+    async fn post(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+        _body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        let mut q = self.responses.lock().await;
+        let MockResp(s, b) = q
+            .pop_front()
+            .expect("MockCfClient: no more canned responses");
+        Ok((s, b))
+    }
 }
 
 fn build_cf_zip(manifest_json: &str) -> Vec<u8> {

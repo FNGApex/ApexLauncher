@@ -22,7 +22,7 @@
 use serde::Deserialize;
 
 use crate::core::providers::{
-    Dependency, ModProvider, PackInfo, ProjectType, ProjectVersion, ProviderError,
+    Dependency, ModBrief, ModProvider, PackInfo, ProjectType, ProjectVersion, ProviderError,
     ProviderHttpClient, ProviderKind, SearchParams, SearchResult, VersionFile,
 };
 
@@ -264,6 +264,26 @@ struct CfDescriptionResponse {
     data: String,
 }
 
+/// Raw CF POST `/v1/mods` batch response item.
+#[derive(Debug, Deserialize)]
+struct CfBatchMod {
+    id: u64,
+    name: String,
+    summary: String,
+    logo: Option<CfBatchLogo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CfBatchLogo {
+    url: String,
+}
+
+/// Raw CF POST `/v1/mods` batch response.
+#[derive(Debug, Deserialize)]
+struct CfModsBatchResponse {
+    data: Vec<CfBatchMod>,
+}
+
 // ── CurseForgeProvider ─────────────────────────────────────────────────────────
 
 /// CurseForge implementation of `ModProvider`.
@@ -338,6 +358,11 @@ impl CurseForgeProvider {
     /// Build the CF `/v1/mods/{project_id}/files/{file_id}` URL.
     fn build_file_url(project_id: u32, file_id: u32) -> String {
         format!("{}/v1/mods/{}/files/{}", BASE_URL, project_id, file_id)
+    }
+
+    /// Build the CF POST `/v1/mods` URL for batch metadata fetch.
+    fn build_mods_batch_url() -> String {
+        format!("{}/v1/mods", BASE_URL)
     }
 
     /// Resolve a single `(project_id, file_id)` to a normalized `VersionFile`.
@@ -504,6 +529,67 @@ impl ModProvider for CurseForgeProvider {
             icon_url: raw_mod.data.logo.map(|l| l.url),
             body_is_html: true,
         })
+    }
+
+    async fn get_projects_brief(
+        &self,
+        client: &dyn ProviderHttpClient,
+        ids: &[String],
+    ) -> Result<Vec<ModBrief>, ProviderError> {
+        let key = self.require_key()?;
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Parse ids to integers; skip non-numeric ones defensively.
+        let numeric_ids: Vec<u64> = ids
+            .iter()
+            .filter_map(|id| id.parse::<u64>().ok())
+            .collect();
+
+        if numeric_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Serialize body: {"modIds":[...]}
+        let ids_json = numeric_ids
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let request_body = format!("{{\"modIds\":[{}]}}", ids_json);
+
+        let url = Self::build_mods_batch_url();
+        let (status, body) = client
+            .post(
+                &url,
+                &[
+                    ("x-api-key", key),
+                    ("Content-Type", "application/json"),
+                ],
+                request_body,
+            )
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw: CfModsBatchResponse =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        Ok(raw
+            .data
+            .into_iter()
+            .map(|m| ModBrief {
+                project_id: m.id.to_string(),
+                name: m.name,
+                icon_url: m.logo.map(|l| l.url),
+                summary: m.summary,
+            })
+            .collect())
     }
 }
 

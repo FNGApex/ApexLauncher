@@ -80,12 +80,37 @@ impl ProviderHttpClient for CapturingMockClient {
             .expect("CapturingMockClient: no more canned responses");
         Ok((s, b))
     }
+
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        _body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        // Record the call (same structure as GET).
+        {
+            let mut cap = self.captured.lock().await;
+            cap.push((
+                url.to_string(),
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+        }
+        let mut q = self.responses.lock().await;
+        let MockResp(s, b) = q
+            .pop_front()
+            .expect("CapturingMockClient: no more canned responses");
+        Ok((s, b))
+    }
 }
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
 const MODRINTH_SEARCH_FIXTURE: &str = include_str!("fixtures/modrinth_search.json");
 const MODRINTH_VERSIONS_FIXTURE: &str = include_str!("fixtures/modrinth_versions.json");
+const MODRINTH_PROJECTS_BATCH_FIXTURE: &str = include_str!("fixtures/modrinth_projects_batch.json");
 
 // ── URL construction ───────────────────────────────────────────────────────
 
@@ -596,5 +621,145 @@ async fn search_populates_page_url_using_response_project_type_not_selector() {
         Some("https://modrinth.com/mod/sodium".to_string()),
         "page_url must derive from response project_type, not selector: {:?}",
         sodium.page_url
+    );
+}
+
+// ── get_projects_brief: batch metadata fetch (MM-B2) ──────────────────────
+
+#[tokio::test]
+async fn get_projects_brief_returns_briefs_for_all_ids() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECTS_BATCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string(), "gvQqBUqZ".to_string()];
+    let briefs = provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    assert_eq!(briefs.len(), 2, "should return 2 briefs from fixture");
+    let sodium = briefs.iter().find(|b| b.project_id == "AANobbMI").unwrap();
+    assert_eq!(sodium.name, "Sodium");
+    assert_eq!(
+        sodium.icon_url,
+        Some("https://cdn.modrinth.com/data/AANobbMI/icon.png".to_string())
+    );
+    assert_eq!(
+        sodium.summary,
+        "A modern rendering engine and client-side optimization mod for Minecraft."
+    );
+
+    let lithium = briefs.iter().find(|b| b.project_id == "gvQqBUqZ").unwrap();
+    assert_eq!(lithium.name, "Lithium");
+    assert!(lithium.icon_url.is_some());
+}
+
+#[tokio::test]
+async fn get_projects_brief_issues_one_get_call() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECTS_BATCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string(), "gvQqBUqZ".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 1, "must issue exactly ONE HTTP call; got {:?}", urls);
+    assert!(
+        urls[0].contains("/v2/projects"),
+        "URL should target /v2/projects: {}",
+        urls[0]
+    );
+}
+
+#[tokio::test]
+async fn get_projects_brief_url_contains_encoded_ids() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECTS_BATCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string(), "gvQqBUqZ".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let urls = client.captured_urls().await;
+    // The URL must contain the ids JSON-encoded and percent-encoded.
+    // Decoded it should contain both ids.
+    let decoded_url = urls[0]
+        .replace("%22", "\"")
+        .replace("%5B", "[")
+        .replace("%5D", "]")
+        .replace("%2C", ",");
+    assert!(
+        decoded_url.contains("AANobbMI"),
+        "decoded URL should contain AANobbMI: {}",
+        decoded_url
+    );
+    assert!(
+        decoded_url.contains("gvQqBUqZ"),
+        "decoded URL should contain gvQqBUqZ: {}",
+        decoded_url
+    );
+}
+
+#[tokio::test]
+async fn get_projects_brief_carries_user_agent() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECTS_BATCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string()];
+    provider.get_projects_brief(&client, &ids).await.unwrap();
+
+    let all_headers = client.captured_headers().await;
+    let headers = &all_headers[0];
+    let has_ua = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("User-Agent") && v.contains("modloader/"));
+    assert!(has_ua, "User-Agent header missing: {:?}", headers);
+}
+
+#[tokio::test]
+async fn get_projects_brief_empty_ids_returns_empty_no_http() {
+    let client = CapturingMockClient::new(vec![]); // no responses queued
+    let provider = ModrinthProvider;
+
+    let briefs = provider.get_projects_brief(&client, &[]).await.unwrap();
+
+    assert!(briefs.is_empty(), "empty ids → empty result");
+    let urls = client.captured_urls().await;
+    assert!(urls.is_empty(), "empty ids → zero HTTP calls");
+}
+
+#[tokio::test]
+async fn get_projects_brief_returns_http_error_on_non_200() {
+    let client = CapturingMockClient::new(vec![MockResp(429, "rate limited".to_string())]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string()];
+    let err = provider
+        .get_projects_brief(&client, &ids)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 429, .. }),
+        "expected HttpStatus(429), got {:?}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn get_projects_brief_summary_uses_description_not_body() {
+    // Fixture has both `description` (short) and `body` (long Markdown).
+    // The brief must carry `description`, not `body`.
+    let client = CapturingMockClient::new(vec![MockResp::ok(MODRINTH_PROJECTS_BATCH_FIXTURE)]);
+    let provider = ModrinthProvider;
+
+    let ids = vec!["AANobbMI".to_string()];
+    let briefs = provider.get_projects_brief(&client, &ids).await.unwrap();
+    let sodium = briefs.iter().find(|b| b.project_id == "AANobbMI").unwrap();
+
+    // Short description from fixture; body starts with "# Sodium"
+    assert!(
+        !sodium.summary.starts_with("# Sodium"),
+        "summary must be the short description, not the body; got: {}",
+        sodium.summary
+    );
+    assert_eq!(
+        sodium.summary,
+        "A modern rendering engine and client-side optimization mod for Minecraft."
     );
 }
