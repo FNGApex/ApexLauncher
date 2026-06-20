@@ -1128,6 +1128,11 @@ fn unknown_provider_err(other: &str) -> ProviderCommandError {
 /// Unknown provider strings return a typed `unknown_provider` error rather than panicking.
 /// The CF key is resolved from `MODLOADER_CF_API_KEY` env or `settings.curseforge_api_key`.
 /// `project_type` selects the content class: `"mod"` (default) or `"modpack"`.
+///
+/// `loaders` is an optional multi-loader filter (e.g. `["fabric","forge"]`).
+/// `categories` carries per-provider category values already resolved by the
+/// frontend (Modrinth: slug strings; CurseForge: numeric id strings).
+/// Both default to empty (= no filter) when `None`.
 #[tauri::command]
 #[specta::specta]
 async fn search_mods(
@@ -1136,6 +1141,8 @@ async fn search_mods(
     query: String,
     mc_version: Option<String>,
     loader: Option<String>,
+    loaders: Option<Vec<String>>,
+    categories: Option<Vec<String>>,
     offset: u32,
     limit: u32,
     project_type: Option<ProjectType>,
@@ -1144,6 +1151,8 @@ async fn search_mods(
         query,
         mc_version,
         loader,
+        loaders: loaders.unwrap_or_default(),
+        categories: categories.unwrap_or_default(),
         offset,
         limit,
         project_type: project_type.unwrap_or_default(),

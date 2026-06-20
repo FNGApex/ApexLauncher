@@ -165,7 +165,23 @@ pub struct SearchParams {
     /// Filter to a specific Minecraft version (e.g. `"1.21"`); `None` = any.
     pub mc_version: Option<String>,
     /// Filter to a specific loader (e.g. `"fabric"`); `None` = any.
+    ///
+    /// Kept for back-compat with older callers; new callers should prefer `loaders`.
     pub loader: Option<String>,
+    /// Multi-loader filter (e.g. `["fabric", "forge"]`). Empty = any.
+    ///
+    /// Provider-neutral loader names. Each provider maps them to its own form:
+    /// - Modrinth: emitted as a single OR'd inner facet array (`categories:fabric`, …).
+    /// - CurseForge: singular-or-Any rule (exactly one → `modLoaderType=<id>`;
+    ///   more than one → CF `Any`/omit; zero → omit).
+    #[serde(default)]
+    pub loaders: Vec<String>,
+    /// Per-provider category values (already resolved by the frontend). Empty = any.
+    ///
+    /// Modrinth: facet strings (e.g. `"technology"`, `"magic"`) — OR'd in one inner array.
+    /// CurseForge: numeric category id strings (e.g. `"4472"`) — send at most one.
+    #[serde(default)]
+    pub categories: Vec<String>,
     /// Pagination offset (first result index).
     pub offset: u32,
     /// Maximum number of results to return.

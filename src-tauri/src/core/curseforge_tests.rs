@@ -247,6 +247,8 @@ async fn search_key_absent_returns_key_missing_without_http() {
         query: "jei".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::default(),
@@ -294,6 +296,8 @@ async fn search_carries_api_key_header() {
         query: "jei".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::default(),
@@ -337,6 +341,8 @@ async fn search_maps_fixture_to_project_summaries() {
         query: "jei".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::default(),
@@ -375,6 +381,8 @@ async fn search_url_contains_gameid_classid_index_pagesize() {
         query: "jei".to_string(),
         mc_version: Some("1.20.1".to_string()),
         loader: Some("forge".to_string()),
+        loaders: vec![],
+        categories: vec![],
         offset: 20,
         limit: 10,
         project_type: ProjectType::Mod,
@@ -914,6 +922,8 @@ async fn search_returns_http_error_on_403() {
         query: "test".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 10,
         project_type: ProjectType::default(),
@@ -937,6 +947,8 @@ async fn search_url_with_project_type_mod_uses_class_id_6() {
         query: "jei".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Mod,
@@ -960,6 +972,8 @@ async fn search_url_with_project_type_modpack_uses_class_id_4471() {
         query: "all the mods".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Modpack,
@@ -990,6 +1004,8 @@ async fn search_populates_page_url_from_links_website_url() {
         query: "jei".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Mod,
@@ -1028,6 +1044,8 @@ async fn search_page_url_none_when_website_url_absent() {
         query: "".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Mod,
@@ -1315,5 +1333,206 @@ async fn get_pack_summary_returns_http_error_on_non_200() {
         matches!(err, ProviderError::HttpStatus { status: 404, .. }),
         "expected HttpStatus(404), got {:?}",
         err
+    );
+}
+
+// ── A-3: multi-loader singular-or-Any + at-most-one category (BR-A) ───────
+
+/// Helper: extract URL params as a flat key=value map from a URL string.
+fn url_params(url: &str) -> std::collections::HashMap<String, String> {
+    let qs = url.split('?').nth(1).unwrap_or("");
+    qs.split('&')
+        .filter_map(|pair| {
+            let mut kv = pair.splitn(2, '=');
+            let k = kv.next()?.to_string();
+            let v = kv.next().unwrap_or("").to_string();
+            Some((k, v))
+        })
+        .collect()
+}
+
+/// 0 loaders (empty `loaders` vec, no legacy `loader`) → `modLoaderType` omitted.
+#[test]
+fn cf_search_url_zero_loaders_omits_mod_loader_type() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: Some("1.20.1".to_string()),
+        loader: None,
+        loaders: vec![],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    assert!(
+        !url.contains("modLoaderType"),
+        "0 loaders → modLoaderType must be omitted: {url}"
+    );
+}
+
+/// Exactly 1 loader → `modLoaderType=<id>` (Fabric = 4).
+#[test]
+fn cf_search_url_one_loader_emits_singular_mod_loader_type() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: Some("1.20.1".to_string()),
+        loader: None,
+        loaders: vec!["fabric".to_string()],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    let params_map = url_params(&url);
+    assert_eq!(
+        params_map.get("modLoaderType").map(|s| s.as_str()),
+        Some("4"),
+        "single fabric loader should produce modLoaderType=4: {url}"
+    );
+    assert!(
+        !url.contains("modLoaderTypes"),
+        "plural modLoaderTypes must never appear: {url}"
+    );
+}
+
+/// >1 loaders → `modLoaderType` omitted (Any/omit, per singular-or-Any rule).
+#[test]
+fn cf_search_url_multiple_loaders_omits_mod_loader_type() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: Some("1.20.1".to_string()),
+        loader: None,
+        loaders: vec!["fabric".to_string(), "forge".to_string()],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    assert!(
+        !url.contains("modLoaderType"),
+        ">1 loaders → modLoaderType must be omitted (Any rule): {url}"
+    );
+    assert!(
+        !url.contains("modLoaderTypes"),
+        "plural modLoaderTypes must never appear: {url}"
+    );
+}
+
+/// Three loaders (>1) → omit `modLoaderType`.
+#[test]
+fn cf_search_url_three_loaders_omits_mod_loader_type() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: Some("1.20.1".to_string()),
+        loader: None,
+        loaders: vec!["fabric".to_string(), "quilt".to_string(), "neoforge".to_string()],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    assert!(
+        !url.contains("modLoaderType"),
+        "3 loaders → modLoaderType must be omitted: {url}"
+    );
+}
+
+/// 0 categories → `categoryId` omitted.
+#[test]
+fn cf_search_url_zero_categories_omits_category_id() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: None,
+        loader: None,
+        loaders: vec![],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    assert!(
+        !url.contains("categoryId"),
+        "0 categories → categoryId must be omitted: {url}"
+    );
+}
+
+/// 1 category → `categoryId=<value>` emitted (at-most-one rule).
+#[test]
+fn cf_search_url_one_category_emits_category_id() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: None,
+        loader: None,
+        loaders: vec![],
+        categories: vec!["4472".to_string()],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    let params_map = url_params(&url);
+    assert_eq!(
+        params_map.get("categoryId").map(|s| s.as_str()),
+        Some("4472"),
+        "single category should produce categoryId=4472: {url}"
+    );
+}
+
+/// >1 categories → only the FIRST `categoryId` is sent (at-most-one rule to avoid CF AND trap).
+#[test]
+fn cf_search_url_multiple_categories_sends_only_first() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: None,
+        loader: None,
+        loaders: vec![],
+        categories: vec!["4472".to_string(), "4473".to_string()],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    let params_map = url_params(&url);
+    assert_eq!(
+        params_map.get("categoryId").map(|s| s.as_str()),
+        Some("4472"),
+        "at-most-one rule: only first categoryId sent: {url}"
+    );
+    // Verify the second id does NOT appear as a second categoryId.
+    // (A naive implementation might append &categoryId=4473 as a second param.)
+    let category_id_count = url.matches("categoryId=").count();
+    assert_eq!(
+        category_id_count,
+        1,
+        "exactly one categoryId must appear; found {}: {url}",
+        category_id_count
+    );
+}
+
+/// Verify that the legacy `loader` field also follows the singular-or-Any rule
+/// when `loaders` is empty (back-compat path).
+#[test]
+fn cf_search_url_legacy_loader_still_works_when_loaders_empty() {
+    let params = SearchParams {
+        query: "".to_string(),
+        mc_version: Some("1.20.1".to_string()),
+        loader: Some("forge".to_string()),
+        loaders: vec![],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Mod,
+    };
+    let url = CurseForgeProvider::build_search_url(&params);
+    let params_map = url_params(&url);
+    assert_eq!(
+        params_map.get("modLoaderType").map(|s| s.as_str()),
+        Some("1"),
+        "legacy loader=forge should produce modLoaderType=1 (Forge): {url}"
     );
 }

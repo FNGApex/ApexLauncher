@@ -78,6 +78,8 @@ async fn cf_live_search_returns_results() {
         query: "jei".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 10,
         project_type: ProjectType::Mod,

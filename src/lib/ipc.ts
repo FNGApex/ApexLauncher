@@ -237,9 +237,23 @@ export function searchMods(
   offset: number,
   limit: number,
   projectType: "mod" | "modpack" = "mod",
+  // BR-A: multi-loader + category filters (kept at the end so existing 7-arg
+  // callers don't break; reordered to the command's arg order internally).
+  loaders: string[] = [],
+  categories: string[] = [],
 ) {
   return unwrap(
-    commands.searchMods(provider, query, mcVersion, loader, offset, limit, projectType),
+    commands.searchMods(
+      provider,
+      query,
+      mcVersion,
+      loader,
+      loaders,
+      categories,
+      offset,
+      limit,
+      projectType,
+    ),
   );
 }
 

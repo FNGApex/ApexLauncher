@@ -325,6 +325,8 @@ fn search_params_serializes_to_camel_case() {
         query: "sodium".to_string(),
         mc_version: Some("1.21".to_string()),
         loader: Some("fabric".to_string()),
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::default(),
@@ -332,6 +334,82 @@ fn search_params_serializes_to_camel_case() {
     let json = serde_json::to_value(&params).unwrap();
     assert!(json.get("mcVersion").is_some(), "mcVersion key missing");
     assert!(json.get("mc_version").is_none());
+}
+
+// ── A-1: SearchParams new fields + round-trip ─────────────────────────────
+
+/// Old-format JSON (no `loaders`/`categories` fields) must deserialize to
+/// `SearchParams` with both new vecs empty — backward compat via `#[serde(default)]`.
+#[test]
+fn search_params_old_json_without_new_fields_deserializes_to_empty_vecs() {
+    let old_json = r#"{
+        "query": "sodium",
+        "mcVersion": "1.21",
+        "loader": "fabric",
+        "offset": 0,
+        "limit": 20,
+        "projectType": "mod"
+    }"#;
+    let params: SearchParams = serde_json::from_str(old_json).expect("deserialize failed");
+    assert!(
+        params.loaders.is_empty(),
+        "loaders should default to empty vec when absent from JSON; got {:?}",
+        params.loaders
+    );
+    assert!(
+        params.categories.is_empty(),
+        "categories should default to empty vec when absent from JSON; got {:?}",
+        params.categories
+    );
+    // Existing fields still round-trip correctly.
+    assert_eq!(params.query, "sodium");
+    assert_eq!(params.mc_version, Some("1.21".to_string()));
+    assert_eq!(params.loader, Some("fabric".to_string()));
+}
+
+#[test]
+fn search_params_new_fields_round_trip_through_json() {
+    let params = SearchParams {
+        query: "test".to_string(),
+        mc_version: None,
+        loader: None,
+        loaders: vec!["fabric".to_string(), "forge".to_string()],
+        categories: vec!["technology".to_string(), "magic".to_string()],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::default(),
+    };
+    let json = serde_json::to_value(&params).unwrap();
+    // Verify new fields are present in serialized output.
+    let loaders_arr = json.get("loaders").expect("loaders key missing");
+    assert_eq!(loaders_arr.as_array().unwrap().len(), 2, "loaders should have 2 entries");
+    let categories_arr = json.get("categories").expect("categories key missing");
+    assert_eq!(categories_arr.as_array().unwrap().len(), 2, "categories should have 2 entries");
+
+    // Deserialize back and confirm values.
+    let roundtripped: SearchParams = serde_json::from_value(json).expect("re-deserialize failed");
+    assert_eq!(roundtripped.loaders, vec!["fabric", "forge"]);
+    assert_eq!(roundtripped.categories, vec!["technology", "magic"]);
+}
+
+#[test]
+fn search_params_with_project_type_and_new_fields_camel_case() {
+    let params = SearchParams {
+        query: "sodium".to_string(),
+        mc_version: None,
+        loader: None,
+        loaders: vec!["fabric".to_string()],
+        categories: vec![],
+        offset: 0,
+        limit: 20,
+        project_type: ProjectType::Modpack,
+    };
+    let json = serde_json::to_value(&params).unwrap();
+    assert_eq!(json.get("projectType").and_then(|v| v.as_str()), Some("modpack"));
+    assert!(json.get("project_type").is_none(), "snake_case key must not appear");
+    // new fields present
+    assert!(json.get("loaders").is_some(), "loaders key missing");
+    assert!(json.get("categories").is_some(), "categories key missing");
 }
 
 #[test]
@@ -409,6 +487,8 @@ fn search_params_with_project_type_serializes_to_camel_case() {
         query: "sodium".to_string(),
         mc_version: None,
         loader: None,
+        loaders: vec![],
+        categories: vec![],
         offset: 0,
         limit: 20,
         project_type: ProjectType::Modpack,

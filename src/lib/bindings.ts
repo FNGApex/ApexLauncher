@@ -141,12 +141,17 @@ export const commands = {
 	 *  Unknown provider strings return a typed `unknown_provider` error rather than panicking.
 	 *  The CF key is resolved from `MODLOADER_CF_API_KEY` env or `settings.curseforge_api_key`.
 	 *  `project_type` selects the content class: `"mod"` (default) or `"modpack"`.
+	 * 
+	 *  `loaders` is an optional multi-loader filter (e.g. `["fabric","forge"]`).
+	 *  `categories` carries per-provider category values already resolved by the
+	 *  frontend (Modrinth: slug strings; CurseForge: numeric id strings).
+	 *  Both default to empty (= no filter) when `None`.
 	 */
-	searchMods: (provider: string, query: string, mcVersion: string | null, loader: string | null, offset: number, limit: number, projectType: 
+	searchMods: (provider: string, query: string, mcVersion: string | null, loader: string | null, loaders: string[] | null, categories: string[] | null, offset: number, limit: number, projectType: 
 /**  Standard mods (default). */
 "mod" | 
 /**  Modpacks. */
-"modpack" | null) => typedError<SearchResult, ProviderCommandError>(__TAURI_INVOKE("search_mods", { provider, query, mcVersion, loader, offset, limit, projectType })),
+"modpack" | null) => typedError<SearchResult, ProviderCommandError>(__TAURI_INVOKE("search_mods", { provider, query, mcVersion, loader, loaders, categories, offset, limit, projectType })),
 	/**
 	 *  Fetch versions of a mod project compatible with the supplied MC version + loader.
 	 * 

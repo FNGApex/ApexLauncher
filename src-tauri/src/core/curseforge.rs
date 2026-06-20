@@ -321,6 +321,27 @@ impl CurseForgeProvider {
     }
 
     /// Build the CF `/v1/mods/search` URL from `SearchParams`.
+    ///
+    /// ## Multi-loader rule (singular-or-Any — Q1 locked decision)
+    /// CF's `modLoaderType` accepts a single numeric enum value.
+    /// - 0 loaders (empty `loaders` vec **and** no legacy `loader` field) → omit `modLoaderType`.
+    /// - Exactly 1 loader → `modLoaderType=<id>` (Forge=1, Fabric=4, Quilt=5, NeoForge=6).
+    /// - >1 loaders → omit `modLoaderType` (equivalent to Any=0).
+    ///   The unreliable `modLoaderTypes` plural is intentionally NOT used (spec Q1).
+    ///
+    /// Note: CF silently ignores `modLoaderType` unless `gameVersion` is also set.
+    ///
+    /// ## Category rule (at-most-one `categoryId` — Q7 locked decision)
+    /// CF ANDs multiple `categoryIds`, which with >1 id yields a near-empty feed.
+    ///
+    /// Assumption (verified against CF API docs §4.1, design §5.3): CF's `categoryId`
+    /// (singular) applies a single-category filter. When multiple categories are selected
+    /// by the user, the frontend sends only one per CF call (the first resolved CF value)
+    /// to avoid the AND-narrowing trap. This is the "send at most one CF categoryId" rule.
+    ///
+    /// CF docs are ambiguous about `categoryIds` plural ("filter by a list" without
+    /// specifying AND/OR); the design doc §5.3 records this as treat-as-AND based on a
+    /// second research pass. Live verification before final ship is required (Q7).
     fn build_search_url(params: &SearchParams) -> String {
         let class_id = match params.project_type {
             ProjectType::Mod => MODS_CLASS_ID,
@@ -341,11 +362,30 @@ impl CurseForgeProvider {
         if let Some(mc) = &params.mc_version {
             url.push_str(&format!("&gameVersion={}", mc));
         }
-        if let Some(loader) = &params.loader {
-            if let Some(type_id) = loader_type_id(loader) {
+
+        // Multi-loader: singular-or-Any rule.
+        // Prefer `loaders` vec; fall back to legacy `loader` field if `loaders` is empty.
+        let effective_loaders: Vec<&str> = if !params.loaders.is_empty() {
+            params.loaders.iter().map(|s| s.as_str()).collect()
+        } else if let Some(l) = params.loader.as_deref() {
+            vec![l]
+        } else {
+            vec![]
+        };
+
+        if effective_loaders.len() == 1 {
+            // Exactly one loader → send the singular param.
+            if let Some(type_id) = loader_type_id(effective_loaders[0]) {
                 url.push_str(&format!("&modLoaderType={}", type_id));
             }
         }
+        // 0 loaders → omit; >1 loaders → omit (equivalent to Any; no unreliable plural).
+
+        // Category: at most one `categoryId` (CF ANDs multiple ids → near-empty feed).
+        if let Some(cat) = params.categories.first() {
+            url.push_str(&format!("&categoryId={}", percent_encode(cat)));
+        }
+
         url
     }
 

@@ -197,7 +197,17 @@ impl ModrinthProvider {
     /// Build the Modrinth `/search` URL from `SearchParams`.
     ///
     /// Facets are encoded as a JSON array-of-arrays as required by the Modrinth API.
-    /// The `project_type` facet is derived from `params.project_type`.
+    /// Inner array = OR; outer arrays = AND.
+    ///
+    /// Layout (all non-empty vecs emit one outer entry each):
+    /// - `["project_type:<mod|modpack>"]` — always present.
+    /// - `["versions:<mc>"]` — when `mc_version` is set.
+    /// - `["categories:<loader>","categories:<loader2>",…]` — when `loaders` is
+    ///   non-empty: ONE OR'd inner array (Modrinth treats loaders as categories facets).
+    ///   If the legacy `loader` field is set but `loaders` is empty, it is emitted the
+    ///   same way for back-compat.
+    /// - `["categories:<val>","categories:<val2>",…]` — when `categories` is non-empty:
+    ///   ONE OR'd inner array (Modrinth ORs categories within the inner array).
     fn build_search_url(params: &SearchParams) -> String {
         let project_type_str = match params.project_type {
             ProjectType::Mod => "mod",
@@ -208,8 +218,28 @@ impl ModrinthProvider {
         if let Some(mc) = &params.mc_version {
             facets.push(format!(r#"["versions:{}"]"#, mc));
         }
-        if let Some(loader) = &params.loader {
+
+        // Multi-loader filter: one OR'd inner array (loaders are categories facets on Modrinth).
+        // Prefer `loaders` vec; fall back to legacy `loader` field if `loaders` is empty.
+        if !params.loaders.is_empty() {
+            let inner: Vec<String> = params
+                .loaders
+                .iter()
+                .map(|l| format!(r#""categories:{}""#, l))
+                .collect();
+            facets.push(format!("[{}]", inner.join(",")));
+        } else if let Some(loader) = &params.loader {
             facets.push(format!(r#"["categories:{}"]"#, loader));
+        }
+
+        // Categories filter: one OR'd inner array.
+        if !params.categories.is_empty() {
+            let inner: Vec<String> = params
+                .categories
+                .iter()
+                .map(|c| format!(r#""categories:{}""#, c))
+                .collect();
+            facets.push(format!("[{}]", inner.join(",")));
         }
 
         let facets_json = format!("[{}]", facets.join(","));
