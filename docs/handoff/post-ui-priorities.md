@@ -3,7 +3,18 @@
 Captured 2026-06-19 from the human. After the `ui-overhaul` branch lands the UI redesign, the next
 two focus areas — in priority order:
 
-## P1 · API-polling efficiency ("we're very API hungry")
+## P1 · API-polling efficiency ("we're very API hungry") — ✅ ADDRESSED (2026-06-19, commit e8c82bd)
+
+**Outcome:** the QueryClient globals were already well-tuned (`refetchOnWindowFocus:false`, 30s
+staleTime — `src/lib/query.ts`); the hunger was N+1 fan-out, not focus churn. Two fixes landed:
+- `ModSearchCard` (mod-add search) fetched `getModVersions` eagerly per result (~20 calls/page,
+  ×infinite-scroll). Made lazy (enabled on hover/focus), mirroring Browse's ModpackCard. **The main fix.**
+- Browse used `["mcVersions"]` vs the canonical `["mc-versions"]` → cache split → refetch. Unified.
+
+Residual/optional (not done, low value): align the `["settings"]` staleTime across InstanceDetail/
+JavaTab/TechTab/Settings (keys already match so TanStack dedupes; harmless). Re-open if hunger persists.
+
+Original symptom + leads below (kept for the record).
 
 Symptom (human): the app makes far more provider/API calls than it should. Likely contributes to P2
 (rate-limit → download failures).
