@@ -7,7 +7,7 @@ Concurrent, hash-verified download engine that executes a `DownloadPlan` (list o
 ## CLI code
 
 - `src-tauri/src/core/download.rs` (761 lines) — entire engine: `ExpectedHash` (Sha1/Sha256/Sha512 variants), `DownloadItem`, `DownloadPlan`, `DownloadError` (Network/HashMismatch/Io), `ProgressUpdate`, `ProgressSink` trait, `NoOpSink`, `IncrementalHasher`, `verify`, `needs_download`, `download_item`, `seed_hasher_from_file` (seeds hasher from partial `.part` bytes on resume), `execute_plan`, `execute_plan_cancellable` (same as `execute_plan` + checks `CancelToken` before each item), `build_client`; `CancelToken` (`Arc<AtomicBool>`, `cancel()`, `is_cancelled()`, `Default` = uncancelled); `CapturingSink` (test-only mock, stays module-scope); ends with a `#[cfg(test)] #[path = "download_tests.rs"] mod tests;` stub
-- `src-tauri/src/core/download_tests.rs` (1379 lines) — 37 unit tests (`#[test]`/`#[tokio::test]`) via hand-rolled `tokio::net::TcpListener` mock, wired back into `download.rs` via the `#[path]` stub
+- `src-tauri/src/core/download_tests.rs` — 41 unit tests (`#[test]`/`#[tokio::test]`) via hand-rolled `tokio::net::TcpListener` mock, wired back into `download.rs` via the `#[path]` stub
 - `src-tauri/src/lib.rs` — `TauriEventSink` (emits `download://progress` Tauri event); `execute_download_plan` async Tauri command (takes `DownloadPlan` + optional `concurrency: usize`, clamps 1–32, default 8)
 
 ## Artifacts

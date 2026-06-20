@@ -38,7 +38,7 @@ The `RunningRegistry` (slug → `RunState`) is the source of truth for run lifec
 - **resolver domain:** `launch_instance` calls `resolver::assemble` + `resolver::merge_loader_profile`; `LaunchMeta` is defined in `resolver.rs`. Adding fields to `LaunchMeta` requires coordinating both modules.
 - **metadata domain:** `launch_instance` calls `loader_profile::fetch_profile` for fabric/quilt; `loader_profile::load_forge_profile` for forge/neoforge. Changes to `LoaderProfile` propagate here.
 - **download domain:** `launch_instance` calls `execute_plan` (not `execute_plan_cancellable` — launch downloads are not task-queued); checks `ItemOutcome` before spawn.
-- **java domain:** `launch_instance` calls `java::ensure_java` for the JVM path; forge/neoforge reuses the `java_inst_opt` from the installer step.
+- **java domain:** `launch_instance` calls `java_resolve::resolve_effective_java(inst, &settings)` at step 2 to get `EffectiveJava`; then calls `java::ensure_java(major)` only when `effective.java_path` is `None` (auto-detect/provision); `effective.xmx_mb`/`xms_mb`/`extra_args`/`java_path` feed argv assembly; forge/neoforge reuses the `java_inst_opt` from the installer step.
 - **instances domain:** monitor task calls `instances::record_playtime` and `instances::read_manifest_pub` on exit; `launch_instance` calls `core::materialize::materialize` (step 6b) to hardlink artifacts.
 
 ## Conventions worth knowing
@@ -56,5 +56,5 @@ The `RunningRegistry` (slug → `RunState`) is the source of truth for run lifec
 - `${path}` (log4j config arg) is dropped when `logging_config` is `None`.
 - Classpath separator: `:` on non-Windows, `;` on Windows.
 - **Placeholder gotcha:** `build_argv` fails loud (`AssembleError::UnsubstitutedPlaceholders`) on any `${...}` token missing from the substitution table. Modern MS-auth version JSONs emit `--clientId ${clientid}` + `--xuid ${auth_xuid}`; both must be in the table.
-- Test count: 36 Rust tests in `launch_tests.rs` + 14 in `forge_installer_tests.rs` = 50 launch-domain tests.
+- Test count: 46 Rust tests in `launch_tests.rs` + 14 in `forge_installer_tests.rs` = 60 launch-domain tests.
 - Open follow-ups: `vanilla-launch-f-1` (legacy asset virtual tree), `vanilla-launch-f-2` (`-Dminecraft.client.jar=` nit), `fabric-quilt-launch-f-1` (loader-library hash verify) — all in `.claude/project/followups/`.

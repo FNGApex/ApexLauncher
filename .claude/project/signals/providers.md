@@ -2,53 +2,55 @@
 
 ## What it does
 
-Normalized mod/modpack search backend for Modrinth and CurseForge. Exposes a `ModProvider` async_trait with `search` + `get_versions` methods; both providers share unified types (`ProjectSummary`, `ProjectVersion`, `VersionFile`, `Dependency`, `SearchResult`). `SearchParams` carries a `ProjectType` enum (`Mod` | `Modpack`) that routes to Modrinth's `project_type:mod|modpack` facet and CF's `classId` 6 (mods) | 4471 (modpacks). `ProjectSummary` carries `page_url: Option<String>`: Modrinth builds it as `https://modrinth.com/{project_type}/{slug}` (from the hit's own `project_type` field, not the search selector); CurseForge takes `links.websiteUrl` verbatim. `ProviderHttpClient` is an injectable HTTP seam — production uses `ReqwestProviderClient`; tests inject a mock backed by a `VecDeque<MockResp>`. CF key resolves env (`MODLOADER_CF_API_KEY`) → settings → baked compile-time default → `None` via three-arg `cf_api_key_from(env_val, settings_val, baked_val)`; `build.rs` bakes the key from gitignored `src-tauri/.env` at compile time via `cargo:rustc-env`.
+Normalized mod/modpack search backend for Modrinth and CurseForge. Exposes a `ModProvider` async_trait with `search`, `get_versions`, `get_project`, `get_projects_brief`, and `get_pack_summary` methods; both providers share unified types. On ui-overhaul: `PackInfo` (full project detail for the `BrowsePackInfo` page), `PackSummary` (update-check result for `refresh_pack_meta`), `ModBrief` (batched lightweight metadata for `enrich_instance_mods`), and `get_projects_brief` (batch fetch of `ModBrief`s by project IDs) were added. `ProjectSummary.page_url` carries the provider page URL captured at add-time.
 
 ## CLI code
 
-- `src-tauri/build.rs` — parses gitignored `src-tauri/.env` for `MODLOADER_CF_API_KEY` and emits `cargo:rustc-env=MODLOADER_CF_API_KEY=<value>` so `option_env!` can read it at compile time; strips mismatched leading/trailing quotes; missing `.env` or missing key line bakes nothing (build still succeeds); triggers rerun on `.env` change or env var change
-- `src-tauri/src/core/providers.rs` — normalized types (`ProjectSummary`, `ProjectVersion`, `VersionFile`, `Dependency`, `SearchParams`, `SearchResult`, `ProviderKind`), `ProjectType` enum (`Mod`/`Modpack`), `ModProvider` trait, `ProviderHttpClient` trait + `ReqwestProviderClient`, `ProviderError` enum (KeyMissing / Network / HttpStatus / BadResponse), raw MR + CF serde deserialization types, `cf_api_key_from(env_val, settings_val, baked_val)`; 32 tests in sibling `providers_tests.rs` (incl. 5 new baked-tier precedence tests), wired via `#[cfg(test)] #[path = "providers_tests.rs"] mod tests;` stub
-- `src-tauri/src/core/modrinth.rs` — `ModrinthProvider` impl; `project_type` facet derived from `SearchParams.project_type` (`"mod"` or `"modpack"`); facets JSON-encoded as `[["project_type:..."],["versions:X"],["categories:Y"]]`; `page_url` built as `https://modrinth.com/{hit.project_type}/{hit.slug}` using the hit's own `project_type` field; percent-encoding helper; `GET /v2/search` + `GET /v2/project/{id}/version`; client-side mc+loader filter after server-side filtering; 6 tests in sibling `modrinth_tests.rs`, wired via `#[path]` stub
-- `src-tauri/src/core/curseforge.rs` — `CurseForgeProvider` impl; `gameId=432`; `classId=6` (mods) or `classId=4471` (modpacks) selected by `SearchParams.project_type`; `MODPACKS_CLASS_ID = 4471` constant; `modLoaderType` numeric mapping (Forge=1, Fabric=4, Quilt=5, NeoForge=6); `gameVersions` split heuristic; `page_url` taken from `links.websiteUrl` verbatim; `GET /v1/mods/search` + `GET /v1/mods/{id}/files` + `get_file(client, project_id, file_id)` (single-file resolver for modpack-import slice B); `downloadUrl: null` maps to `VersionFile.url = None`; 38 tests in sibling `curseforge_tests.rs`, wired via `#[path]` stub
-- `src-tauri/src/core/mod_install.rs` (599 lines) — BFS dependency resolver (`resolve_install`); output types `PlannedMod`, `ManualMod`, `UnresolvedDep`, `Suggestion`, `IncompatibleWarning`, `InstallPlan`, `AddModResult`, `UpdateModResult`, `FailedMod`; helpers `build_download_items`, `merge_mod_entries`, `partition_by_file_name`, `attribute_outcomes`, `decide_update`, `apply_swap`, `fetch_newest_compatible`, `page_url_for`; no filesystem I/O, no Tauri commands; 26 tests in sibling `mod_install_tests.rs`, wired via `#[path]` stub
-- `src-tauri/src/lib.rs` — `search_mods` (now accepts `project_type` arg), `get_mod_versions`, `add_mod`, `set_mod_enabled`, `remove_mod`, `update_mod` Tauri commands; `ProviderCommandError { kind, message }` IPC error type
+- `src-tauri/build.rs` — parses gitignored `src-tauri/.env` for `MODLOADER_CF_API_KEY` and emits `cargo:rustc-env`; missing `.env` bakes nothing; build always succeeds
+- `src-tauri/src/core/providers.rs` — normalized types: `ProjectSummary`, `ProjectVersion`, `VersionFile`, `Dependency`, `SearchParams`, `SearchResult`, `ProviderKind`, `ProjectType` (Mod/Modpack), `ModBrief { project_id, name, icon_url, summary }`, `PackInfo { name, description, icon_url, author, downloads, project_type, provider }`, `PackSummary { latest_version_id, latest_version, page_url }`; `ModProvider` trait with all 5 methods; `ProviderHttpClient` trait + `ReqwestProviderClient`; `ProviderError` enum; `cf_api_key_from`; raw MR + CF serde deserialization types; 35 tests in sibling `providers_tests.rs`
+- `src-tauri/src/core/modrinth.rs` — `ModrinthProvider` impl; `get_projects_brief` uses `GET /v2/projects?ids=[...]` batched call; `get_project` uses `GET /v2/project/{id}` + `GET /v2/project/{id}/members` for author; `get_pack_summary` uses `GET /v2/project/{id}/version?loaders=...&game_versions=...`; page_url built as `https://modrinth.com/{hit.project_type}/{hit.slug}`; 40 tests in sibling `modrinth_tests.rs`
+- `src-tauri/src/core/curseforge.rs` — `CurseForgeProvider` impl; `get_projects_brief` uses `POST /v1/mods` (batch mods endpoint); `get_project` uses `GET /v1/mods/{id}` + description endpoint; `get_pack_summary` uses `GET /v1/mods/{id}/files` filtered to release type; `classId=6` (mods) or `classId=4471` (modpacks); `get_file(client, project_id, file_id)` single-file resolver; 67 tests in sibling `curseforge_tests.rs`
+- `src-tauri/src/lib.rs` — `search_mods`, `get_mod_versions`, `get_pack_info` Tauri commands; `ProviderCommandError { kind, message }` IPC error type; `enrich_instance_mods` command uses `get_projects_brief` to backfill mod metadata
 
 ## Artifacts
 
-- `src/lib/ipc.ts` — `ProjectType = "mod" | "modpack"` type alias; `ProjectSummary` interface includes `pageUrl: string | null`; `searchMods` wrapper accepts `projectType: ProjectType = "mod"` as last arg; `ProviderKind`, `ProjectVersion`, `VersionFile`, `Dependency`, `SearchResult`, `ProviderCommandError` interfaces; Phase 5 slice B types: `ManualMod`, `UnresolvedDep`, `Suggestion`, `IncompatibleWarning`, `FailedMod`, `AddModResult`, `UpdateModResult`; `addMod`, `setModEnabled`, `removeMod`, `updateMod` wrappers; `kind` routing strings (`"modrinth"`, `"curseforge"`) are lowercase and distinct from `ProviderKind` response value `"curseForge"` (camelCase)
+- `src/lib/ipc.ts` — `ProjectType`, `ProjectSummary`, `ProjectVersion`, `VersionFile`, `Dependency`, `SearchResult`, `ProviderCommandError`, `PackInfo`, `ModBrief` interfaces; `searchMods`, `getModVersions`, `getPackInfo` wrappers; provider routing strings lowercase (`"modrinth"`, `"curseforge"`)
 
 ## Docs
 
 - `docs/spec/providers-browse.md` — slice A spec + implementation log
-- `docs/spec/ui-modpack-rework.md` — CP3 spec: `ProjectType` param, `page_url` field, Browse rewrite
-- `docs/spec/curseforge-api-key.md` — baked CF key tier spec: `build.rs` approach, precedence, `.env` format, implementation log
-- `docs/design/providers.md` — design doc: problem, goals/non-goals, approach rationale, normalized pipeline diagram
-- `docs/design/ui-modpack-rework.md` — design rationale for Browse-as-modpack-feed and slide-over approach
+- `docs/spec/curseforge-api-key.md` — baked CF key tier spec
+- `docs/design/providers.md` — normalized pipeline diagram, rationale
+- `docs/spec/browse-rework.md` — BR-A through BR-D; `get_pack_info`, per-provider split
+- `docs/spec/mod-metadata-ux.md` — `ModBrief`/`get_projects_brief`/`enrich_instance_mods` spec
 
 ## Fixtures
 
-- `src-tauri/src/core/fixtures/modrinth_search.json` — 2-hit Modrinth search response (sodium, fabric-api)
-- `src-tauri/src/core/fixtures/modrinth_versions.json` — 3-version Modrinth version list
-- `src-tauri/src/core/fixtures/cf_search.json` — 2-mod CF search response (JEI, OptiFine)
-- `src-tauri/src/core/fixtures/cf_files.json` — 3-file CF files response (includes null downloadUrl case)
+- `src-tauri/src/core/fixtures/modrinth_search.json` — 2-hit MR search response
+- `src-tauri/src/core/fixtures/modrinth_versions.json` — 3-version MR version list
+- `src-tauri/src/core/fixtures/modrinth_project_sodium.json` — full project detail for get_project test
+- `src-tauri/src/core/fixtures/modrinth_members_sodium.json` — team members for get_project author test
+- `src-tauri/src/core/fixtures/modrinth_projects_batch.json` — batch projects response for get_projects_brief test
+- `src-tauri/src/core/fixtures/cf_search.json` — 2-mod CF search response
+- `src-tauri/src/core/fixtures/cf_files.json` — 3-file CF files response (includes null downloadUrl)
+- `src-tauri/src/core/fixtures/cf_mod_jei.json` — single mod detail for get_project test
+- `src-tauri/src/core/fixtures/cf_mod_jei_description.json` — description response for get_project test
+- `src-tauri/src/core/fixtures/cf_mods_batch.json` — batch mods response for get_projects_brief test
 
 ## Coupling
 
-- `ipc.ts` `ProviderKind` response value `"curseForge"` (camelCase) vs routing param `"curseforge"` (lowercase): two distinct string shapes; `Browse.tsx` and `InstanceDetail.tsx` both branch on `mod.provider === "modrinth"` / `=== "curseForge"`; any serialization change breaks both files (providers + frontend-shell domains).
-- `ProviderCommandError.kind` string `"key_missing"` is checked by name in both `Browse.tsx` and `InstanceDetail.tsx` `AddModTab`; any rename in `lib.rs` breaks the frontend key-missing UI state.
-- `AddModResult` / `ManualMod` / `UnresolvedDep` / `FailedMod` Rust types in `mod_install.rs` are hand-mirrored in `ipc.ts`; any field rename or addition requires a matching `ipc.ts` update.
-- `add_mod` command calls `instances::merge_mod_entries` and writes the instance manifest; changes to `instances.rs` `ModEntry` struct require matching updates in `mod_install.rs` `planned_to_mod_entry` (instances domain).
-- `set_mod_enabled` and `remove_mod` commands delegate directly to `instances::set_mod_enabled` / `instances::remove_mod` (instances domain).
-- Phase 6 modpack domain (`core/modpack.rs`) reuses `ProviderHttpClient`, `ProviderError`, `VersionFile`, and `CurseForgeProvider::get_file` directly; the providers types are the substrate.
-- `settings.rs` `curseforge_api_key` field feeds `cf_api_key_from` at the command layer; if the field moves, the command layer must update (settings → providers coupling).
+- `ipc.ts` `ProviderKind` response value `"curseForge"` (camelCase) vs routing param `"curseforge"` (lowercase): two distinct string shapes. `Browse.tsx`, `BrowsePackInfo.tsx`, `InstanceDetail.tsx` all branch on `mod.provider`/`instance.source.provider`; any serialization change breaks all three files.
+- `ProviderCommandError.kind === "key_missing"` is checked by name in `Browse.tsx` and `InstanceDetail.tsx`; any rename in `lib.rs` breaks the frontend key-missing UI state.
+- `get_pack_info` result (`PackInfo`) is used by `BrowsePackInfo.tsx` and `InfoTab.tsx` for pack detail display; `PackSummary` is used by `refresh_pack_meta` in `lib.rs` to write update-check fields to the instance manifest.
+- `enrich_instance_mods` in `lib.rs` calls `provider.get_projects_brief(mr_ids, cf_ids)` for each provider separately, merges `ModBrief` results back onto manifest `ModEntry` fields by `project_id`; any `ModBrief` field change requires updating `collect_missing_ids` and `apply_briefs` helpers in `lib.rs`.
+- Phase 6 modpack domain (`core/modpack.rs`) reuses `ProviderHttpClient`, `ProviderError`, `VersionFile`, and `CurseForgeProvider::get_file`.
+- `settings.rs` `curseforge_api_key` field feeds `cf_api_key_from` at the command layer.
 
 ## Conventions worth knowing
 
-- Injectable HTTP seam pattern: `ProviderHttpClient` mirrors `AuthHttpClient` in `auth.rs`. No live HTTP in any test — all responses pre-loaded in a `VecDeque<MockResp>`.
-- CF key resolved at command layer via `cf_api_key_from(env_val, settings_val, baked_val)`. Precedence: env → settings → baked (`option_env!("MODLOADER_CF_API_KEY")` compiled by `build.rs`) → `None`. Key never reaches the frontend.
-- All IPC-crossing structs carry `#[serde(rename_all = "camelCase")]`. CF numeric ids are stringified to `String` in normalized types.
-- `ProjectType::Mod` → Modrinth facet `project_type:mod`, CF `classId=6`. `ProjectType::Modpack` → facet `project_type:modpack`, CF `classId=4471`.
-- Modrinth `page_url` uses the *hit's own* `project_type` field (from the response row), not the search selector — correctly handles edge cases where the API returns a different type.
-- `VersionFile.url = None` signals `allowModDistribution: false` / `downloadUrl: null`; `mod_install.rs` routes these to `ManualMod`.
-- `ModProvider` is object-safe: `Box<dyn ModProvider>` compiles (compile-time asserted in `providers_tests.rs`).
-- `mod_install.rs` has no filesystem I/O and no Tauri commands — it is a pure resolver/planner; all I/O and manifest mutation happen in `lib.rs`'s `add_mod` command body.
+- Injectable HTTP seam pattern: `ProviderHttpClient` mirrors `AuthHttpClient` in `auth.rs`. No live HTTP in any test.
+- CF key resolved at command layer via `cf_api_key_from(env_val, settings_val, baked_val)`. Precedence: env → settings → baked → `None`. Key never reaches the frontend.
+- All IPC-crossing structs carry `#[serde(rename_all = "camelCase")]`. CF numeric ids stringified to `String`.
+- `ProjectType::Mod` → MR facet `project_type:mod`, CF `classId=6`. `ProjectType::Modpack` → facet `project_type:modpack`, CF `classId=4471`.
+- `ModProvider` is object-safe: `Box<dyn ModProvider>` compiles (asserted in `providers_tests.rs`).
+- `mod_install.rs` has no filesystem I/O and no Tauri commands — pure resolver/planner.
