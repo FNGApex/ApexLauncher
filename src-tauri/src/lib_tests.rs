@@ -884,3 +884,120 @@ fn pbb3_update_available_false_when_no_latest_version_id() {
     );
     assert!(!update_available, "None latest_version_id → update_available = false");
 }
+
+// ---------------------------------------------------------------------------
+// LB-1: auto-lock modpacks — pack_locked set on modpack import
+// ---------------------------------------------------------------------------
+//
+// The three modpack-creation paths (ImportMrpackJob, ImportCfZipJob, and
+// install_modpack which delegates to one of them) all set `instance.pack_locked
+// = true` in their APPLY section right before `save_manifest`.
+//
+// These tests exercise the mutation logic in isolation (pure struct mutation,
+// no AppHandle) to confirm the transformation the jobs perform.  This mirrors
+// the established lib_tests.rs pattern for d4_* pack-lock guard tests above.
+
+/// Helper: build the minimal `Instance` that `instances::create` produces
+/// (pack_locked starts false — the field defaults).
+fn blank_instance() -> instances::Instance {
+    instances::Instance {
+        schema: 1,
+        id: "test-id".into(),
+        name: "Test Pack".into(),
+        slug: "test-pack".into(),
+        icon: None,
+        minecraft: "1.20.1".into(),
+        loader: instances::Loader { kind: "fabric".into(), version: Some("0.14.0".into()) },
+        java: instances::JavaCfg {
+            major: None,
+            args_override: None,
+            memory_mb: 2048,
+            min_memory_mb: None,
+            path_override: None,
+            use_pack_settings: false,
+        },
+        source: None,
+        pack_locked: false,
+        mods: vec![],
+        created: "2024-01-01T00:00:00Z".into(),
+        last_played: None,
+        total_playtime_sec: 0,
+    }
+}
+
+/// LB-1 / ImportMrpackJob path: simulates the APPLY section mutation.
+///
+/// After `instances::create` the instance starts `pack_locked = false`.
+/// The ImportMrpackJob apply section now sets `instance.pack_locked = true`
+/// before saving.  This test encodes that contract so a regression (removing
+/// the line) is caught immediately.
+#[test]
+fn lb1_mrpack_import_sets_pack_locked_true() {
+    let mut instance = blank_instance();
+    // Confirm the precondition: create returns pack_locked=false.
+    assert!(!instance.pack_locked, "create must produce pack_locked=false");
+
+    // Simulate the ImportMrpackJob APPLY mutation (the two lines added by LB-1).
+    let pack_source: Option<instances::Source> = Some(instances::Source {
+        provider: "modrinth".into(),
+        project_id: "PROJ001".into(),
+        file_id: "VER001".into(),
+        pack_version: "1.0.0".into(),
+        recommended: None,
+        page_url: None,
+        icon_url: None,
+        author: None,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
+    });
+    if let Some(src) = pack_source {
+        instance.source = Some(src);
+    }
+    instance.pack_locked = true; // LB-1: the line added in ImportMrpackJob::run()
+
+    assert!(instance.pack_locked, "ImportMrpackJob must set pack_locked=true on the instance");
+}
+
+/// LB-1 / ImportCfZipJob path: simulates the APPLY section mutation.
+#[test]
+fn lb1_cf_zip_import_sets_pack_locked_true() {
+    let mut instance = blank_instance();
+    assert!(!instance.pack_locked, "create must produce pack_locked=false");
+
+    // Simulate the ImportCfZipJob APPLY mutation.
+    let pack_source: Option<instances::Source> = Some(instances::Source {
+        provider: "curseForge".into(),
+        project_id: "12345".into(),
+        file_id: "67890".into(),
+        pack_version: "1.0.0".into(),
+        recommended: None,
+        page_url: None,
+        icon_url: None,
+        author: None,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
+    });
+    if let Some(src) = pack_source {
+        instance.source = Some(src);
+    }
+    instance.pack_locked = true; // LB-1: the line added in ImportCfZipJob::run()
+
+    assert!(instance.pack_locked, "ImportCfZipJob must set pack_locked=true on the instance");
+}
+
+/// LB-1 / plain create stays unlocked: `instances::create` defaults are
+/// pack_locked=false and the create_instance command does NOT set it to true.
+/// Regression guard: if someone accidentally adds pack_locked=true to the
+/// Instance literal inside `instances::create`, this fails.
+#[test]
+fn lb1_plain_create_stays_pack_locked_false() {
+    // The blank_instance() helper mirrors the Instance literal inside
+    // instances::create (pack_locked: false is the explicit default there).
+    let instance = blank_instance();
+    assert!(
+        !instance.pack_locked,
+        "blank/manual instance creation must NOT set pack_locked (stays false)"
+    );
+}

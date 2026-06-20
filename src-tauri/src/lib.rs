@@ -2519,6 +2519,8 @@ impl TaskJob for ImportMrpackJob {
                 if let Some(src) = self.pack_source {
                     instance.source = Some(src);
                 }
+                // LB-1: instances created from a modpack start locked.
+                instance.pack_locked = true;
                 match instances::save_manifest(&self.app, &inst.slug, &instance) {
                     Ok(_) => Ok(MrpackImportResult {
                         slug: inst.slug,
@@ -2801,6 +2803,8 @@ impl TaskJob for ImportCfZipJob {
                 if let Some(src) = self.pack_source {
                     instance.source = Some(src);
                 }
+                // LB-1: instances created from a modpack start locked.
+                instance.pack_locked = true;
                 match instances::save_manifest(&self.app, &inst.slug, &instance) {
                     Ok(_) => Ok(CfImportResult {
                         slug: inst.slug,
