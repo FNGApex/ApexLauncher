@@ -1252,19 +1252,19 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
 
   return (
     <li className="flex flex-col gap-1.5 bg-surface px-4 py-4 text-sm">
-      <div className="flex items-start gap-3">
+      <div className="flex items-center gap-3">
         {/* Icon: stored iconUrl or fallback */}
         {entry?.iconUrl ? (
           <img
             src={entry.iconUrl}
             alt=""
             referrerPolicy="no-referrer"
-            className={`size-10 shrink-0 rounded-lg object-cover ${mod.disabled ? "opacity-50" : ""}`}
+            className={`size-16 shrink-0 rounded-lg object-cover ${mod.disabled ? "opacity-50" : ""}`}
             loading="lazy"
           />
         ) : (
-          <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted">
-            <FileBox className="size-5" />
+          <div className="grid size-16 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted">
+            <FileBox className="size-8" />
           </div>
         )}
 
