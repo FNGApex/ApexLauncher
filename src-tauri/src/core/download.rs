@@ -326,6 +326,16 @@ pub async fn download_item(
     if !needs_download(&item.dest, &item.expected_hash) {
         return Ok(());
     }
+    let name = item
+        .dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?");
+    let size_str = match item.size {
+        Some(b) => format!("{b} bytes"),
+        None => "unknown size".to_string(),
+    };
+    log::info!("download: start {name} ({size_str})");
 
     // --- Determine .part path and any existing resume offset ---
     let part_path = part_path_for(&item.dest);
@@ -709,6 +719,12 @@ pub async fn execute_plan_cancellable(
         .iter()
         .filter(|item| {
             if !needs_download(&item.dest, &item.expected_hash) {
+                let name = item
+                    .dest
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?");
+                log::info!("download: skip {name} (already present / hash match)");
                 sink.item_done(&item.url, true);
                 outcomes.push(CancellableOutcome {
                     url: item.url.clone(),
@@ -760,11 +776,26 @@ pub async fn execute_plan_cancellable(
                         status: CancellableStatus::Cancelled,
                     };
                 }
+                let item_name = item
+                    .dest
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_owned();
                 let status = match download_item(client, item, sink).await {
-                    Ok(()) => ItemStatus::Ok,
-                    Err(e) => ItemStatus::Failed {
-                        error: e.to_string(),
-                    },
+                    Ok(()) => {
+                        log::info!("download: ok {item_name}");
+                        ItemStatus::Ok
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "download: FAILED {item_name} — url={} error={e}",
+                            item.url
+                        );
+                        ItemStatus::Failed {
+                            error: e.to_string(),
+                        }
+                    }
                 };
                 // Permit dropped here → slot released.
                 let success = matches!(status, ItemStatus::Ok);
@@ -779,11 +810,6 @@ pub async fn execute_plan_cancellable(
 
     // Collect all outcomes, running up to `concurrency` at a time.
     let mut downloaded: Vec<CancellableOutcome> = pending.collect().await;
-    for outcome in &downloaded {
-        if let CancellableStatus::Ran(ItemStatus::Failed { error }) = &outcome.status {
-            log::warn!("download: item failed — url={} error={error}", outcome.url);
-        }
-    }
     outcomes.append(&mut downloaded);
 
     CancellablePlanResult {

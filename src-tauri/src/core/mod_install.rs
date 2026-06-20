@@ -176,6 +176,7 @@ pub async fn resolve_install(
     // Queue entries: (version, project_id, slug_or_id_for_page_url).
     let mut queue: Vec<(ProjectVersion, String, String)> =
         vec![(root_version, root_project_id.to_string(), root_slug.to_string())];
+    let mut dep_count: usize = 0; // number of transitive deps resolved (root excluded)
 
     while !queue.is_empty() {
         let (version, project_id, slug) = queue.remove(0);
@@ -262,11 +263,18 @@ pub async fn resolve_install(
 
                     match resolved {
                         Some(dep_version) => {
+                            log::debug!(
+                                "resolve: dep {} -> version {}",
+                                pid,
+                                dep_version.id
+                            );
+                            dep_count += 1;
                             // page URL for a dep uses its project_id as the slug
                             // (best effort; slug not available from Dependency struct).
                             queue.push((dep_version, pid.clone(), pid.clone()));
                         }
                         None => {
+                            log::debug!("resolve: dep {} -> unresolved (no compatible version)", pid);
                             plan.unresolved.push(UnresolvedDep {
                                 project_id: pid.clone(),
                                 reason: "no compatible version found".to_string(),
@@ -280,6 +288,12 @@ pub async fn resolve_install(
             }
         }
     }
+
+    log::info!(
+        "resolve: {} mods to install ({} deps)",
+        plan.downloads.len() + plan.manual.len(),
+        dep_count
+    );
 
     plan
 }

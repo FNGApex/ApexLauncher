@@ -1549,6 +1549,13 @@ impl TaskJob for ModAddJob {
             other => { ctx.finish_failed(format!("unknown provider: {other}")).await; return; }
         };
 
+        log::info!(
+            "mod: ModAddJob plan resolved — {} to download, {} manual, {} unresolved",
+            plan.downloads.len(),
+            plan.manual.len(),
+            plan.unresolved.len()
+        );
+
         // Validate + partition download items.
         let (valid_downloads, invalid_downloads) = partition_by_file_name(plan.downloads.clone());
 
@@ -1645,6 +1652,16 @@ impl TaskJob for ModAddJob {
         };
         result.failed.append(&mut dl_failed);
 
+        for f in &result.failed {
+            log::warn!("mod add: failed {} — {}", f.file_name, f.error);
+        }
+        for m in &result.manual {
+            log::warn!(
+                "mod add: manual download required {} — {}",
+                m.file_name,
+                m.page_url
+            );
+        }
         log::info!(
             "mod: ModAddJob done task_id={task_id} — added={} failed={} manual={}",
             result.added.len(), result.failed.len(), result.manual.len()
