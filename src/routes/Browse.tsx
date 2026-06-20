@@ -379,6 +379,7 @@ function ModpackCard({ pack }: ModpackCardProps) {
         <img
           src={pack.iconUrl}
           alt=""
+          referrerPolicy="no-referrer"
           className="size-10 shrink-0 rounded-lg object-cover"
           loading="lazy"
         />

@@ -58,6 +58,7 @@ export function InfoTab() {
               <img
                 src={infoQuery.data.iconUrl}
                 alt=""
+                referrerPolicy="no-referrer"
                 className="size-14 shrink-0 rounded-xl object-cover"
                 loading="lazy"
               />

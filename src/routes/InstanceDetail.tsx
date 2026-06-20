@@ -936,6 +936,7 @@ function ModSearchCard({
           <img
             src={mod.iconUrl}
             alt=""
+            referrerPolicy="no-referrer"
             className="size-10 shrink-0 rounded-lg object-cover"
             loading="lazy"
           />
@@ -1092,6 +1093,7 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
           <img
             src={entry.iconUrl}
             alt=""
+            referrerPolicy="no-referrer"
             className={`size-10 shrink-0 rounded-lg object-cover ${mod.disabled ? "opacity-50" : ""}`}
             loading="lazy"
           />

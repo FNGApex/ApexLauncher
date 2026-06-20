@@ -81,6 +81,7 @@ export function BrowsePackInfo() {
           <img
             src={iconUrl}
             alt=""
+            referrerPolicy="no-referrer"
             className="size-16 shrink-0 rounded-xl object-cover"
             loading="lazy"
           />

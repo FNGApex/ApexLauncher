@@ -60,6 +60,7 @@ export function PackDescription({ markdown }: PackDescriptionProps) {
             <img
               src={src}
               alt={alt}
+              referrerPolicy="no-referrer"
               className="my-2 max-w-full rounded-lg"
               loading="lazy"
             />
