@@ -1,6 +1,10 @@
 # UI Overhaul + Instance Detail rework (spec)
 
-Status: **APPROVED (human, 2026-06-19) — ready to build.** Source of truth:
+Status: **COMPLETE (2026-06-19) — all six workstreams shipped on branch `ui-overhaul`.** Commits:
+WS-A 358ec2a/598c01f/9f30db7, WS-B d04ba63/54bd68e, WS-F be76000, WS-D a9b7561/253c341, WS-C 2100ee0,
+WS-E d9b63e4. **Pending: a full dev-window smoke-test pass** (the human deferred it mid-build to
+prioritize the API-polling + Download-Manager fixes — see `docs/handoff/post-ui-priorities.md`).
+Source of truth:
 `docs/handoff/ui-overhaul-brief.md`. Design + reality findings + resolved questions:
 `docs/design/ui-overhaul.md` §8. One integration branch `ui-overhaul`, sequenced checkpoints.
 
