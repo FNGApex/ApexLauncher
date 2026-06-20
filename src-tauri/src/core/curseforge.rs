@@ -22,8 +22,8 @@
 use serde::Deserialize;
 
 use crate::core::providers::{
-    Dependency, ModBrief, ModProvider, PackInfo, ProjectType, ProjectVersion, ProviderError,
-    ProviderHttpClient, ProviderKind, SearchParams, SearchResult, VersionFile,
+    Dependency, ModBrief, ModProvider, PackInfo, PackSummary, ProjectType, ProjectVersion,
+    ProviderError, ProviderHttpClient, ProviderKind, SearchParams, SearchResult, VersionFile,
 };
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -240,7 +240,7 @@ impl CfFile {
     }
 }
 
-/// Raw CF `/v1/mods/{id}` response (subset of fields needed for `PackInfo`).
+/// Raw CF `/v1/mods/{id}` response (subset of fields needed for `PackInfo` and `PackSummary`).
 #[derive(Debug, Deserialize)]
 struct CfModResponse {
     data: CfModData,
@@ -250,11 +250,20 @@ struct CfModResponse {
 struct CfModData {
     name: String,
     logo: Option<CfModLogo>,
+    /// Author list — present on the single-mod endpoint. Used for pack summary author.
+    #[serde(default)]
+    authors: Vec<CfAuthor>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CfModLogo {
     url: String,
+}
+
+/// Author record from CF `/v1/mods/{id}`.
+#[derive(Debug, Deserialize)]
+struct CfAuthor {
+    name: String,
 }
 
 /// Raw CF `/v1/mods/{id}/description` response.
@@ -590,6 +599,48 @@ impl ModProvider for CurseForgeProvider {
                 summary: m.summary,
             })
             .collect())
+    }
+
+    async fn get_pack_summary(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackSummary, ProviderError> {
+        let key = self.require_key()?;
+        // One call only: GET /v1/mods/{id} — name, logo.url, authors[].name.
+        // No /description call (spec PB-B2: "NO description").
+        let url = Self::build_mod_url(project_id);
+        let (status, body) = client
+            .get(&url, &[("x-api-key", key)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw: CfModResponse =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        let author = if raw.data.authors.is_empty() {
+            None
+        } else {
+            // Join all author names; the most common case is a single author.
+            Some(
+                raw.data
+                    .authors
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        };
+
+        Ok(PackSummary {
+            name: raw.data.name,
+            icon_url: raw.data.logo.map(|l| l.url),
+            author,
+        })
     }
 }
 

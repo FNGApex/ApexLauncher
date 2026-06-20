@@ -198,6 +198,11 @@ fn recommended_memory_overrides_global_default() {
             java_args: None,
         }),
         page_url: None,
+        icon_url: None,
+        author: None,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
     });
     // use_pack_settings = false → would normally give 4096 from settings
     inst.java.use_pack_settings = false;
@@ -227,6 +232,11 @@ fn recommended_memory_overrides_instance_override() {
             java_args: None,
         }),
         page_url: None,
+        icon_url: None,
+        author: None,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
     });
 
     let settings = default_settings();
@@ -254,6 +264,11 @@ fn recommended_java_args_overrides_instance_args() {
             java_args: Some("-XX:+UseG1GC -Xss512k".into()),
         }),
         page_url: None,
+        icon_url: None,
+        author: None,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
     });
 
     let settings = default_settings();
@@ -281,6 +296,11 @@ fn source_with_no_recommended_falls_through_to_instance_tier() {
         pack_version: "1.0".into(),
         recommended: None,
         page_url: None,
+        icon_url: None,
+        author: None,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
     });
 
     let settings = default_settings();

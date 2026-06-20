@@ -656,6 +656,11 @@ fn amb3_source_with_page_url_survives_round_trip() {
         pack_version: "2.0.0".into(),
         recommended: None,
         page_url: Some("https://modrinth.com/modpack/mypack".into()),
+        icon_url: None,
+        author: None,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
     });
 
     let manifest_path = write_inst(tmp.path(), &inst);
@@ -667,4 +672,117 @@ fn amb3_source_with_page_url_survives_round_trip() {
         Some("https://modrinth.com/modpack/mypack"),
         "pageUrl must survive a manifest round-trip"
     );
+}
+
+// ---------------------------------------------------------------------------
+// PB-B1: needs_update_check tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pbb1_needs_update_check_none_returns_true() {
+    let now = chrono::Utc::now();
+    assert!(
+        needs_update_check(None, now),
+        "None last_update_check must return true"
+    );
+}
+
+#[test]
+fn pbb1_needs_update_check_1h_ago_returns_false() {
+    let now = chrono::Utc::now();
+    let one_hour_ago = now - chrono::Duration::hours(1);
+    let last = one_hour_ago.to_rfc3339();
+    assert!(
+        !needs_update_check(Some(&last), now),
+        "1h ago must return false (within 24h window)"
+    );
+}
+
+#[test]
+fn pbb1_needs_update_check_25h_ago_returns_true() {
+    let now = chrono::Utc::now();
+    let twenty_five_hours_ago = now - chrono::Duration::hours(25);
+    let last = twenty_five_hours_ago.to_rfc3339();
+    assert!(
+        needs_update_check(Some(&last), now),
+        "25h ago must return true (>24h stale)"
+    );
+}
+
+#[test]
+fn pbb1_needs_update_check_garbage_returns_true() {
+    let now = chrono::Utc::now();
+    assert!(
+        needs_update_check(Some("not-a-timestamp"), now),
+        "unparseable timestamp must return true"
+    );
+}
+
+/// Round-trip: all five new Source fields survive JSON serialization.
+#[test]
+fn pbb1_new_source_fields_round_trip() {
+    let tmp = TempDir::new().unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    inst.source = Some(Source {
+        provider: "curseforge".into(),
+        project_id: "12345".into(),
+        file_id: "67890".into(),
+        pack_version: "1.5.0".into(),
+        recommended: None,
+        page_url: None,
+        icon_url: Some("https://example.com/icon.png".into()),
+        author: Some("TestAuthor".into()),
+        last_update_check: Some("2026-06-20T00:00:00Z".into()),
+        latest_version: Some("1.6.0".into()),
+        latest_version_id: Some("99999".into()),
+    });
+
+    let manifest_path = write_inst(tmp.path(), &inst);
+    let reloaded = read_manifest_pub(&manifest_path).unwrap();
+    let src = reloaded.source.unwrap();
+
+    assert_eq!(src.icon_url.as_deref(), Some("https://example.com/icon.png"));
+    assert_eq!(src.author.as_deref(), Some("TestAuthor"));
+    assert_eq!(src.last_update_check.as_deref(), Some("2026-06-20T00:00:00Z"));
+    assert_eq!(src.latest_version.as_deref(), Some("1.6.0"));
+    assert_eq!(src.latest_version_id.as_deref(), Some("99999"));
+}
+
+/// Old manifests without the new fields deserialize with None (backward compat).
+#[test]
+fn pbb1_old_manifest_missing_new_fields_defaults_to_none() {
+    let tmp = TempDir::new().unwrap();
+    // Write a manifest that lacks the five new fields (old shape).
+    let old_json = r#"{
+        "schema": 1,
+        "id": "test-id",
+        "name": "Test",
+        "slug": "test",
+        "icon": null,
+        "minecraft": "1.20.1",
+        "loader": { "kind": "vanilla", "version": null },
+        "java": { "major": null, "argsOverride": null, "memoryMb": 2048 },
+        "source": {
+            "provider": "modrinth",
+            "projectId": "proj-old",
+            "fileId": "file-old",
+            "packVersion": "1.0"
+        },
+        "packLocked": false,
+        "mods": [],
+        "created": "2024-01-01T00:00:00Z",
+        "lastPlayed": null,
+        "totalPlaytimeSec": 0
+    }"#;
+    let path = tmp.path().join("instance.json");
+    std::fs::write(&path, old_json).unwrap();
+    let inst = read_manifest_pub(&path).unwrap();
+    let src = inst.source.unwrap();
+
+    assert!(src.icon_url.is_none(), "icon_url must default to None");
+    assert!(src.author.is_none(), "author must default to None");
+    assert!(src.last_update_check.is_none(), "last_update_check must default to None");
+    assert!(src.latest_version.is_none(), "latest_version must default to None");
+    assert!(src.latest_version_id.is_none(), "latest_version_id must default to None");
 }

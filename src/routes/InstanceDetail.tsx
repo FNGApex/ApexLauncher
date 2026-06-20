@@ -36,6 +36,7 @@ import {
   getSettings,
   launchInstance,
   killInstance,
+  refreshPackMeta,
   removeMod,
   searchMods,
   setModEnabled,
@@ -60,6 +61,11 @@ const DEBOUNCE_MS = 400;
 // instance. The backend enrich is also idempotent (0 network calls when nothing is
 // missing); this just avoids redundant in-flight calls before the refetch lands.
 const enrichedSlugs = new Set<string>();
+
+// Tracks managed instances for which refreshPackMeta has been called this session.
+// The backend throttles to once/24h; this guard prevents redundant calls within a
+// single session before a refetch has settled.
+const refreshedSlugs = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Outlet context type — consumed by the four tab components
@@ -105,6 +111,13 @@ export function InstanceDetail() {
   // `null` means "not yet seeded" — we wait for the settings query to resolve.
   const [consoleExpanded, setConsoleExpanded] = useState<boolean | null>(null);
 
+  // PB-F2: update-available banner state (populated by refreshPackMeta).
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+
+  // PB-F3: version/update modal open state.
+  const [versionModalOpen, setVersionModalOpen] = useState(false);
+
   // Seed console expanded state once settings load (only once — null guard).
   useEffect(() => {
     if (appSettings !== undefined && consoleExpanded === null) {
@@ -117,6 +130,31 @@ export function InstanceDetail() {
     const el = consoleRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [runLogLines]);
+
+  // PB-F2: once per session per managed instance, call refreshPackMeta.
+  // The backend is throttled to 24h (returns cached with zero network when within 24h).
+  // If checked=true (i.e. it actually polled), invalidate so stored icon/author/latest load.
+  useEffect(() => {
+    if (!slug || !data?.instance.source) return;
+    if (refreshedSlugs.has(slug)) return;
+    refreshedSlugs.add(slug);
+    refreshPackMeta(slug)
+      .then((result) => {
+        if (result.updateAvailable) {
+          setUpdateAvailable(true);
+          setLatestVersion(result.latestVersion ?? null);
+        }
+        if (result.checked) {
+          qc.invalidateQueries({ queryKey: ["instance", slug] });
+        }
+      })
+      .catch((err) => {
+        // Non-fatal — don't surface to the user, just log.
+        console.warn("refreshPackMeta failed:", err);
+        // Allow a retry on next mount if this was transient.
+        refreshedSlugs.delete(slug);
+      });
+  }, [slug, data?.instance.source, qc]);
 
   async function handleLaunch() {
     if (!slug) return;
@@ -189,52 +227,144 @@ export function InstanceDetail() {
       ) : data ? (
         <>
           {/* ----------------------------------------------------------------
-              Header — persistent across all tab switches
+              Persistent Bar — always-visible header across all tab switches
+              PB-F1: icon + name + author + clickable version chip + source link
+              PB-F2: updatable banner when refreshPackMeta reports update_available
           ---------------------------------------------------------------- */}
-          <header className="mb-4 flex items-start justify-between gap-4">
-            <div>
-              <h1 className="text-2xl font-semibold">{data.instance.name}</h1>
-              <div className="mt-0.5 flex flex-wrap items-center gap-2">
-                <p className="text-sm text-muted">
+          <header className="mb-4 rounded-xl border border-border bg-surface px-5 py-4">
+            {/* Top row: icon + identity + actions */}
+            <div className="flex items-center gap-4">
+              {/* Pack icon (PB-F1) */}
+              {data.instance.source?.iconUrl ? (
+                <img
+                  src={data.instance.source.iconUrl}
+                  alt=""
+                  referrerPolicy="no-referrer"
+                  className="size-14 shrink-0 rounded-xl object-cover"
+                  loading="lazy"
+                />
+              ) : (
+                <div className="grid size-14 shrink-0 place-items-center rounded-xl bg-surface-2 text-muted">
+                  <Package className="size-7" />
+                </div>
+              )}
+
+              {/* Name + metadata */}
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="text-xl font-semibold leading-tight">{data.instance.name}</h1>
+                  {/* Clickable version chip (PB-F1, PB-F3) — only for managed instances */}
+                  {data.instance.source && (
+                    <button
+                      onClick={() => setVersionModalOpen(true)}
+                      title="View versions / update"
+                      className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2.5 py-0.5 text-xs text-muted transition-colors hover:border-primary/50 hover:text-foreground"
+                    >
+                      Pack v{data.instance.source.packVersion}
+                    </button>
+                  )}
+                </div>
+
+                {/* Author (PB-F1) — only when present */}
+                {data.instance.source?.author && (
+                  <p className="mt-0.5 text-sm text-muted">by {data.instance.source.author}</p>
+                )}
+
+                {/* Loader / MC subtitle */}
+                <p className="mt-0.5 text-xs text-muted">
                   {labelLoader(data.instance.loader.kind)}
                   {data.instance.loader.version ? ` ${data.instance.loader.version}` : ""} ·
                   Minecraft {data.instance.minecraft}
                 </p>
-                {data.instance.source && (
-                  <span className="inline-flex items-center rounded-full border border-border bg-surface px-2 py-0.5 text-xs text-muted">
-                    Pack v{data.instance.source.packVersion}
+              </div>
+
+              {/* Right-side controls */}
+              <div className="flex shrink-0 items-center gap-2">
+                {/* Pack source link (PB-F1) */}
+                {data.instance.source && (() => {
+                  const src = data.instance.source;
+                  const providerRoute: "modrinth" | "curseforge" =
+                    src.provider === "modrinth"
+                      ? "modrinth"
+                      : "curseforge";
+                  const pageUrl: string | null =
+                    src.pageUrl ?? (providerRoute === "modrinth"
+                      ? `https://modrinth.com/modpack/${src.projectId}`
+                      : null);
+                  return pageUrl ? (
+                    <button
+                      onClick={() => openUrl(pageUrl).catch(console.error)}
+                      title="Open pack page in browser"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-2 px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:text-foreground"
+                    >
+                      <ExternalLink className="size-3.5" />
+                      Pack source
+                    </button>
+                  ) : null;
+                })()}
+
+                {/* Running badge */}
+                {running && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-green-500/15 px-2.5 py-1 text-xs font-medium text-green-400">
+                    <span className="size-1.5 animate-pulse rounded-full bg-green-400" />
+                    Running
                   </span>
+                )}
+
+                {/* Launch / Stop */}
+                {running ? (
+                  <button
+                    onClick={handleStop}
+                    className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-4 py-2 text-sm font-medium text-danger hover:bg-surface-2"
+                  >
+                    <Square className="size-4" />
+                    Stop
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleLaunch}
+                    disabled={launching}
+                    className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/80 disabled:opacity-50"
+                  >
+                    <Play className="size-4" />
+                    {launching ? "Launching…" : "Launch"}
+                  </button>
                 )}
               </div>
             </div>
 
-            <div className="flex shrink-0 items-center gap-3">
-              {running && (
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-green-500/15 px-2.5 py-1 text-xs font-medium text-green-400">
-                  <span className="size-1.5 animate-pulse rounded-full bg-green-400" />
-                  Running
+            {/* PB-F2: Updatable banner */}
+            {updateAvailable && (
+              <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs">
+                <span className="text-primary">
+                  Update available{latestVersion ? `: v${latestVersion}` : ""}
                 </span>
-              )}
-              {running ? (
                 <button
-                  onClick={handleStop}
-                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-4 py-2 text-sm font-medium text-danger hover:bg-surface-2"
+                  onClick={() => setVersionModalOpen(true)}
+                  className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/20 px-2.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/30"
                 >
-                  <Square className="size-4" />
-                  Stop
+                  <RefreshCw className="size-3" />
+                  Update
                 </button>
-              ) : (
-                <button
-                  onClick={handleLaunch}
-                  disabled={launching}
-                  className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/80 disabled:opacity-50"
-                >
-                  <Play className="size-4" />
-                  {launching ? "Launching…" : "Launch"}
-                </button>
-              )}
-            </div>
+              </div>
+            )}
           </header>
+
+          {/* PB-F3: Version / update modal */}
+          {versionModalOpen && data.instance.source && (
+            <VersionUpdateModal
+              slug={slug!}
+              source={data.instance.source}
+              packLocked={data.instance.packLocked ?? false}
+              onClose={() => setVersionModalOpen(false)}
+              onUpdated={() => {
+                setVersionModalOpen(false);
+                setUpdateAvailable(false);
+                qc.invalidateQueries({ queryKey: ["instance", slug] });
+                qc.invalidateQueries({ queryKey: ["instances"] });
+              }}
+            />
+          )}
 
           {launchError && (
             <p className="mb-4 rounded-lg border border-danger/30 bg-danger/10 px-4 py-2 text-sm text-danger">
@@ -507,6 +637,157 @@ export function PackSourcePanel({
       )}
 
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PB-F3: Version / update modal
+// Centered modal (reuses the BrowsePackInfo DownloadPrompt pattern):
+//   - lazy getModVersions (fetched only when open)
+//   - current version marked
+//   - Update button → updateModpack → close + invalidate
+//   - pack_locked respected (Update disabled with a note)
+// ---------------------------------------------------------------------------
+
+interface VersionUpdateModalProps {
+  slug: string;
+  source: {
+    provider: string;
+    projectId: string;
+    fileId: string;
+    packVersion: string;
+  };
+  packLocked: boolean;
+  onClose: () => void;
+  onUpdated: () => void;
+}
+
+function VersionUpdateModal({
+  slug,
+  source,
+  packLocked,
+  onClose,
+  onUpdated,
+}: VersionUpdateModalProps) {
+  const [selectedVersionId, setSelectedVersionId] = useState<string>(source.fileId);
+  const [updating, setUpdating] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+
+  // Resolve the provider routing string (InstanceSource stores the wire value).
+  const providerRoute: "modrinth" | "curseforge" =
+    source.provider === "modrinth"
+      ? "modrinth"
+      : "curseforge";
+
+  // Lazy: versions fetched only when modal is open (it's mounted only when open).
+  const versionsQuery = useQuery({
+    queryKey: ["packVersions", source.provider, source.projectId],
+    queryFn: () => getModVersions(providerRoute, source.projectId, null, null),
+    staleTime: 30_000,
+  });
+
+  async function handleUpdate() {
+    if (packLocked) return;
+    setUpdating(true);
+    setUpdateError(null);
+    try {
+      await updateModpack(slug, selectedVersionId === source.fileId ? undefined : selectedVersionId);
+      onUpdated();
+    } catch (err) {
+      setUpdateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUpdating(false);
+    }
+  }
+
+  return (
+    /* Backdrop */
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      {/* Modal card */}
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-xl">
+        {/* Header */}
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-base font-semibold">Pack versions</h2>
+          <button
+            onClick={onClose}
+            className="rounded-md p-1 text-muted hover:bg-surface-2 hover:text-foreground"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+
+        {/* Pack-locked notice */}
+        {packLocked && (
+          <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+            <Lock className="size-3.5 shrink-0" />
+            Pack is locked — unlock to update.
+          </div>
+        )}
+
+        {/* Version list */}
+        <label className="mb-1 block text-xs text-muted">Version</label>
+        <div className="relative mb-4">
+          {versionsQuery.isLoading && (
+            <div className="flex items-center gap-2 py-2 text-xs text-muted">
+              <Loader2 className="size-3.5 animate-spin" />
+              Loading versions…
+            </div>
+          )}
+          {versionsQuery.isError && (
+            <p className="text-xs text-danger">{String(versionsQuery.error)}</p>
+          )}
+          {versionsQuery.data && (
+            <select
+              value={selectedVersionId}
+              onChange={(e) => setSelectedVersionId(e.target.value)}
+              disabled={updating || packLocked}
+              className="input w-full disabled:opacity-50"
+            >
+              {versionsQuery.data.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name || v.versionNumber}
+                  {v.id === source.fileId ? " (current)" : ""}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        {/* Error */}
+        {updateError != null && (
+          <div className="mb-3 flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+            <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
+            <span>{updateError}</span>
+          </div>
+        )}
+
+        {/* Actions */}
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 rounded-lg border border-border px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleUpdate}
+            disabled={updating || packLocked || !versionsQuery.data}
+            title={packLocked ? "Unlock the pack to update" : undefined}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-60"
+          >
+            {updating ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <RefreshCw className="size-4" />
+            )}
+            {updating ? "Updating…" : "Update"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -21,9 +21,10 @@ use core::mod_install::{AddModResult, UpdateModResult};
 use core::modpack;
 use core::modrinth::ModrinthProvider;
 use core::providers::{
-    self, cf_api_key_from, ModProvider, PackInfo, ProjectType, ProviderError,
+    self, cf_api_key_from, ModProvider, PackInfo, PackSummary, ProjectType, ProviderError,
     ReqwestProviderClient, SearchParams, SearchResult, ProjectVersion,
 };
+use core::instances::needs_update_check;
 use core::settings::{self, Settings};
 use core::task_manager::{ChildItem, Task, TaskJob, TaskKind, TaskManager, TaskObserver, TaskProgress, TaskSpec};
 use core::versions::{self, McVersion};
@@ -1240,6 +1241,132 @@ async fn get_pack_info(
         }
         other => Err(unknown_provider_err(other)),
     }
+}
+
+// ---------------------------------------------------------------------------
+// PB-B3: refresh_pack_meta — throttled pack-meta update-check command
+// ---------------------------------------------------------------------------
+
+/// Response DTO for `refresh_pack_meta`.
+///
+/// `update_available` — whether a newer version exists (latest_version_id != file_id).
+/// `latest_version`  — human-readable version string of the newest available release.
+/// `checked`         — `true` when this call actually polled the network (24h throttle expired
+///                     or first call); `false` when the cached result was returned without I/O.
+#[derive(Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+struct PackMetaRefresh {
+    update_available: bool,
+    latest_version: Option<String>,
+    checked: bool,
+}
+
+/// Check whether a managed instance has an update available, throttled to once per 24h.
+///
+/// Behaviour (spec PB-B3):
+/// - No `source` on instance → `{ false, None, false }` (not a managed pack).
+/// - `needs_update_check` returns false (within 24h) → return cached result, `checked: false`.
+/// - Otherwise: fetch `get_pack_summary` (name/icon/author) + `get_versions` (newest [0]);
+///   store results on `source`; `save_manifest`; return `{ update_available, latest_version, checked: true }`.
+#[tauri::command]
+#[specta::specta]
+async fn refresh_pack_meta(
+    app: tauri::AppHandle,
+    slug: String,
+) -> Result<PackMetaRefresh, String> {
+    let mut inst = instances::load_manifest(&app, &slug)?;
+
+    // No source → not a managed pack.
+    let source = match inst.source.as_mut() {
+        Some(s) => s,
+        None => return Ok(PackMetaRefresh { update_available: false, latest_version: None, checked: false }),
+    };
+
+    let now = chrono::Utc::now();
+
+    // Within 24h: return cached result, no network.
+    if !needs_update_check(source.last_update_check.as_deref(), now) {
+        let update_available = matches!(
+            (source.latest_version_id.as_deref(), &source.file_id),
+            (Some(lv_id), fid) if lv_id != fid.as_str()
+        );
+        return Ok(PackMetaRefresh {
+            update_available,
+            latest_version: source.latest_version.clone(),
+            checked: false,
+        });
+    }
+
+    // Resolve CF key once.
+    let settings = settings::load(&app).unwrap_or_default();
+    let cf_key = cf_api_key_from(
+        std::env::var(providers::CF_API_KEY_ENV).ok(),
+        settings.curseforge_api_key,
+        option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+    );
+
+    let http = ReqwestProviderClient(reqwest::Client::new());
+    let project_id = source.project_id.clone();
+    let file_id = source.file_id.clone();
+    let provider_str = source.provider.clone();
+
+    // Fetch pack summary (name + icon + author) and version list.
+    let (summary_result, versions_result): (
+        Result<PackSummary, ProviderError>,
+        Result<Vec<core::providers::ProjectVersion>, ProviderError>,
+    ) = match provider_str.as_str() {
+        "modrinth" => {
+            let p = ModrinthProvider;
+            let s = p.get_pack_summary(&http, &project_id).await;
+            let v = p.get_versions(&http, &project_id, None, None).await;
+            (s, v)
+        }
+        "curseforge" | "curseForge" => {
+            let p = CurseForgeProvider::new(cf_key);
+            let s = p.get_pack_summary(&http, &project_id).await;
+            let v = p.get_versions(&http, &project_id, None, None).await;
+            (s, v)
+        }
+        other => {
+            return Err(format!("Unknown provider: '{other}'"));
+        }
+    };
+
+    // Apply summary fields (best-effort: log but don't fail if summary errs).
+    if let Ok(summary) = summary_result {
+        let source = inst.source.as_mut().unwrap();
+        source.icon_url = summary.icon_url;
+        source.author = summary.author;
+    }
+
+    // Apply version check (best-effort).
+    let (latest_version, latest_version_id) = match versions_result {
+        Ok(versions) if !versions.is_empty() => {
+            let newest = &versions[0];
+            (Some(newest.version_number.clone()), Some(newest.id.clone()))
+        }
+        _ => (None, None),
+    };
+
+    {
+        let source = inst.source.as_mut().unwrap();
+        source.latest_version = latest_version.clone();
+        source.latest_version_id = latest_version_id.clone();
+        source.last_update_check = Some(now.to_rfc3339());
+    }
+
+    instances::save_manifest(&app, &slug, &inst)?;
+
+    let update_available = matches!(
+        (latest_version_id.as_deref(), file_id.as_str()),
+        (Some(lv_id), fid) if lv_id != fid
+    );
+
+    Ok(PackMetaRefresh {
+        update_available,
+        latest_version,
+        checked: true,
+    })
 }
 
 /// Collect the project ids of mods lacking a `name`, grouped by provider.
@@ -2907,6 +3034,11 @@ async fn install_modpack(
         // Capture the page URL passed by the browse frontend so AM-F3 can
         // surface "Open project page" without a re-fetch.
         page_url: page_url.clone(),
+        icon_url: None,
+        author: None,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
     };
     let name_override: Option<String> = if resolved.version_name.is_empty() {
         None
@@ -3360,6 +3492,7 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             import_curseforge_zip,
             install_modpack,
             update_modpack,
+            refresh_pack_meta,
         ])
         .events(collect_events![
             DeviceCodePayload,

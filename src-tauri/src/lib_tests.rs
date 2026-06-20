@@ -207,6 +207,11 @@ fn d1_source_built_from_resolved_pack_file_fields() {
         pack_version: resolved.version_name.clone(),
         recommended: None,
         page_url: None,
+        icon_url: None,
+        author: None,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
     };
 
     assert_eq!(source.provider, "modrinth");
@@ -821,4 +826,61 @@ async fn f2_1_drive_with_progress_terminates_and_counts_children() {
         done, N,
         "all {N} item_done calls must be forwarded to ctx.finish_child (done={done})"
     );
+}
+
+// ---------------------------------------------------------------------------
+// PB-B3: PackMetaRefresh DTO wire contract + throttle logic contracts
+// ---------------------------------------------------------------------------
+
+/// `PackMetaRefresh` must serialise with camelCase fields.
+#[test]
+fn pbb3_pack_meta_refresh_camelcase_fields() {
+    let r = PackMetaRefresh {
+        update_available: true,
+        latest_version: Some("2.0.0".to_string()),
+        checked: true,
+    };
+    let v: Value = serde_json::to_value(&r).expect("serialize");
+    assert_eq!(v["updateAvailable"], true, "updateAvailable must be camelCase");
+    assert_eq!(v["latestVersion"], "2.0.0", "latestVersion must be camelCase");
+    assert_eq!(v["checked"], true, "checked must be present");
+    // Snake-case variants must NOT appear.
+    assert!(v["update_available"].is_null(), "snake_case update_available must NOT appear");
+    assert!(v["latest_version"].is_null(), "snake_case latest_version must NOT appear");
+}
+
+/// Cached path (within 24h): update_available = (latest_version_id != file_id).
+#[test]
+fn pbb3_update_available_derivation_matches_when_ids_differ() {
+    // Simulate the cached path logic from refresh_pack_meta:
+    // update_available = latest_version_id != file_id (when both Some).
+    let latest_version_id: Option<&str> = Some("v2-id");
+    let file_id = "v1-id";
+    let update_available = matches!(
+        (latest_version_id, file_id),
+        (Some(lv_id), fid) if lv_id != fid
+    );
+    assert!(update_available, "different ids → update_available = true");
+}
+
+#[test]
+fn pbb3_update_available_false_when_ids_equal() {
+    let latest_version_id: Option<&str> = Some("same-id");
+    let file_id = "same-id";
+    let update_available = matches!(
+        (latest_version_id, file_id),
+        (Some(lv_id), fid) if lv_id != fid
+    );
+    assert!(!update_available, "equal ids → update_available = false");
+}
+
+#[test]
+fn pbb3_update_available_false_when_no_latest_version_id() {
+    let latest_version_id: Option<&str> = None;
+    let file_id = "some-id";
+    let update_available = matches!(
+        (latest_version_id, file_id),
+        (Some(lv_id), fid) if lv_id != fid
+    );
+    assert!(!update_available, "None latest_version_id → update_available = false");
 }

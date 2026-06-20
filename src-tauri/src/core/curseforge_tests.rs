@@ -1186,3 +1186,134 @@ async fn get_projects_brief_returns_http_error_on_non_200() {
         err
     );
 }
+
+// ── get_pack_summary: PB-B2 ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn get_pack_summary_maps_name_icon_author_from_mod_endpoint() {
+    // Uses cf_mod_jei.json — one GET call only, no /description.
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MOD_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let summary = provider.get_pack_summary(&client, "238222").await.unwrap();
+
+    assert_eq!(summary.name, "Just Enough Items (JEI)");
+    assert_eq!(
+        summary.icon_url,
+        Some("https://media.forgecdn.net/avatars/29/69/636346904411966716.png".to_string())
+    );
+    // cf_mod_jei.json has authors: [{"id": 1, "name": "mezz"}]
+    assert_eq!(summary.author, Some("mezz".to_string()));
+}
+
+#[tokio::test]
+async fn get_pack_summary_makes_exactly_one_http_call() {
+    // CRITICAL: no /description call (spec: "NO description").
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MOD_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    provider.get_pack_summary(&client, "238222").await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 1, "must issue exactly ONE HTTP call; got {:?}", urls);
+    assert!(
+        urls[0].ends_with("/v1/mods/238222"),
+        "call must target mod endpoint, not description: {}",
+        urls[0]
+    );
+    assert!(
+        !urls[0].contains("/description"),
+        "must NOT call /description endpoint: {}",
+        urls[0]
+    );
+}
+
+#[tokio::test]
+async fn get_pack_summary_carries_api_key_header() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MOD_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("my-key".to_string()));
+
+    provider.get_pack_summary(&client, "238222").await.unwrap();
+
+    let all_headers = client.captured_headers().await;
+    let headers = &all_headers[0];
+    let has_key = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-api-key") && v == "my-key");
+    assert!(has_key, "x-api-key header missing: {:?}", headers);
+}
+
+#[tokio::test]
+async fn get_pack_summary_key_absent_returns_key_missing_without_http() {
+    let client = CapturingMockClient::new(vec![]);
+    let provider = CurseForgeProvider::new(None);
+
+    let err = provider.get_pack_summary(&client, "238222").await.unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::KeyMissing),
+        "expected KeyMissing, got {:?}",
+        err
+    );
+    assert_eq!(client.request_count().await, 0);
+}
+
+#[tokio::test]
+async fn get_pack_summary_multiple_authors_joined_with_comma() {
+    // Inline fixture with two authors.
+    let two_authors = r#"{
+        "data": {
+            "id": 99,
+            "name": "My Pack",
+            "slug": "my-pack",
+            "summary": "A pack.",
+            "downloadCount": 100,
+            "logo": null,
+            "categories": [],
+            "authors": [{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Beta"}],
+            "links": null
+        }
+    }"#;
+    let client = CapturingMockClient::new(vec![MockResp::ok(two_authors)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let summary = provider.get_pack_summary(&client, "99").await.unwrap();
+
+    assert_eq!(summary.author, Some("Alpha, Beta".to_string()));
+}
+
+#[tokio::test]
+async fn get_pack_summary_no_authors_gives_none() {
+    let no_authors = r#"{
+        "data": {
+            "id": 99,
+            "name": "Pack No Author",
+            "slug": "pack-no-author",
+            "summary": ".",
+            "downloadCount": 0,
+            "logo": null,
+            "categories": [],
+            "authors": [],
+            "links": null
+        }
+    }"#;
+    let client = CapturingMockClient::new(vec![MockResp::ok(no_authors)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let summary = provider.get_pack_summary(&client, "99").await.unwrap();
+
+    assert!(summary.author.is_none(), "empty authors list → author: None");
+}
+
+#[tokio::test]
+async fn get_pack_summary_returns_http_error_on_non_200() {
+    let client = CapturingMockClient::new(vec![MockResp(404, "Not Found".to_string())]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let err = provider.get_pack_summary(&client, "999").await.unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 404, .. }),
+        "expected HttpStatus(404), got {:?}",
+        err
+    );
+}

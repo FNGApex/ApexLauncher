@@ -278,6 +278,16 @@ export const commands = {
 	 *  (plan execution, promote, overrides) runs in the task.
 	 */
 	updateModpack: (slug: string, versionId: string | null) => typedError<number, string>(__TAURI_INVOKE("update_modpack", { slug, versionId })),
+	/**
+	 *  Check whether a managed instance has an update available, throttled to once per 24h.
+	 * 
+	 *  Behaviour (spec PB-B3):
+	 *  - No `source` on instance → `{ false, None, false }` (not a managed pack).
+	 *  - `needs_update_check` returns false (within 24h) → return cached result, `checked: false`.
+	 *  - Otherwise: fetch `get_pack_summary` (name/icon/author) + `get_versions` (newest [0]);
+	 *    store results on `source`; `save_manifest`; return `{ update_available, latest_version, checked: true }`.
+	 */
+	refreshPackMeta: (slug: string) => typedError<PackMetaRefresh, string>(__TAURI_INVOKE("refresh_pack_meta", { slug })),
 };
 
 /** Events */
@@ -808,6 +818,20 @@ export type PackInfo = {
 };
 
 /**
+ *  Response DTO for `refresh_pack_meta`.
+ * 
+ *  `update_available` — whether a newer version exists (latest_version_id != file_id).
+ *  `latest_version`  — human-readable version string of the newest available release.
+ *  `checked`         — `true` when this call actually polled the network (24h throttle expired
+ *                      or first call); `false` when the cached result was returned without I/O.
+ */
+export type PackMetaRefresh = {
+	updateAvailable: boolean,
+	latestVersion: string | null,
+	checked: boolean,
+};
+
+/**
  *  Result returned to the frontend by `update_modpack`.
  * 
  *  One struct for both providers (mrpack and CurseForge). `manual` is empty for
@@ -1060,6 +1084,19 @@ export type Source = {
 	 *  Used by AM-F3 "Open project page" button.
 	 */
 	pageUrl?: string | null,
+	/**  Pack icon URL, populated by `refresh_pack_meta`. `None` until first refresh. */
+	iconUrl?: string | null,
+	/**
+	 *  Pack author (CF: first/joined author name; Modrinth: owner username).
+	 *  Populated by `refresh_pack_meta`. `None` until first refresh.
+	 */
+	author?: string | null,
+	/**  RFC3339 timestamp of the last successful update-check. `None` if never checked. */
+	lastUpdateCheck?: string | null,
+	/**  Newest available version number (human-readable display), from last check. */
+	latestVersion?: string | null,
+	/**  Newest available version id (for the update action), from last check. */
+	latestVersionId?: string | null,
 };
 
 /**  An optional dependency surfaced as a suggestion. */

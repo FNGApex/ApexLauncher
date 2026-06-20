@@ -73,6 +73,22 @@ pub struct Source {
     /// Used by AM-F3 "Open project page" button.
     #[serde(default)]
     pub page_url: Option<String>,
+    /// Pack icon URL, populated by `refresh_pack_meta`. `None` until first refresh.
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    /// Pack author (CF: first/joined author name; Modrinth: owner username).
+    /// Populated by `refresh_pack_meta`. `None` until first refresh.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// RFC3339 timestamp of the last successful update-check. `None` if never checked.
+    #[serde(default)]
+    pub last_update_check: Option<String>,
+    /// Newest available version number (human-readable display), from last check.
+    #[serde(default)]
+    pub latest_version: Option<String>,
+    /// Newest available version id (for the update action), from last check.
+    #[serde(default)]
+    pub latest_version_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
@@ -616,6 +632,31 @@ pub fn remove_mod(app: &AppHandle, slug: &str, file_name: &str) -> Result<(), St
     let mods_dir = inst_dir.join("mc").join("mods");
     let manifest_path = inst_dir.join("instance.json");
     remove_mod_from_disk(&mods_dir, &manifest_path, &file_name)
+}
+
+// ---------------------------------------------------------------------------
+// Update-check throttle helper (PB-B1)
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when the instance should poll the provider for an update.
+///
+/// Rules (spec PB-B1):
+/// - `last` is `None` → never checked → `true`.
+/// - `last` fails RFC3339 parse → treat as corrupt / never checked → `true`.
+/// - `now - last > 24h` → stale → `true`.
+/// - `now - last <= 24h` → fresh → `false`.
+///
+/// `now` is injected so callers in tests can supply a deterministic clock.
+pub fn needs_update_check(last: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let Some(s) = last else {
+        return true;
+    };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(s) else {
+        return true;
+    };
+    let last_utc: chrono::DateTime<chrono::Utc> = parsed.into();
+    let elapsed = now.signed_duration_since(last_utc);
+    elapsed > chrono::Duration::hours(24)
 }
 
 // ---------------------------------------------------------------------------

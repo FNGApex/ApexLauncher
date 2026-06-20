@@ -374,6 +374,17 @@ export async function setPackLock(slug: string, locked: boolean): Promise<void> 
   await unwrap(commands.setPackLock(slug, locked));
 }
 
+/**
+ * Refresh a managed instance's pack metadata (icon / author / latest version) and
+ * check for an update. Throttled to once per 24h in the BACKEND (zero network when
+ * within 24h — it returns the cached result). Returns `{ updateAvailable, latestVersion,
+ * checked }`. `checked: true` means it actually polled (so stored fields changed → refetch
+ * the instance). Safe to call on every managed-instance open.
+ */
+export function refreshPackMeta(slug: string) {
+  return unwrap(commands.refreshPackMeta(slug));
+}
+
 // --- D-3: Per-instance Java settings ---
 
 /**

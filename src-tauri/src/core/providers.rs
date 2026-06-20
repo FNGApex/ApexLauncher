@@ -330,6 +330,23 @@ pub struct PackInfo {
     pub body_is_html: bool,
 }
 
+/// Lightweight pack summary for the Persistent Bar update-check (PB-B2).
+///
+/// Fetched by `ModProvider::get_pack_summary`. Contains only the fields needed
+/// to populate icon/author on first open — NO full description to avoid the
+/// extra `/description` call on CurseForge.
+///
+/// NOT a Tauri DTO — internal type used between lib.rs command and the provider.
+#[derive(Debug, Clone)]
+pub struct PackSummary {
+    /// Display name (pack title).
+    pub name: String,
+    /// Icon URL, if available.
+    pub icon_url: Option<String>,
+    /// Author string (CF: first author or comma-joined; Modrinth: owner username or first member).
+    pub author: Option<String>,
+}
+
 /// A mod provider capable of searching mods and fetching version lists.
 ///
 /// Object-safe: `Box<dyn ModProvider>` is valid. HTTP is injected via
@@ -378,6 +395,21 @@ pub trait ModProvider: Send + Sync {
         client: &dyn ProviderHttpClient,
         ids: &[String],
     ) -> Result<Vec<ModBrief>, ProviderError>;
+
+    /// Fetch lightweight pack summary (name, icon, author) for a single project.
+    ///
+    /// Used by `refresh_pack_meta` (PB-B3) to populate icon/author on first open
+    /// and on the 24h refresh cycle. Intentionally avoids the full description call
+    /// (no extra `/description` endpoint on CurseForge, no `body` field on Modrinth).
+    ///
+    /// CurseForge: one GET `/v1/mods/{id}` call — name, logo.url, authors[0].name.
+    /// Modrinth: two calls — GET `/v2/project/{id}` (title, icon_url) +
+    ///           GET `/v2/project/{id}/members` (find role="Owner" → user.username).
+    async fn get_pack_summary(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackSummary, ProviderError>;
 }
 
 // ── Raw Modrinth deserialization types ────────────────────────────────────────

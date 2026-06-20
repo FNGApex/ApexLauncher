@@ -14,8 +14,9 @@
 use serde::Deserialize;
 
 use crate::core::providers::{
-    Dependency, ModBrief, ModProvider, MrSearchResponse, PackInfo, ProjectType, ProjectVersion,
-    ProviderError, ProviderHttpClient, ProviderKind, SearchParams, SearchResult, VersionFile,
+    Dependency, ModBrief, ModProvider, MrSearchResponse, PackInfo, PackSummary, ProjectType,
+    ProjectVersion, ProviderError, ProviderHttpClient, ProviderKind, SearchParams, SearchResult,
+    VersionFile,
 };
 
 // ── Percent-encoding helper ────────────────────────────────────────────────────
@@ -175,6 +176,18 @@ struct MrProjectBrief {
     description: String,
 }
 
+/// Raw Modrinth `/v2/project/{id}/members` response item (for pack summary author).
+#[derive(Debug, Deserialize)]
+struct MrMember {
+    role: String,
+    user: MrMemberUser,
+}
+
+#[derive(Debug, Deserialize)]
+struct MrMemberUser {
+    username: String,
+}
+
 // ── ModrinthProvider ───────────────────────────────────────────────────────────
 
 /// Modrinth implementation of `ModProvider`.
@@ -254,6 +267,11 @@ impl ModrinthProvider {
                 .join(",")
         );
         format!("{}/projects?ids={}", BASE_URL, percent_encode(&ids_json))
+    }
+
+    /// Build the Modrinth `/v2/project/{id}/members` URL (for team/author info).
+    fn build_members_url(project_id: &str) -> String {
+        format!("{}/project/{}/members", BASE_URL, project_id)
     }
 }
 
@@ -380,6 +398,56 @@ impl ModProvider for ModrinthProvider {
                 summary: p.description,
             })
             .collect())
+    }
+
+    async fn get_pack_summary(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<PackSummary, ProviderError> {
+        // Call 1: project metadata (title + icon_url).
+        let project_url = Self::build_project_url(project_id);
+        let (status, body) = client
+            .get(&project_url, &[("User-Agent", USER_AGENT)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw_project: MrProject =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        // Call 2: members (to find the owner's username).
+        let members_url = Self::build_members_url(project_id);
+        let (members_status, members_body) = client
+            .get(&members_url, &[("User-Agent", USER_AGENT)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if members_status != 200 {
+            return Err(ProviderError::HttpStatus {
+                status: members_status,
+                body: members_body,
+            });
+        }
+
+        let members: Vec<MrMember> = serde_json::from_str(&members_body)
+            .map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        // Find the "Owner" role, or fall back to first member.
+        let author = members
+            .iter()
+            .find(|m| m.role.eq_ignore_ascii_case("Owner"))
+            .or_else(|| members.first())
+            .map(|m| m.user.username.clone());
+
+        Ok(PackSummary {
+            name: raw_project.title,
+            icon_url: raw_project.icon_url,
+            author,
+        })
     }
 }
 

@@ -108,6 +108,14 @@ impl crate::core::providers::ModProvider for MockProvider {
     ) -> Result<Vec<crate::core::providers::ModBrief>, ProviderError> {
         unimplemented!("get_projects_brief not used by mod installer")
     }
+
+    async fn get_pack_summary(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _project_id: &str,
+    ) -> Result<crate::core::providers::PackSummary, ProviderError> {
+        unimplemented!("get_pack_summary not used by mod installer")
+    }
 }
 
 // ── Fixture helpers ───────────────────────────────────────────────────────
@@ -1282,6 +1290,14 @@ impl crate::core::providers::ModProvider for ConcurrencyTrackingProvider {
         _ids: &[String],
     ) -> Result<Vec<crate::core::providers::ModBrief>, ProviderError> {
         unimplemented!("get_projects_brief not used by mod installer")
+    }
+
+    async fn get_pack_summary(
+        &self,
+        _client: &dyn ProviderHttpClient,
+        _project_id: &str,
+    ) -> Result<crate::core::providers::PackSummary, ProviderError> {
+        unimplemented!("get_pack_summary not used by mod installer")
     }
 }
 

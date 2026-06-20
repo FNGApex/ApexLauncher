@@ -763,3 +763,99 @@ async fn get_projects_brief_summary_uses_description_not_body() {
         "A modern rendering engine and client-side optimization mod for Minecraft."
     );
 }
+
+// ── get_pack_summary: PB-B2 ──────────────────────────────────────────────────
+
+const MODRINTH_MEMBERS_FIXTURE: &str = include_str!("fixtures/modrinth_members_sodium.json");
+
+#[tokio::test]
+async fn get_pack_summary_returns_name_icon_owner_username() {
+    // Two calls: project (title+icon) then members (owner).
+    let client = CapturingMockClient::new(vec![
+        MockResp::ok(MODRINTH_PROJECT_FIXTURE),
+        MockResp::ok(MODRINTH_MEMBERS_FIXTURE),
+    ]);
+    let provider = ModrinthProvider;
+
+    let summary = provider.get_pack_summary(&client, "AANobbMI").await.unwrap();
+
+    assert_eq!(summary.name, "Sodium");
+    assert_eq!(
+        summary.icon_url,
+        Some("https://cdn.modrinth.com/data/AANobbMI/icon.png".to_string())
+    );
+    // The fixture has role "Owner" for "jellysquid3".
+    assert_eq!(summary.author, Some("jellysquid3".to_string()));
+}
+
+#[tokio::test]
+async fn get_pack_summary_issues_two_http_calls() {
+    let client = CapturingMockClient::new(vec![
+        MockResp::ok(MODRINTH_PROJECT_FIXTURE),
+        MockResp::ok(MODRINTH_MEMBERS_FIXTURE),
+    ]);
+    let provider = ModrinthProvider;
+
+    provider.get_pack_summary(&client, "AANobbMI").await.unwrap();
+
+    let urls = client.captured_urls().await;
+    assert_eq!(urls.len(), 2, "must issue exactly two HTTP calls; got {:?}", urls);
+    assert!(
+        urls[0].ends_with("/v2/project/AANobbMI"),
+        "first call must target project endpoint: {}",
+        urls[0]
+    );
+    assert!(
+        urls[1].contains("/v2/project/AANobbMI/members"),
+        "second call must target members endpoint: {}",
+        urls[1]
+    );
+}
+
+#[tokio::test]
+async fn get_pack_summary_falls_back_to_first_member_when_no_owner() {
+    // Members fixture with no "Owner" role — should fall back to first member.
+    let no_owner_members = r#"[
+        {"user": {"id": "u1", "username": "alpha"}, "role": "Member", "permissions": null, "accepted": true, "paid_through": null, "payouts_split": null, "ordering": 0},
+        {"user": {"id": "u2", "username": "beta"}, "role": "Moderator", "permissions": null, "accepted": true, "paid_through": null, "payouts_split": null, "ordering": 1}
+    ]"#;
+    let client = CapturingMockClient::new(vec![
+        MockResp::ok(MODRINTH_PROJECT_FIXTURE),
+        MockResp::ok(no_owner_members),
+    ]);
+    let provider = ModrinthProvider;
+
+    let summary = provider.get_pack_summary(&client, "AANobbMI").await.unwrap();
+
+    // Falls back to first member when no Owner.
+    assert_eq!(summary.author, Some("alpha".to_string()));
+}
+
+#[tokio::test]
+async fn get_pack_summary_project_call_failure_propagates() {
+    let client = CapturingMockClient::new(vec![MockResp(404, "not found".to_string())]);
+    let provider = ModrinthProvider;
+
+    let err = provider.get_pack_summary(&client, "INVALID").await.unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 404, .. }),
+        "expected HttpStatus(404), got {:?}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn get_pack_summary_members_call_failure_propagates() {
+    let client = CapturingMockClient::new(vec![
+        MockResp::ok(MODRINTH_PROJECT_FIXTURE),
+        MockResp(503, "service unavailable".to_string()),
+    ]);
+    let provider = ModrinthProvider;
+
+    let err = provider.get_pack_summary(&client, "AANobbMI").await.unwrap_err();
+    assert!(
+        matches!(err, ProviderError::HttpStatus { status: 503, .. }),
+        "expected HttpStatus(503), got {:?}",
+        err
+    );
+}

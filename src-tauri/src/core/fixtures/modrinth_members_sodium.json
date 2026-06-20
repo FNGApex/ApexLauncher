@@ -1,0 +1,36 @@
+[
+  {
+    "user": {
+      "id": "user-jellysquid3",
+      "username": "jellysquid3",
+      "avatar_url": "https://cdn.modrinth.com/user/jellysquid3/avatar.png",
+      "bio": "Lead developer of Sodium, Lithium, and Phosphor.",
+      "created": "2020-01-01T00:00:00Z",
+      "role": "developer",
+      "badges": 0
+    },
+    "role": "Owner",
+    "permissions": null,
+    "accepted": true,
+    "paid_through": null,
+    "payouts_split": null,
+    "ordering": 0
+  },
+  {
+    "user": {
+      "id": "user-contributor",
+      "username": "contributor1",
+      "avatar_url": null,
+      "bio": null,
+      "created": "2021-01-01T00:00:00Z",
+      "role": "developer",
+      "badges": 0
+    },
+    "role": "Member",
+    "permissions": null,
+    "accepted": true,
+    "paid_through": null,
+    "payouts_split": null,
+    "ordering": 1
+  }
+]
