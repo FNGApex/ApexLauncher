@@ -155,13 +155,18 @@ impl MrVersion {
 /// Raw Modrinth `/v2/project/{id}` response (subset of fields needed for `PackInfo`).
 ///
 /// The `body` field carries the full Markdown long description.
-/// The `description` field is only the short summary — we use `body`.
+/// The `description` field is the short summary; `body` is the long Markdown.
 #[derive(Debug, Deserialize)]
 struct MrProject {
     title: String,
-    /// Full Markdown long description (NOT the short `description` field).
+    /// Short one-line description (used for `PackSummary::summary`).
+    description: String,
+    /// Full Markdown long description (used by `get_project` for the Info tab).
     body: String,
     icon_url: Option<String>,
+    /// Category slugs (e.g. `["optimization", "utility"]`).
+    #[serde(default)]
+    categories: Vec<String>,
 }
 
 /// Raw Modrinth `/v2/projects?ids=[...]` response item (for batch metadata fetch).
@@ -477,6 +482,8 @@ impl ModProvider for ModrinthProvider {
             name: raw_project.title,
             icon_url: raw_project.icon_url,
             author,
+            summary: Some(raw_project.description).filter(|s| !s.is_empty()),
+            categories: raw_project.categories,
         })
     }
 }

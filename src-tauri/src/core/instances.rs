@@ -89,6 +89,12 @@ pub struct Source {
     /// Newest available version id (for the update action), from last check.
     #[serde(default)]
     pub latest_version_id: Option<String>,
+    /// Short one-line description captured by `refresh_pack_meta`. `None` until first refresh.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Category tags captured by `refresh_pack_meta`. Empty until first refresh.
+    #[serde(default)]
+    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]

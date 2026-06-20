@@ -5,6 +5,16 @@
 
 import type { ProviderKind } from "@/lib/ipc";
 
+/**
+ * Map a wire provider string (e.g. from `Instance.source.provider`) to the
+ * canonical `ProviderKind` camelCase union used by the frontend.
+ * "curseforge" | "curseForge" → "curseForge"; anything else → "modrinth".
+ */
+export function toProviderKind(wire: string): ProviderKind {
+  if (wire === "curseforge" || wire === "curseForge") return "curseForge";
+  return "modrinth";
+}
+
 interface ProviderBadgeProps {
   provider: ProviderKind;
   className?: string;

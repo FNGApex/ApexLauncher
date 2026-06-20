@@ -880,6 +880,32 @@ async fn get_pack_summary_members_call_failure_propagates() {
     );
 }
 
+/// CP3: `get_pack_summary` populates `summary` (short description) and
+/// `categories` from the Modrinth project response.
+/// The fixture has `description: "A modern rendering…"` and
+/// `categories: ["optimization", "utility"]`.
+#[tokio::test]
+async fn get_pack_summary_populates_summary_and_categories() {
+    let client = CapturingMockClient::new(vec![
+        MockResp::ok(MODRINTH_PROJECT_FIXTURE),
+        MockResp::ok(MODRINTH_MEMBERS_FIXTURE),
+    ]);
+    let provider = ModrinthProvider;
+
+    let summary = provider.get_pack_summary(&client, "AANobbMI").await.unwrap();
+
+    assert_eq!(
+        summary.summary.as_deref(),
+        Some("A modern rendering engine and client-side optimization mod for Minecraft."),
+        "summary must be the short description field from the project response"
+    );
+    assert_eq!(
+        summary.categories,
+        vec!["optimization".to_string(), "utility".to_string()],
+        "categories must be the category slugs from the project response"
+    );
+}
+
 // ── A-2: multi-loader + category facets (BR-A) ────────────────────────────
 
 /// (a) 2 loaders → single OR'd inner array in the facets JSON.

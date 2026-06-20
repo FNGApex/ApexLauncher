@@ -1,23 +1,45 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Box, Plus, Server, Trash2 } from "lucide-react";
-import {
-  deleteInstance,
-  listInstances,
-  type Instance,
-} from "@/lib/ipc";
+import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Plus, Search, Server, X } from "lucide-react";
+import { listInstances, type Instance } from "@/lib/ipc";
 import { NewInstanceModal } from "@/components/NewInstanceModal";
+import { InstanceCard } from "@/components/InstanceCard";
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const DEBOUNCE_MS = 300;
+
+type SortKey = "lastPlayed" | "name" | "created" | "playtime";
+
+// ---------------------------------------------------------------------------
+// Home
+// ---------------------------------------------------------------------------
 
 export function Home() {
   const [showModal, setShowModal] = useState(false);
+  const [rawQuery, setRawQuery] = useState("");
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<SortKey>("lastPlayed");
+
   const { data: instances, isLoading } = useQuery({
     queryKey: ["instances"],
     queryFn: listInstances,
   });
 
+  // Debounce search input (mirror Browse.tsx pattern).
+  useEffect(() => {
+    const id = setTimeout(() => setQuery(rawQuery.trim()), DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [rawQuery]);
+
+  // Derive: filter then sort.
+  const filtered = deriveList(instances ?? [], query, sort);
+
   return (
     <div className="px-8 py-7">
+      {/* Header row */}
       <header className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Instances</h1>
@@ -32,15 +54,70 @@ export function Home() {
         </button>
       </header>
 
+      {/* Controls row: search + sort */}
+      <div className="mb-5 flex items-center gap-3">
+        {/* Search field — styled like Browse.tsx */}
+        <div className="flex min-w-0 flex-1 items-center gap-3 rounded-xl border border-border bg-surface px-4 py-2.5 transition-colors focus-within:border-primary">
+          <Search className="size-5 shrink-0 text-muted" />
+          <input
+            className="w-full bg-transparent text-base outline-none placeholder:text-muted"
+            placeholder="Search instances…"
+            value={rawQuery}
+            onChange={(e) => setRawQuery(e.target.value)}
+          />
+          {rawQuery.length > 0 && (
+            <button
+              onClick={() => setRawQuery("")}
+              className="shrink-0 rounded-md p-0.5 text-muted hover:text-foreground"
+              title="Clear search"
+            >
+              <X className="size-4" />
+            </button>
+          )}
+        </div>
+
+        {/* Sort select */}
+        <select
+          value={sort}
+          onChange={(e) => setSort(e.target.value as SortKey)}
+          className="rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-foreground outline-none transition-colors hover:border-primary/50 focus:border-primary"
+        >
+          <option value="lastPlayed">Last played</option>
+          <option value="name">Name (A–Z)</option>
+          <option value="created">Newest first</option>
+          <option value="playtime">Most played</option>
+        </select>
+      </div>
+
+      {/* Content */}
       {isLoading ? (
         <p className="text-sm text-muted">Loading…</p>
       ) : instances && instances.length > 0 ? (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
-          {instances.map((inst) => (
-            <InstanceCard key={inst.id} instance={inst} />
-          ))}
-        </div>
+        filtered.length > 0 ? (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {filtered.map((inst) => (
+              <InstanceCard key={inst.id} instance={inst} />
+            ))}
+          </div>
+        ) : (
+          /* No-match state */
+          <div className="grid place-items-center rounded-xl border border-dashed border-border bg-surface/40 py-16 text-center">
+            <Search className="mb-4 size-8 text-muted" />
+            <h2 className="text-base font-medium">No instances match</h2>
+            <p className="mt-1 text-sm text-muted">
+              Try a different search term or{" "}
+              <button
+                className="text-foreground underline hover:no-underline"
+                onClick={() => setRawQuery("")}
+              >
+                clear the filter
+              </button>
+              .
+            </p>
+          </div>
+        )
       ) : (
+        /* Empty state */
         <div className="grid place-items-center rounded-xl border border-dashed border-border bg-surface/40 py-20 text-center">
           <Server className="mb-4 size-10 text-muted" />
           <h2 className="text-lg font-medium">No instances yet</h2>
@@ -58,45 +135,32 @@ export function Home() {
   );
 }
 
-function InstanceCard({ instance }: { instance: Instance }) {
-  const qc = useQueryClient();
-  const del = useMutation({
-    mutationFn: () => deleteInstance(instance.slug),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["instances"] }),
+// ---------------------------------------------------------------------------
+// Derive: filter then sort
+// ---------------------------------------------------------------------------
+
+function deriveList(instances: Instance[], query: string, sort: SortKey): Instance[] {
+  const lower = query.toLowerCase();
+  const filtered = lower
+    ? instances.filter((i) => i.name.toLowerCase().includes(lower))
+    : instances;
+
+  return [...filtered].sort((a, b) => {
+    switch (sort) {
+      case "name":
+        return a.name.localeCompare(b.name);
+      case "created":
+        return new Date(b.created).getTime() - new Date(a.created).getTime();
+      case "playtime":
+        return b.totalPlaytimeSec - a.totalPlaytimeSec;
+      case "lastPlayed":
+      default: {
+        // null lastPlayed sorts last
+        if (a.lastPlayed === null && b.lastPlayed === null) return 0;
+        if (a.lastPlayed === null) return 1;
+        if (b.lastPlayed === null) return -1;
+        return new Date(b.lastPlayed).getTime() - new Date(a.lastPlayed).getTime();
+      }
+    }
   });
-
-  const loaderLabel =
-    instance.loader.kind === "vanilla"
-      ? "Vanilla"
-      : instance.loader.kind[0].toUpperCase() + instance.loader.kind.slice(1);
-
-  return (
-    <Link
-      to={`/instances/${instance.slug}`}
-      className="group relative flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 transition-colors hover:border-primary"
-    >
-      <div className="grid size-12 place-items-center rounded-lg bg-surface-2 text-muted">
-        <Box className="size-6" />
-      </div>
-      <div className="min-w-0">
-        <h3 className="truncate font-medium">{instance.name}</h3>
-        <p className="text-xs text-muted">
-          {loaderLabel} · {instance.minecraft}
-        </p>
-      </div>
-
-      <button
-        title="Delete instance"
-        onClick={(e) => {
-          e.preventDefault();
-          if (confirm(`Delete instance "${instance.name}"? This cannot be undone.`)) {
-            del.mutate();
-          }
-        }}
-        className="absolute right-3 top-3 rounded-md p-1.5 text-muted opacity-0 transition-opacity hover:bg-background hover:text-danger group-hover:opacity-100"
-      >
-        <Trash2 className="size-4" />
-      </button>
-    </Link>
-  );
 }

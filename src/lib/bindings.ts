@@ -1102,6 +1102,10 @@ export type Source = {
 	latestVersion?: string | null,
 	/**  Newest available version id (for the update action), from last check. */
 	latestVersionId?: string | null,
+	/**  Short one-line description captured by `refresh_pack_meta`. `None` until first refresh. */
+	summary?: string | null,
+	/**  Category tags captured by `refresh_pack_meta`. Empty until first refresh. */
+	categories?: string[],
 };
 
 /**  An optional dependency surfaced as a suggestion. */
