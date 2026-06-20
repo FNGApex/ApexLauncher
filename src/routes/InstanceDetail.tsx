@@ -9,6 +9,8 @@ import {
 import {
   AlertCircle,
   ArrowLeft,
+  ChevronDown,
+  ChevronUp,
   Download,
   FileBox,
   Key,
@@ -27,6 +29,7 @@ import {
   addMod,
   getInstance,
   getModVersions,
+  getSettings,
   launchInstance,
   killInstance,
   removeMod,
@@ -41,6 +44,7 @@ import {
   type ProjectSummary,
   type ProviderCommandError,
 } from "@/lib/ipc";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAppStore } from "@/lib/store";
 import { ProviderBadge } from "@/components/ProviderBadge";
 
@@ -71,6 +75,9 @@ export function InstanceDetail() {
     enabled: !!slug,
   });
 
+  // Settings query — used for T5 (showConsoleDefault) and T6 (keepLauncherOpen).
+  const { data: appSettings } = useQuery({ queryKey: ["settings"], queryFn: getSettings });
+
   // Run state + logs come from the app-level store (populated by AppShell listeners).
   // Reading from here survives navigation: navigate away and back shows live status
   // and replayed logs including any exit that fired while the user was on another page.
@@ -83,6 +90,17 @@ export function InstanceDetail() {
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
   const consoleRef = useRef<HTMLPreElement>(null);
+
+  // T5 show_console_default: console collapse state seeded from the setting.
+  // `null` means "not yet seeded" — we wait for the settings query to resolve.
+  const [consoleExpanded, setConsoleExpanded] = useState<boolean | null>(null);
+
+  // Seed console expanded state once settings load (only once — null guard).
+  useEffect(() => {
+    if (appSettings !== undefined && consoleExpanded === null) {
+      setConsoleExpanded(appSettings.showConsoleDefault ?? false);
+    }
+  }, [appSettings, consoleExpanded]);
 
   // Auto-scroll console to bottom when new log lines arrive.
   useEffect(() => {
@@ -109,6 +127,17 @@ export function InstanceDetail() {
     setLaunching(true);
     try {
       await launchInstance(slug);
+      // T6 keep_launcher_open: minimize the window after a successful launch
+      // when the setting is false. Default true = do nothing. Isolated try/catch
+      // so a window-API error here never surfaces as a (false) launch failure.
+      const keepOpen = appSettings?.keepLauncherOpen ?? true;
+      if (!keepOpen) {
+        try {
+          await getCurrentWindow().minimize();
+        } catch (e) {
+          console.warn("minimize after launch failed:", e);
+        }
+      }
     } catch (err) {
       setLaunchError(String(err));
     } finally {
@@ -259,21 +288,33 @@ export function InstanceDetail() {
 
           {/* ----------------------------------------------------------------
               Console — persistent chrome, shown when the instance is running
-              or has accumulated log lines
+              or has accumulated log lines. T5: collapsible, seeded from
+              showConsoleDefault setting.
           ---------------------------------------------------------------- */}
           {(running || (runLogLines && runLogLines.length > 0)) && (
             <section className="mb-8">
-              <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-muted">
-                Console
-              </h2>
-              <pre
-                ref={consoleRef}
-                className="h-64 overflow-y-auto rounded-lg border border-border bg-surface p-3 font-mono text-xs text-foreground"
+              <button
+                type="button"
+                onClick={() => setConsoleExpanded((prev) => !(prev ?? false))}
+                className="mb-3 flex items-center gap-2 text-sm font-semibold text-muted hover:text-foreground"
               >
-                {!runLogLines || runLogLines.length === 0
-                  ? "Waiting for output…"
-                  : runLogLines.map((l) => `[${l.stream}] ${l.line}`).join("\n")}
-              </pre>
+                Console
+                {consoleExpanded ?? false ? (
+                  <ChevronUp className="size-3.5" />
+                ) : (
+                  <ChevronDown className="size-3.5" />
+                )}
+              </button>
+              {(consoleExpanded ?? false) && (
+                <pre
+                  ref={consoleRef}
+                  className="h-64 overflow-y-auto rounded-lg border border-border bg-surface p-3 font-mono text-xs text-foreground"
+                >
+                  {!runLogLines || runLogLines.length === 0
+                    ? "Waiting for output…"
+                    : runLogLines.map((l) => `[${l.stream}] ${l.line}`).join("\n")}
+                </pre>
+              )}
             </section>
           )}
         </>

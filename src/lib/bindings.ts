@@ -981,6 +981,29 @@ export type Settings = {
 	 *  (`apex-ui`); this setting is the initial seed applied on first run only.
 	 */
 	sidebarStartCollapsed?: boolean,
+	/**
+	 *  When true, `ensure_java` is called at launch to auto-download a JRE if none
+	 *  is detected. When false, only detection is attempted; if no JRE is found the
+	 *  launch is aborted with a message directing the user to configure Java manually.
+	 *  Default: true (preserves existing behavior).
+	 */
+	autoDownloadJava?: boolean,
+	/**
+	 *  When true, the instance console panel starts expanded. When false, it starts
+	 *  collapsed and the user must click to reveal it. Default: false.
+	 */
+	showConsoleDefault?: boolean,
+	/**
+	 *  When true (default), the launcher window stays open after launching an
+	 *  instance. When false, the window is minimized immediately after a successful
+	 *  launch (not closed — closing would kill run monitoring).
+	 */
+	keepLauncherOpen?: boolean,
+	/**
+	 *  When true (default), the launcher window is maximized on startup. Replaces
+	 *  the static `"maximized": true` in `tauri.conf.json` with a dynamic check.
+	 */
+	maximizeOnStart?: boolean,
 };
 
 export type Source = {

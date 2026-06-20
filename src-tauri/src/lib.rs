@@ -829,8 +829,22 @@ async fn launch_instance(
                     major: launch_meta.java_major,
                     source: core::java::JavaSource::Detected,
                 }
-            } else {
+            } else if app_settings.auto_download_java {
                 core::java::ensure_java(&app, launch_meta.java_major).await?
+            } else {
+                // auto_download_java is disabled — attempt detection only.
+                let os = core::java::TargetOs::current();
+                let data_dir = core::store::data_dir(&app).unwrap_or_default();
+                let candidates = core::java::default_candidates(os, &data_dir);
+                let cache_java = core::store::cache_java_dir(&app).ok();
+                let cache_prefix = cache_java.as_deref();
+                core::java::detect(launch_meta.java_major, &candidates, os, cache_prefix)
+                    .ok_or_else(|| {
+                        "No Java found and auto-download is disabled. \
+                        Set a Java path in the instance's Java tab or enable \
+                        automatic Java downloads in Settings."
+                            .to_string()
+                    })?
             }
         }
     };
@@ -3094,6 +3108,20 @@ pub fn run() {
             // Mount typed event registry so Event::listen / Event::emit resolve
             // channel names at runtime (required when collect_events! is used).
             builder_for_setup.mount_events(app);
+
+            // T7 maximize_on_start: load settings and maximize the main window
+            // when the flag is true (default true — preserves existing behavior).
+            // `"maximized": true` has been removed from tauri.conf.json; this is
+            // the dynamic replacement.
+            let setup_settings = settings::load(app.handle()).unwrap_or_default();
+            if setup_settings.maximize_on_start {
+                if let Some(win) = app.get_webview_window("main") {
+                    if let Err(e) = win.maximize() {
+                        log::warn!("setup: could not maximize main window: {e}");
+                    }
+                }
+            }
+
             // Initialize the account store now that the AppHandle is available,
             // so the real on-disk path can be resolved.
             //

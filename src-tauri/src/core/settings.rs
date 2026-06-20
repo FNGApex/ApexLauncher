@@ -39,6 +39,25 @@ pub struct Settings {
     /// (`apex-ui`); this setting is the initial seed applied on first run only.
     #[serde(default = "default_sidebar_collapsed")]
     pub sidebar_start_collapsed: bool,
+    /// When true, `ensure_java` is called at launch to auto-download a JRE if none
+    /// is detected. When false, only detection is attempted; if no JRE is found the
+    /// launch is aborted with a message directing the user to configure Java manually.
+    /// Default: true (preserves existing behavior).
+    #[serde(default = "default_auto_download_java")]
+    pub auto_download_java: bool,
+    /// When true, the instance console panel starts expanded. When false, it starts
+    /// collapsed and the user must click to reveal it. Default: false.
+    #[serde(default = "default_show_console_default")]
+    pub show_console_default: bool,
+    /// When true (default), the launcher window stays open after launching an
+    /// instance. When false, the window is minimized immediately after a successful
+    /// launch (not closed — closing would kill run monitoring).
+    #[serde(default = "default_keep_launcher_open")]
+    pub keep_launcher_open: bool,
+    /// When true (default), the launcher window is maximized on startup. Replaces
+    /// the static `"maximized": true` in `tauri.conf.json` with a dynamic check.
+    #[serde(default = "default_maximize_on_start")]
+    pub maximize_on_start: bool,
 }
 
 fn default_schema() -> u32 {
@@ -56,6 +75,18 @@ fn default_offline_mode() -> bool {
 fn default_sidebar_collapsed() -> bool {
     false
 }
+fn default_auto_download_java() -> bool {
+    true
+}
+fn default_show_console_default() -> bool {
+    false
+}
+fn default_keep_launcher_open() -> bool {
+    true
+}
+fn default_maximize_on_start() -> bool {
+    true
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -66,6 +97,10 @@ impl Default for Settings {
             curseforge_api_key: None,
             offline_mode: false,
             sidebar_start_collapsed: false,
+            auto_download_java: true,
+            show_console_default: false,
+            keep_launcher_open: true,
+            maximize_on_start: true,
         }
     }
 }
