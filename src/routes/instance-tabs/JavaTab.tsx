@@ -124,8 +124,9 @@ export function JavaTab() {
               Use this instance's own Java &amp; memory settings
             </span>
             <span className="text-xs text-muted">
-              When off, this instance uses the global default. Modpacks don't ship
-              recommended Java settings, so these are your own per-instance values.
+              When off, this instance uses the global default. CurseForge and
+              Modrinth packs don't publish recommended Java settings, so these are
+              your own per-instance values.
             </span>
           </div>
         </label>
