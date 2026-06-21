@@ -661,6 +661,8 @@ fn amb3_source_with_page_url_survives_round_trip() {
         last_update_check: None,
         latest_version: None,
         latest_version_id: None,
+        summary: None,
+        categories: vec![],
     });
 
     let manifest_path = write_inst(tmp.path(), &inst);
@@ -736,6 +738,8 @@ fn pbb1_new_source_fields_round_trip() {
         last_update_check: Some("2026-06-20T00:00:00Z".into()),
         latest_version: Some("1.6.0".into()),
         latest_version_id: Some("99999".into()),
+        summary: None,
+        categories: vec![],
     });
 
     let manifest_path = write_inst(tmp.path(), &inst);
@@ -785,4 +789,81 @@ fn pbb1_old_manifest_missing_new_fields_defaults_to_none() {
     assert!(src.last_update_check.is_none(), "last_update_check must default to None");
     assert!(src.latest_version.is_none(), "latest_version must default to None");
     assert!(src.latest_version_id.is_none(), "latest_version_id must default to None");
+}
+
+// ---------------------------------------------------------------------------
+// CP3: summary + categories on Source
+// ---------------------------------------------------------------------------
+
+/// CP3: `summary` and `categories` survive a manifest round-trip.
+#[test]
+fn cp3_source_summary_and_categories_round_trip() {
+    let tmp = TempDir::new().unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    inst.source = Some(Source {
+        provider: "modrinth".into(),
+        project_id: "AANobbMI".into(),
+        file_id: "mc1.21-0.5.11".into(),
+        pack_version: "0.5.11".into(),
+        recommended: None,
+        page_url: None,
+        icon_url: None,
+        author: None,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
+        summary: Some("A modern rendering engine for Minecraft.".into()),
+        categories: vec!["optimization".into(), "utility".into()],
+    });
+
+    let manifest_path = write_inst(tmp.path(), &inst);
+    let reloaded = read_manifest_pub(&manifest_path).unwrap();
+    let src = reloaded.source.unwrap();
+
+    assert_eq!(
+        src.summary.as_deref(),
+        Some("A modern rendering engine for Minecraft."),
+        "summary must survive round-trip"
+    );
+    assert_eq!(
+        src.categories,
+        vec!["optimization".to_string(), "utility".to_string()],
+        "categories must survive round-trip"
+    );
+}
+
+/// CP3: old manifests without `summary`/`categories` fields deserialize with
+/// `None`/`[]` respectively (backward-compat via `#[serde(default)]`).
+#[test]
+fn cp3_old_manifest_missing_summary_categories_defaults() {
+    let tmp = TempDir::new().unwrap();
+    let old_json = r#"{
+        "schema": 1,
+        "id": "test-id",
+        "name": "Test",
+        "slug": "test",
+        "icon": null,
+        "minecraft": "1.20.1",
+        "loader": { "kind": "vanilla", "version": null },
+        "java": { "major": null, "argsOverride": null, "memoryMb": 2048 },
+        "source": {
+            "provider": "modrinth",
+            "projectId": "proj-old",
+            "fileId": "file-old",
+            "packVersion": "1.0"
+        },
+        "packLocked": false,
+        "mods": [],
+        "created": "2024-01-01T00:00:00Z",
+        "lastPlayed": null,
+        "totalPlaytimeSec": 0
+    }"#;
+    let path = tmp.path().join("instance.json");
+    std::fs::write(&path, old_json).unwrap();
+    let inst = read_manifest_pub(&path).unwrap();
+    let src = inst.source.unwrap();
+
+    assert!(src.summary.is_none(), "summary must default to None for old manifests");
+    assert!(src.categories.is_empty(), "categories must default to [] for old manifests");
 }

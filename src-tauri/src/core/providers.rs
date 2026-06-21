@@ -361,6 +361,10 @@ pub struct PackSummary {
     pub icon_url: Option<String>,
     /// Author string (CF: first author or comma-joined; Modrinth: owner username or first member).
     pub author: Option<String>,
+    /// Short one-line description (CF: `summary`; Modrinth: `description`).
+    pub summary: Option<String>,
+    /// Category tags (CF: category names; Modrinth: category slugs).
+    pub categories: Vec<String>,
 }
 
 /// A mod provider capable of searching mods and fetching version lists.

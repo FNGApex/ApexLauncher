@@ -1,16 +1,27 @@
 import { useOutletContext } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { InstanceTabContext } from "@/routes/InstanceDetail";
 import { Stat, formatDate, formatPlaytime, labelLoader } from "@/routes/InstanceDetail";
-import { getSettings } from "@/lib/ipc";
+import { getSettings, setPackLock } from "@/lib/ipc";
+import { Toggle } from "@/components/Toggle";
+import { JavaTab } from "@/routes/instance-tabs/JavaTab";
 
 export function TechTab() {
-  const { instance, folderMods } = useOutletContext<InstanceTabContext>();
+  const { slug, instance, folderMods, invalidate } = useOutletContext<InstanceTabContext>();
+  const qc = useQueryClient();
 
   const settingsQuery = useQuery({
     queryKey: ["settings"],
     queryFn: getSettings,
     staleTime: 60_000,
+  });
+
+  const packLockMutation = useMutation({
+    mutationFn: () => setPackLock(slug, !(instance.packLocked ?? false)),
+    onSuccess: () => {
+      invalidate();
+      qc.invalidateQueries({ queryKey: ["instances"] });
+    },
   });
 
   const settings = settingsQuery.data;
@@ -47,6 +58,24 @@ export function TechTab() {
 
   return (
     <div className="flex flex-col gap-6">
+      {/* Managed pack toggle */}
+      {instance.source && (
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-surface px-4 py-3">
+          <div>
+            <p className="text-sm font-medium">Managed pack</p>
+            <p className="mt-0.5 text-xs text-muted">
+              When on, this pack's mods are managed automatically — manual mod changes are disabled.
+            </p>
+          </div>
+          <Toggle
+            checked={instance.packLocked ?? false}
+            onChange={() => packLockMutation.mutate()}
+            disabled={packLockMutation.isPending}
+            label="Managed pack"
+          />
+        </div>
+      )}
+
       {/* Version & loader */}
       <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
         <Stat label="Minecraft" value={instance.minecraft} />
@@ -93,6 +122,12 @@ export function TechTab() {
           <dd className="mt-1 text-xs text-muted">{javaTier}</dd>
         </div>
       </dl>
+
+      {/* Java & Memory settings (merged from the former Java tab) */}
+      <div className="border-t border-border pt-6">
+        <h2 className="mb-4 text-sm font-semibold text-foreground">Java &amp; Memory</h2>
+        <JavaTab />
+      </div>
     </div>
   );
 }

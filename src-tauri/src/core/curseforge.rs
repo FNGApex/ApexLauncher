@@ -253,6 +253,18 @@ struct CfModData {
     /// Author list — present on the single-mod endpoint. Used for pack summary author.
     #[serde(default)]
     authors: Vec<CfAuthor>,
+    /// Short one-line summary text from the CF project endpoint.
+    #[serde(default)]
+    summary: Option<String>,
+    /// Category list from the CF project endpoint.
+    #[serde(default)]
+    categories: Vec<CfCategory>,
+}
+
+/// A single category entry in the CF project response.
+#[derive(Debug, Deserialize)]
+struct CfCategory {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -676,10 +688,14 @@ impl ModProvider for CurseForgeProvider {
             )
         };
 
+        let categories = raw.data.categories.into_iter().map(|c| c.name).collect();
+
         Ok(PackSummary {
             name: raw.data.name,
             icon_url: raw.data.logo.map(|l| l.url),
             author,
+            summary: raw.data.summary,
+            categories,
         })
     }
 }

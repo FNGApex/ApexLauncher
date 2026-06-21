@@ -8,7 +8,6 @@ import { InstanceDetail } from "@/routes/InstanceDetail";
 import { InfoTab } from "@/routes/instance-tabs/InfoTab";
 import { ModlistTab } from "@/routes/instance-tabs/ModlistTab";
 import { TechTab } from "@/routes/instance-tabs/TechTab";
-import { JavaTab } from "@/routes/instance-tabs/JavaTab";
 import { useUiStore } from "@/lib/store";
 
 /** Reads the persisted last-used browse provider and redirects to /browse/<p>. */
@@ -32,7 +31,6 @@ export const router = createBrowserRouter([
           { path: "info", element: <InfoTab /> },
           { path: "modlist", element: <ModlistTab /> },
           { path: "tech", element: <TechTab /> },
-          { path: "java", element: <JavaTab /> },
         ],
       },
       { path: "browse", element: <BrowseRedirect /> },

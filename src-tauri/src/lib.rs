@@ -1293,8 +1293,10 @@ async fn refresh_pack_meta(
 
     let now = chrono::Utc::now();
 
-    // Within 24h: return cached result, no network.
-    if !needs_update_check(source.last_update_check.as_deref(), now) {
+    // Within 24h: return cached result, no network — UNLESS summary/categories are
+    // absent (lets already-installed instances backfill once on next open).
+    let meta_absent = source.categories.is_empty() && source.summary.is_none();
+    if !needs_update_check(source.last_update_check.as_deref(), now) && !meta_absent {
         let update_available = matches!(
             (source.latest_version_id.as_deref(), &source.file_id),
             (Some(lv_id), fid) if lv_id != fid.as_str()
@@ -1346,6 +1348,8 @@ async fn refresh_pack_meta(
         let source = inst.source.as_mut().unwrap();
         source.icon_url = summary.icon_url;
         source.author = summary.author;
+        source.summary = summary.summary;
+        source.categories = summary.categories;
     }
 
     // Apply version check (best-effort).
@@ -3052,6 +3056,8 @@ async fn install_modpack(
         last_update_check: None,
         latest_version: None,
         latest_version_id: None,
+        summary: None,
+        categories: vec![],
     };
     let name_override: Option<String> = if resolved.version_name.is_empty() {
         None

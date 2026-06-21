@@ -212,6 +212,8 @@ fn d1_source_built_from_resolved_pack_file_fields() {
         last_update_check: None,
         latest_version: None,
         latest_version_id: None,
+        summary: None,
+        categories: vec![],
     };
 
     assert_eq!(source.provider, "modrinth");
@@ -950,6 +952,8 @@ fn lb1_mrpack_import_sets_pack_locked_true() {
         last_update_check: None,
         latest_version: None,
         latest_version_id: None,
+        summary: None,
+        categories: vec![],
     });
     if let Some(src) = pack_source {
         instance.source = Some(src);
@@ -978,6 +982,8 @@ fn lb1_cf_zip_import_sets_pack_locked_true() {
         last_update_check: None,
         latest_version: None,
         latest_version_id: None,
+        summary: None,
+        categories: vec![],
     });
     if let Some(src) = pack_source {
         instance.source = Some(src);

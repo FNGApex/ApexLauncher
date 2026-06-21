@@ -1336,6 +1336,56 @@ async fn get_pack_summary_returns_http_error_on_non_200() {
     );
 }
 
+/// CP3: `get_pack_summary` populates `summary` and `categories` from the CF project response.
+/// `cf_mod_jei.json` has `summary: "JEI is an item and recipe viewing mod…"` and
+/// `categories: [{"name": "Map and Information", …}]`.
+#[tokio::test]
+async fn get_pack_summary_populates_summary_and_categories() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MOD_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let summary = provider.get_pack_summary(&client, "238222").await.unwrap();
+
+    assert_eq!(
+        summary.summary.as_deref(),
+        Some("JEI is an item and recipe viewing mod for Minecraft, built from the ground up for stability and performance."),
+        "summary must be the summary field from the CF project response"
+    );
+    assert_eq!(
+        summary.categories,
+        vec!["Map and Information".to_string()],
+        "categories must be the category names from the CF project response"
+    );
+}
+
+/// CP3: when CF project has no categories array, `categories` is empty.
+#[tokio::test]
+async fn get_pack_summary_empty_categories_when_absent() {
+    // Inline fixture with no categories.
+    let no_categories = r#"{
+        "data": {
+            "id": 99,
+            "name": "My Pack",
+            "slug": "my-pack",
+            "summary": "Short description.",
+            "downloadCount": 100,
+            "logo": null,
+            "authors": [{"id": 1, "name": "Alpha"}],
+            "links": null
+        }
+    }"#;
+    let client = CapturingMockClient::new(vec![MockResp::ok(no_categories)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let summary = provider.get_pack_summary(&client, "99").await.unwrap();
+
+    assert!(
+        summary.categories.is_empty(),
+        "categories must be empty when absent from the response"
+    );
+    assert_eq!(summary.summary.as_deref(), Some("Short description."));
+}
+
 // ── A-3: multi-loader singular-or-Any + at-most-one category (BR-A) ───────
 
 /// Helper: extract URL params as a flat key=value map from a URL string.
