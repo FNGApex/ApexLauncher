@@ -7,7 +7,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Box, Loader2, Lock, Play, Square, Trash2 } from "lucide-react";
+import { Box, Loader2, Play, Square, Trash2 } from "lucide-react";
 import { deleteInstance, killInstance, launchInstance, type Instance } from "@/lib/ipc";
 import { useAppStore } from "@/lib/store";
 import { ProviderBadge, toProviderKind } from "@/components/ProviderBadge";
@@ -132,14 +132,6 @@ export function InstanceCard({ instance }: InstanceCardProps) {
             {updateAvailable && (
               <span className="inline-flex items-center rounded-md bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-400 ring-1 ring-inset ring-amber-500/20">
                 Update
-              </span>
-            )}
-            {instance.packLocked && (
-              <span
-                title="Pack is locked"
-                className="inline-flex items-center rounded-md bg-surface-2 px-1.5 py-0.5 text-xs text-muted ring-1 ring-inset ring-border"
-              >
-                <Lock className="size-3" />
               </span>
             )}
           </div>

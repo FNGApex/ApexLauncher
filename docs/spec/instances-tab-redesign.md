@@ -118,6 +118,39 @@ the right as a big purple icon** that changes color on hover.
 - Playtime + last-played: keep, as a small muted footer line.
 - Done when: `scripts/build.sh check` passes; chips/description/purple-Play render in dev window.
 
+## Iteration 3 — "managed pack" rename + relocate toggle
+
+User feedback: drop the loud "Pack is locked" tags/badges/banners everywhere; the disabled
+state should communicate via a **"Pack is managed"** tooltip on hover of the disabled controls
+(keep them disabled — no accidental clicks); move the lock toggle out of the Mods tab into the
+**Tech Info** tab. Frontend-only — the backend `set_pack_lock` command, `Source`/`packLocked`
+field, and `ensure_not_locked` guard are unchanged (data model is fine; only copy + placement
+change). Wording: replace "locked"/"unlock" with "managed"/"turn off managing".
+
+### CP5 — remove badges/banners, rename copy, move toggle to Tech Info
+- `src/components/InstanceCard.tsx`: remove the `Lock` badge block (~line 137) and the now-unused
+  `Lock` import.
+- `src/routes/InstanceDetail.tsx`:
+  - `ManageInstallsPanel` (~656): remove the Pack Lock **toggle** in the header (~678–687) and
+    the amber **locked notice banner** (~690–696). Keep the `packLocked` prop threading — it
+    still drives the disabled state of mod controls.
+  - `AddModTab` (~800): remove the full-screen early-return "Pack is locked" block (~864–869).
+    Instead let the tab render normally but keep its Add actions disabled when `packLocked`, with
+    a "Pack is managed — turn off managing in Tech Info to add mods" tooltip.
+  - `VersionUpdateModal`/pack-source panel: remove the locked notice (~547–551); keep the Version
+    select + Update button disabled when `packLocked` with a "Pack is managed — turn off managing
+    in Tech Info to update" tooltip (~571, ~602–603).
+  - `InstalledModsTab` / `ModRow` (~1133–1160, ~1303–1332): rename every `packLocked ? "Pack is
+    locked …"` title to the "Pack is managed — …" wording. Keep buttons disabled.
+  - Remove the `Lock` import from InstanceDetail if no longer used.
+- `src/routes/instance-tabs/TechTab.tsx`: add a **"Managed pack"** toggle section at the top.
+  Read `instance.packLocked` from the outlet context; `useMutation` calling
+  `setPackLock(slug, !packLocked)`; on success `invalidate()` (the context's invalidate) +
+  `qc.invalidateQueries(["instances"])`. Reuse the existing `Toggle` component. Add one helper
+  line: "When on, this pack's mods are managed automatically — manual mod changes are disabled."
+- Done when: `scripts/build.sh check` passes; no "locked" copy/badges remain; the toggle works
+  from Tech Info; disabled mod/update controls show the "managed" tooltip.
+
 ## Change log
 - 2026-06-20: initial spec from approved plan.
 - 2026-06-20: iteration 2 — CP3 backend category/summary capture (API-frugal via existing

@@ -16,7 +16,6 @@ import {
   ExternalLink,
   FileBox,
   Key,
-  Lock,
   Loader2,
   Package,
   Play,
@@ -39,7 +38,6 @@ import {
   removeMod,
   searchMods,
   setModEnabled,
-  setPackLock,
   updateMod,
   updateModpack,
   type FolderMod,
@@ -400,15 +398,7 @@ export function InstanceDetail() {
                 tabBase + (isActive ? " " + tabActive : "")
               }
             >
-              Tech Info
-            </NavLink>
-            <NavLink
-              to="java"
-              className={({ isActive }) =>
-                tabBase + (isActive ? " " + tabActive : "")
-              }
-            >
-              Java
+              Pack settings
             </NavLink>
           </nav>
 
@@ -544,14 +534,6 @@ function VersionUpdateModal({
           </button>
         </div>
 
-        {/* Pack-locked notice */}
-        {packLocked && (
-          <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
-            <Lock className="size-3.5 shrink-0" />
-            Pack is locked — unlock to update.
-          </div>
-        )}
-
         {/* Version list */}
         <label className="mb-1 block text-xs text-muted">Version</label>
         <div className="relative mb-4">
@@ -569,6 +551,7 @@ function VersionUpdateModal({
               value={selectedVersionId}
               onChange={(e) => setSelectedVersionId(e.target.value)}
               disabled={updating || packLocked}
+              title={packLocked ? "Pack is managed — turn off managing in Tech Info to update" : undefined}
               className="input w-full disabled:opacity-50"
             >
               {versionsQuery.data.map((v) => (
@@ -600,7 +583,7 @@ function VersionUpdateModal({
           <button
             onClick={handleUpdate}
             disabled={updating || packLocked || !versionsQuery.data}
-            title={packLocked ? "Unlock the pack to update" : undefined}
+            title={packLocked ? "Pack is managed — turn off managing in Tech Info to update" : undefined}
             className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-60"
           >
             {updating ? (
@@ -643,20 +626,11 @@ export function ManageInstallsPanel({
   onMutate,
 }: ManageInstallsPanelProps) {
   const [tab, setTab] = useState<ManageTab>("installed");
-  const qc = useQueryClient();
-
-  const lockMutation = useMutation({
-    mutationFn: () => setPackLock(instanceSlug, !packLocked),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["instance", instanceSlug] });
-      onMutate();
-    },
-  });
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Header: tab switcher + Pack Lock toggle */}
-      <div className="flex items-center justify-between gap-4">
+      {/* Header: tab switcher */}
+      <div className="flex items-center gap-4">
         {/* Tab switcher */}
         <div className="flex gap-1 rounded-lg border border-border bg-surface p-1 self-start">
           {(["installed", "add"] as const).map((t) => (
@@ -674,26 +648,7 @@ export function ManageInstallsPanel({
             </button>
           ))}
         </div>
-
-        {/* Pack Lock toggle (LF-2) */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted">Pack locked</span>
-          <Toggle
-            checked={packLocked}
-            onChange={() => lockMutation.mutate()}
-            disabled={lockMutation.isPending}
-            label="Pack locked"
-          />
-        </div>
       </div>
-
-      {/* Pack-locked notice */}
-      {packLocked && (
-        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-400">
-          <Lock className="size-3.5 shrink-0" />
-          <span>Pack is locked — mod changes are disabled. Unlock the pack to make changes.</span>
-        </div>
-      )}
 
       {tab === "installed" ? (
         <InstalledModsTab
@@ -860,16 +815,6 @@ function AddModTab({ instanceSlug, minecraft, loaderKind, modEntries, packLocked
     error.kind === "key_missing";
 
   const hits: ProjectSummary[] = data?.pages.flatMap((p) => p.hits) ?? [];
-
-  if (packLocked) {
-    return (
-      <div className="grid place-items-center rounded-xl border border-amber-500/30 bg-amber-500/5 py-14 text-center text-sm">
-        <Lock className="mb-3 size-8 text-amber-400/60" />
-        <p className="font-medium text-amber-400">Pack is locked</p>
-        <p className="mt-1 text-xs text-muted">Unlock the pack in the header above to add mods.</p>
-      </div>
-    );
-  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -1133,7 +1078,7 @@ function ModSearchCard({
             disabled={packLocked}
             onMouseEnter={() => setHoverRemove(true)}
             onMouseLeave={() => setHoverRemove(false)}
-            title={packLocked ? "Pack is locked — unlock to remove mods" : "Remove mod"}
+            title={packLocked ? "Pack is managed — turn off managing in Tech Info to remove mods" : "Remove mod"}
             className={
               "inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 " +
               (hoverRemove && !packLocked
@@ -1157,7 +1102,7 @@ function ModSearchCard({
           <button
             onClick={handleAdd}
             disabled={adding || packLocked}
-            title={packLocked ? "Pack is locked — unlock to add mods" : "Add mod"}
+            title={packLocked ? "Pack is managed — turn off managing in Tech Info to add mods" : "Add mod"}
             className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/80 disabled:opacity-50"
           >
             {adding ? (
@@ -1300,7 +1245,7 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
           <div className="flex shrink-0 items-center gap-1 pt-0.5">
             {/* Enable / disable — Apple-style toggle (LF-4) */}
             <span
-              title={packLocked ? "Pack is locked" : mod.disabled ? "Enable mod" : "Disable mod"}
+              title={packLocked ? "Pack is managed — turn off managing in Tech Info to change mods" : mod.disabled ? "Enable mod" : "Disable mod"}
               className="flex items-center px-1"
             >
               <Toggle
@@ -1315,7 +1260,7 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
             <button
               onClick={() => updateMutation.mutate()}
               disabled={isDisabled}
-              title={packLocked ? "Pack is locked" : "Check for update"}
+              title={packLocked ? "Pack is managed — turn off managing in Tech Info to change mods" : "Check for update"}
               className="rounded p-1 text-muted transition-colors hover:bg-surface-2 hover:text-foreground disabled:opacity-50"
             >
               {updateMutation.isPending || isUpdating ? (
@@ -1329,7 +1274,7 @@ function ModRow({ mod, entry, instanceSlug, packLocked, onMutate }: ModRowProps)
             <button
               onClick={() => removeMutation.mutate()}
               disabled={isDisabled}
-              title={packLocked ? "Pack is locked" : "Remove mod"}
+              title={packLocked ? "Pack is managed — turn off managing in Tech Info to change mods" : "Remove mod"}
               className="rounded p-1 text-muted transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-50"
             >
               {removeMutation.isPending ? (
