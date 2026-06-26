@@ -939,6 +939,152 @@ fn cp2_pending_manual_round_trips() {
     assert!(reloaded.suppress_pending_launch_warning);
 }
 
+// -----------------------------------------------------------------------
+// CP-5: reconcile_pending_manual
+// -----------------------------------------------------------------------
+
+fn pending(file_name: &str, expected_sha1: Option<&str>) -> PendingManual {
+    PendingManual {
+        project_id: "238222".into(),
+        file_id: "4536804".into(),
+        file_name: file_name.to_string(),
+        page_url: "https://www.curseforge.com/minecraft/mc-mods/jei/files/4536804".into(),
+        expected_sha1: expected_sha1.map(|s| s.to_string()),
+        size: None,
+    }
+}
+
+/// Write `content` into `mods_dir/<name>` and return the file's hex SHA-1.
+fn write_jar(mods_dir: &Path, name: &str, content: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    fs::write(mods_dir.join(name), content).unwrap();
+    let mut h = Sha1::new();
+    h.update(content);
+    hex::encode(h.finalize())
+}
+
+#[test]
+fn cp5_reconcile_exact_name_matching_sha1_resolves_enabled() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    let sha = write_jar(mods, "jei.jar", b"jar bytes");
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", Some(&sha))];
+
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert_eq!(resolved.len(), 1);
+    assert!(resolved[0].enabled);
+    assert!(inst.pending_manual.is_empty(), "resolved entry removed");
+    assert_eq!(inst.mods.len(), 1);
+    assert_eq!(inst.mods[0].file_name, "jei.jar");
+    assert!(inst.mods[0].enabled);
+    assert_eq!(inst.mods[0].hashes.get("sha1"), Some(&sha));
+    assert_eq!(inst.mods[0].provider, "curseforge");
+    assert!(inst.mods[0].from_pack);
+}
+
+#[test]
+fn cp5_reconcile_disabled_form_resolves_disabled() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    write_jar(mods, "jei.jar.disabled", b"jar bytes");
+
+    let mut inst = stub_instance(vec![]);
+    // name-only acceptance (no sha) so the .disabled form is accepted on name.
+    inst.pending_manual = vec![pending("jei.jar", None)];
+
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert_eq!(resolved.len(), 1);
+    assert!(!resolved[0].enabled, "disabled-form match → enabled=false");
+    assert!(inst.pending_manual.is_empty());
+    assert_eq!(inst.mods.len(), 1);
+    assert!(!inst.mods[0].enabled);
+}
+
+#[test]
+fn cp5_reconcile_exact_wins_over_disabled() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    write_jar(mods, "jei.jar", b"enabled bytes");
+    write_jar(mods, "jei.jar.disabled", b"disabled bytes");
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", None)];
+
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert_eq!(resolved.len(), 1);
+    assert!(resolved[0].enabled, "exact name wins when both present");
+}
+
+#[test]
+fn cp5_reconcile_wrong_sha1_not_resolved() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    write_jar(mods, "jei.jar", b"jar bytes");
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", Some("deadbeefdeadbeef"))];
+
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert!(resolved.is_empty(), "hash mismatch → not resolved");
+    assert_eq!(inst.pending_manual.len(), 1, "entry stays pending");
+    assert!(inst.mods.is_empty());
+}
+
+#[test]
+fn cp5_reconcile_name_only_accepts() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    write_jar(mods, "jei.jar", b"whatever");
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", None)];
+
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert_eq!(resolved.len(), 1);
+    assert!(inst.mods[0].hashes.get("sha1").is_none(), "no hash recorded for name-only");
+}
+
+#[test]
+fn cp5_reconcile_missing_file_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("absent.jar", None)];
+
+    let resolved = reconcile_pending_manual(&mut inst, tmp.path());
+
+    assert!(resolved.is_empty());
+    assert_eq!(inst.pending_manual.len(), 1);
+    assert!(inst.mods.is_empty());
+}
+
+#[test]
+fn cp5_reconcile_idempotent_and_empties_when_all_resolved() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    write_jar(mods, "a.jar", b"a");
+    write_jar(mods, "b.jar", b"b");
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("a.jar", None), pending("b.jar", None)];
+
+    let first = reconcile_pending_manual(&mut inst, mods);
+    assert_eq!(first.len(), 2);
+    assert!(inst.pending_manual.is_empty(), "list empties when all resolved");
+    assert_eq!(inst.mods.len(), 2);
+
+    // Second call is a no-op — nothing pending, no duplicate ModEntry.
+    let second = reconcile_pending_manual(&mut inst, mods);
+    assert!(second.is_empty());
+    assert_eq!(inst.mods.len(), 2, "idempotent — no duplicate entries");
+}
+
 /// `set_pending_launch_warning_suppressed_on_disk` flips and persists the flag.
 #[test]
 fn cp3_suppress_pending_launch_warning_persists() {

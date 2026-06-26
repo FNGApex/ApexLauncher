@@ -241,6 +241,22 @@ export const commands = {
 	 */
 	setPendingLaunchWarningSuppressed: (slug: string, suppressed: boolean) => typedError<null, string>(__TAURI_INVOKE("set_pending_launch_warning_suppressed", { slug, suppressed })),
 	/**
+	 *  Rescan an instance's `mods/` for dropped manual downloads (Re-scan button /
+	 *  fallback). Sync — instant local op, off the task queue. Returns the remaining
+	 *  pending list.
+	 */
+	rescanPendingManual: (slug: string) => typedError<PendingManual[], string>(__TAURI_INVOKE("rescan_pending_manual", { slug })),
+	/**
+	 *  Start a lazy watch on an instance's `mods/` dir (called from the detail page
+	 *  when it mounts with pending files). Idempotent; replaces any prior watch.
+	 */
+	startPendingWatch: (slug: string) => typedError<null, string>(__TAURI_INVOKE("start_pending_watch", { slug })),
+	/**
+	 *  Stop the lazy `mods/` watch for an instance (detail page unmount / list
+	 *  emptied). No-op if a different instance (or none) is being watched.
+	 */
+	stopPendingWatch: (slug: string) => typedError<null, string>(__TAURI_INVOKE("stop_pending_watch", { slug })),
+	/**
 	 *  Persist a `JavaCfg` override to an instance's manifest.
 	 * 
 	 *  When `cfg.use_pack_settings` is `true` the launcher uses this instance's own
@@ -307,6 +323,7 @@ export const events = {
 	installLog: makeEvent<InstallLogPayload>("install://log"),
 	launchExit: makeEvent<LaunchExitPayload>("launch://exit"),
 	launchLog: makeEvent<LaunchLogPayload>("launch://log"),
+	manualResolved: makeEvent<ManualResolvedPayload>("manual://resolved"),
 	runUpdate: makeEvent<RunUpdatePayload>("run://update"),
 	taskProgress: makeEvent<TaskProgressPayload>("task://progress"),
 	taskUpdate: makeEvent<TaskUpdatePayload_Deserialize>("task://update"),
@@ -734,6 +751,17 @@ export type ManualMod = {
 	fileName: string,
 	/**  Project page URL — open in browser so user can download manually. */
 	pageUrl: string,
+};
+
+/**
+ *  Payload emitted on `manual://resolved` when a pending manual download is
+ *  detected in an instance's `mods/` dir and recorded.
+ */
+export type ManualResolvedPayload = {
+	slug: string,
+	fileName: string,
+	/**  Number of pending manual files still unresolved after this one. */
+	remaining: number,
 };
 
 export type McVersion = {

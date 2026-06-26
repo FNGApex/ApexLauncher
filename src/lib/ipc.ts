@@ -401,6 +401,27 @@ export async function setPendingLaunchWarningSuppressed(
 }
 
 /**
+ * Rescan an instance's mods/ for dropped manual downloads. Returns the remaining
+ * pending list. Sync local op (dir read + hash); off the task queue.
+ */
+export function rescanPendingManual(slug: string) {
+  return unwrap(commands.rescanPendingManual(slug));
+}
+
+/**
+ * Start a lazy watch on an instance's mods/ dir (call from the detail page when
+ * it mounts with pending files). Idempotent.
+ */
+export async function startPendingWatch(slug: string): Promise<void> {
+  await unwrap(commands.startPendingWatch(slug));
+}
+
+/** Stop the lazy mods/ watch for an instance (detail unmount / list emptied). */
+export async function stopPendingWatch(slug: string): Promise<void> {
+  await unwrap(commands.stopPendingWatch(slug));
+}
+
+/**
  * Refresh a managed instance's pack metadata (icon / author / latest version) and
  * check for an update. Throttled to once per 24h in the BACKEND (zero network when
  * within 24h — it returns the cached result). Returns `{ updateAvailable, latestVersion,

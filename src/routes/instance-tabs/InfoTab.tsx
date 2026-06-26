@@ -1,14 +1,47 @@
+import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Loader2, AlertCircle, ExternalLink, AlertTriangle } from "lucide-react";
+import { Loader2, AlertCircle, ExternalLink, AlertTriangle, RefreshCw } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { InstanceTabContext } from "@/routes/InstanceDetail";
-import { getPackInfo } from "@/lib/ipc";
+import {
+  getPackInfo,
+  rescanPendingManual,
+  startPendingWatch,
+  stopPendingWatch,
+} from "@/lib/ipc";
 import { PackDescription } from "@/components/PackDescription";
 
 export function InfoTab() {
-  const { instance } = useOutletContext<InstanceTabContext>();
+  const { slug, instance, invalidate } = useOutletContext<InstanceTabContext>();
   const pending = instance.pendingManual ?? [];
+  const pendingCount = pending.length;
+  const [rescanning, setRescanning] = useState(false);
+
+  // Lazy mods/ watcher: run only while this detail page is mounted AND the pack
+  // still has pending manual files. Stops on unmount or when the list empties.
+  // A drop into mods/ then clears the row live (the backend emits manual://resolved,
+  // AppShell invalidates the instance query). Out-of-app drops are caught by the
+  // launch-time scan + the Re-scan button below.
+  useEffect(() => {
+    if (pendingCount === 0) return;
+    startPendingWatch(slug).catch(console.error);
+    return () => {
+      stopPendingWatch(slug).catch(console.error);
+    };
+  }, [slug, pendingCount]);
+
+  async function handleRescan() {
+    setRescanning(true);
+    try {
+      await rescanPendingManual(slug);
+      invalidate();
+    } catch (e) {
+      console.error("rescan pending manual failed:", e);
+    } finally {
+      setRescanning(false);
+    }
+  }
 
   // Provider routing: wire value "modrinth" | "curseForge" → routing string "modrinth" | "curseforge".
   const providerRoute: "modrinth" | "curseforge" | null = instance.source
@@ -39,9 +72,20 @@ export function InfoTab() {
       {/* Pending manual-download panel (CF allowModDistribution:false) — only when pending. */}
       {pending.length > 0 && (
         <section className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm">
-          <div className="mb-2 flex items-center gap-2 font-medium text-amber-300">
-            <AlertTriangle className="size-4 shrink-0" />
-            {pending.length} file{pending.length !== 1 ? "s" : ""} need a manual download
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 font-medium text-amber-300">
+              <AlertTriangle className="size-4 shrink-0" />
+              {pending.length} file{pending.length !== 1 ? "s" : ""} need a manual download
+            </div>
+            <button
+              onClick={handleRescan}
+              disabled={rescanning}
+              title="Re-scan the mods folder for dropped files"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/25 disabled:opacity-50"
+            >
+              <RefreshCw className={`size-3.5 ${rescanning ? "animate-spin" : ""}`} />
+              Re-scan
+            </button>
           </div>
           <p className="mb-3 text-xs text-amber-200/80">
             These mods disable automatic downloads. Get them from CurseForge and drop the

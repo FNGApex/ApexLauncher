@@ -406,6 +406,119 @@ fn scan_mods(mods_dir: &Path, instance: &Instance) -> Vec<FolderMod> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// CF manual-download auto-recovery (CP-5)
+// ---------------------------------------------------------------------------
+
+/// One pending entry that `reconcile_pending_manual` resolved: the file appeared
+/// in `mods/` and validated. Used to drive `manual://resolved` events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedManual {
+    /// The base file name (no `.disabled` suffix) that was resolved.
+    pub file_name: String,
+    /// `true` when matched via the exact name, `false` when matched via the
+    /// `.disabled` form (the recorded `ModEntry` mirrors this).
+    pub enabled: bool,
+}
+
+/// Compute the lowercase hex SHA-1 of a file, or `None` if it can't be read.
+fn sha1_file(path: &Path) -> Option<String> {
+    use sha1::{Digest, Sha1};
+    use std::io::Read;
+    let mut f = fs::File::open(path).ok()?;
+    let mut hasher = Sha1::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(hex::encode(hasher.finalize()))
+}
+
+/// Try to resolve a single pending entry against `mods/`. Returns
+/// `Some((enabled, computed_sha1))` when the file is present and validates:
+/// - the exact `mods/<file_name>` (→ `enabled = true`) takes precedence over the
+///   `mods/<file_name>.disabled` form (→ `enabled = false`);
+/// - when `expected_sha1` is set, the file's SHA-1 must match (else `None`);
+/// - otherwise the file is accepted on name alone.
+fn try_resolve_pending(p: &PendingManual, mods_dir: &Path) -> Option<(bool, Option<String>)> {
+    let exact = mods_dir.join(&p.file_name);
+    let disabled = mods_dir.join(format!("{}.disabled", p.file_name));
+
+    let (path, enabled) = if exact.is_file() {
+        (exact, true)
+    } else if disabled.is_file() {
+        (disabled, false)
+    } else {
+        return None;
+    };
+
+    match &p.expected_sha1 {
+        Some(expected) => {
+            let computed = sha1_file(&path)?;
+            if computed.eq_ignore_ascii_case(expected) {
+                Some((enabled, Some(computed)))
+            } else {
+                None
+            }
+        }
+        // Name-only acceptance (no declared hash).
+        None => Some((enabled, None)),
+    }
+}
+
+/// Inspect `mods/` against `inst.pending_manual`. For each pending entry whose
+/// file now exists and validates, remove it from `pending_manual` and append a
+/// real `ModEntry`. Returns the list of resolutions (for event emission).
+///
+/// Pure (a dir read + optional hash, no network) and **idempotent** — it only
+/// acts on entries still in `pending_manual`, so a second call is a no-op once
+/// everything is resolved.
+pub fn reconcile_pending_manual(inst: &mut Instance, mods_dir: &Path) -> Vec<ResolvedManual> {
+    let pending = std::mem::take(&mut inst.pending_manual);
+    let mut resolved = Vec::new();
+    let mut still_pending = Vec::new();
+
+    for p in pending {
+        match try_resolve_pending(&p, mods_dir) {
+            Some((enabled, sha1_opt)) => {
+                // Defensive idempotency: don't double-record if a ModEntry for
+                // this file already exists.
+                if !inst.mods.iter().any(|m| m.file_name == p.file_name) {
+                    let mut hashes = BTreeMap::new();
+                    if let Some(h) = sha1_opt {
+                        hashes.insert("sha1".to_string(), h);
+                    }
+                    inst.mods.push(ModEntry {
+                        provider: "curseforge".to_string(),
+                        project_id: p.project_id.clone(),
+                        version_id: p.file_id.clone(),
+                        file_name: p.file_name.clone(),
+                        hashes,
+                        enabled,
+                        side: "both".to_string(),
+                        from_pack: true,
+                        name: None,
+                        icon_url: None,
+                        summary: None,
+                    });
+                }
+                resolved.push(ResolvedManual {
+                    file_name: p.file_name.clone(),
+                    enabled,
+                });
+            }
+            None => still_pending.push(p),
+        }
+    }
+
+    inst.pending_manual = still_pending;
+    resolved
+}
+
 /// Lowercase, alphanumerics kept, runs of anything else collapsed to a single `-`.
 fn slugify(name: &str) -> String {
     let mut s = String::new();
