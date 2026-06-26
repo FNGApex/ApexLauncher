@@ -15,6 +15,7 @@ import {
   Download,
   ExternalLink,
   FileBox,
+  ImagePlus,
   Key,
   Loader2,
   Package,
@@ -37,6 +38,8 @@ import {
   refreshPackMeta,
   removeMod,
   searchMods,
+  setInstanceIcon,
+  clearInstanceIcon,
   setModEnabled,
   setPendingLaunchWarningSuppressed,
   updateMod,
@@ -49,9 +52,11 @@ import {
   type ProviderCommandError,
 } from "@/lib/ipc";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "@/lib/store";
 import { ProviderBadge } from "@/components/ProviderBadge";
 import { Toggle } from "@/components/Toggle";
+import { useInstanceIconSrc } from "@/lib/instanceIcon";
 
 const PAGE_LIMIT = 20;
 const DEBOUNCE_MS = 400;
@@ -120,6 +125,44 @@ export function InstanceDetail() {
 
   // CF manual-download UX (CP-4): pre-launch missing-mods warning modal.
   const [pendingModalOpen, setPendingModalOpen] = useState(false);
+
+  // Custom instance icon (Phase 7): resolved src + picker busy state.
+  const iconSrc = useInstanceIconSrc(data?.instance);
+  const [iconBusy, setIconBusy] = useState(false);
+
+  async function handlePickIcon() {
+    if (!slug) return;
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+    });
+    if (!selected || Array.isArray(selected)) return;
+    setIconBusy(true);
+    try {
+      await setInstanceIcon(slug, selected);
+      qc.invalidateQueries({ queryKey: ["instance", slug] });
+      qc.invalidateQueries({ queryKey: ["instances"] });
+    } catch (e) {
+      console.error("set instance icon failed:", e);
+    } finally {
+      setIconBusy(false);
+    }
+  }
+
+  async function handleClearIcon() {
+    if (!slug) return;
+    setIconBusy(true);
+    try {
+      await clearInstanceIcon(slug);
+      qc.invalidateQueries({ queryKey: ["instance", slug] });
+      qc.invalidateQueries({ queryKey: ["instances"] });
+    } catch (e) {
+      console.error("clear instance icon failed:", e);
+    } finally {
+      setIconBusy(false);
+    }
+  }
 
   // Seed console expanded state once settings load (only once — null guard).
   useEffect(() => {
@@ -251,20 +294,49 @@ export function InstanceDetail() {
           <header className="mb-4 rounded-2xl border border-border bg-surface px-7 py-6">
             {/* Top row: icon + identity + actions */}
             <div className="flex items-center gap-6">
-              {/* Pack icon (PB-F1) — grandiose: size-24 */}
-              {data.instance.source?.iconUrl ? (
-                <img
-                  src={data.instance.source.iconUrl}
-                  alt=""
-                  referrerPolicy="no-referrer"
-                  className="size-24 shrink-0 rounded-2xl object-cover shadow-lg"
-                  loading="lazy"
-                />
-              ) : (
-                <div className="grid size-24 shrink-0 place-items-center rounded-2xl bg-surface-2 text-muted shadow-inner">
-                  <Package className="size-12" />
+              {/* Instance icon (custom > pack > placeholder) with a hover overlay
+                  to set / remove a custom image. */}
+              <div className="group/icon relative size-24 shrink-0">
+                {iconSrc ? (
+                  <img
+                    src={iconSrc}
+                    alt=""
+                    referrerPolicy="no-referrer"
+                    className="size-24 rounded-2xl object-cover shadow-lg"
+                    loading="lazy"
+                  />
+                ) : (
+                  <div className="grid size-24 place-items-center rounded-2xl bg-surface-2 text-muted shadow-inner">
+                    <Package className="size-12" />
+                  </div>
+                )}
+                {/* Hover overlay */}
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 rounded-2xl bg-black/55 opacity-0 transition-opacity group-hover/icon:opacity-100">
+                  {iconBusy ? (
+                    <Loader2 className="size-5 animate-spin text-white" />
+                  ) : (
+                    <>
+                      <button
+                        onClick={handlePickIcon}
+                        title="Set a custom icon"
+                        className="inline-flex items-center gap-1 rounded-md bg-white/15 px-2 py-1 text-xs font-medium text-white hover:bg-white/25"
+                      >
+                        <ImagePlus className="size-3.5" />
+                        Set
+                      </button>
+                      {data.instance.icon && (
+                        <button
+                          onClick={handleClearIcon}
+                          title="Remove the custom icon"
+                          className="text-[11px] text-white/80 underline hover:text-white"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </>
+                  )}
                 </div>
-              )}
+              </div>
 
               {/* Name + metadata */}
               <div className="min-w-0 flex-1">

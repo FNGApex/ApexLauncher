@@ -12,6 +12,7 @@ import { deleteInstance, killInstance, launchInstance, type Instance } from "@/l
 import { useAppStore } from "@/lib/store";
 import { ProviderBadge, toProviderKind } from "@/components/ProviderBadge";
 import { labelLoader, formatDate, formatPlaytime } from "@/routes/InstanceDetail";
+import { useInstanceIconSrc } from "@/lib/instanceIcon";
 
 // ---------------------------------------------------------------------------
 // InstanceCard
@@ -38,6 +39,9 @@ export function InstanceCard({ instance }: InstanceCardProps) {
   // Update-available pill: source has a latestVersionId that differs from current fileId.
   const src = instance.source;
   const updateAvailable = !!(src?.latestVersionId && src.latestVersionId !== src.fileId);
+
+  // Icon: custom user icon > pack icon > placeholder.
+  const iconSrc = useInstanceIconSrc(instance);
 
   async function handlePlay(e: React.MouseEvent) {
     e.preventDefault();
@@ -109,10 +113,10 @@ export function InstanceCard({ instance }: InstanceCardProps) {
 
       {/* Main row: icon + content + big Play/Stop on the right */}
       <div className="flex items-center gap-4">
-        {/* Icon */}
-        {src?.iconUrl ? (
+        {/* Icon: custom > pack > placeholder */}
+        {iconSrc ? (
           <img
-            src={src.iconUrl}
+            src={iconSrc}
             alt=""
             referrerPolicy="no-referrer"
             className="size-28 shrink-0 rounded-xl object-cover"
