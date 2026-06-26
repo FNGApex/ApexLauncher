@@ -37,6 +37,8 @@ fn base_instance() -> crate::core::instances::Instance {
         },
         source: None,
         pack_locked: false,
+        pending_manual: vec![],
+        suppress_pending_launch_warning: false,
         mods: vec![],
         created: "2024-01-01T00:00:00Z".into(),
         last_played: None,

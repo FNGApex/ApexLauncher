@@ -126,6 +126,30 @@ pub struct ModEntry {
     pub summary: Option<String>,
 }
 
+/// A CurseForge file whose distribution is disabled (`allowModDistribution: false`)
+/// or which lacks a verifiable hash — the user must download it manually. Persisted on
+/// the manifest so the "incomplete pack" state survives restarts (see
+/// `docs/design/cf-manual-download-ux.md`). Cleared by `reconcile_pending_manual` once
+/// the matching jar appears in `mods/`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingManual {
+    /// CF mod (project) id, stringified to match `ModEntry` convention.
+    pub project_id: String,
+    /// CF file id.
+    pub file_id: String,
+    /// Exact filename the user must drop into `mods/`.
+    pub file_name: String,
+    /// Slug-based exact-file URL (or numeric fallback) to fetch the jar from.
+    pub page_url: String,
+    /// SHA-1 to verify the dropped file against; `None` → name/size match only.
+    #[serde(default)]
+    pub expected_sha1: Option<String>,
+    /// Declared size in bytes for the name-only acceptance fallback.
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Instance {
@@ -143,6 +167,15 @@ pub struct Instance {
     /// Old manifests missing this field deserialize as `false`.
     #[serde(default)]
     pub pack_locked: bool,
+    /// CF files that must be downloaded manually (distribution disabled). Drives the
+    /// "incomplete pack" badge/panel and the pre-launch warning. Empty for old manifests
+    /// and packs with no manual files. See `docs/design/cf-manual-download-ux.md`.
+    #[serde(default)]
+    pub pending_manual: Vec<PendingManual>,
+    /// Per-instance "don't warn me again" for the pre-launch missing-mods dialog.
+    /// Old manifests deserialize as `false`.
+    #[serde(default)]
+    pub suppress_pending_launch_warning: bool,
     pub mods: Vec<ModEntry>,
     pub created: String,
     pub last_played: Option<String>,
@@ -234,6 +267,8 @@ pub fn create(app: &AppHandle, req: CreateInstanceReq) -> Result<Instance, Strin
         },
         source: None,
         pack_locked: false,
+        pending_manual: Vec::new(),
+        suppress_pending_launch_warning: false,
         mods: Vec::new(),
         created: chrono::Utc::now().to_rfc3339(),
         last_played: None,

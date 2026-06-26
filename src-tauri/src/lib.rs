@@ -2818,6 +2818,10 @@ impl TaskJob for ImportCfZipJob {
                 }
                 // LB-1: instances created from a modpack start locked.
                 instance.pack_locked = true;
+                // CF manual-download UX: persist the manual list so the incomplete-pack
+                // badge/panel and pre-launch warning survive restarts (CP-2).
+                instance.pending_manual =
+                    manual.iter().map(instances::PendingManual::from).collect();
                 match instances::save_manifest(&self.app, &inst.slug, &instance) {
                     Ok(_) => Ok(CfImportResult {
                         slug: inst.slug,
@@ -3275,6 +3279,10 @@ impl TaskJob for UpdateModpackJob {
             src.file_id = self.resolved_version_id.clone();
             src.pack_version = self.resolved_version_name.clone();
         }
+        // CF manual-download UX: refresh the persisted manual list to the new pack
+        // version's manual files (CP-2). Empty for mrpack/non-CF updates.
+        instance.pending_manual =
+            manual.iter().map(instances::PendingManual::from).collect();
         if let Err(e) = instances::save_manifest(&self.app, &self.slug, &instance) {
             ctx.finish_failed(e).await;
             return;

@@ -437,8 +437,18 @@ export type CfManualFile = {
 	fileId: number,
 	/**  Filename as declared by the resolved file. */
 	fileName: string,
-	/**  Best-effort project page URL (projectID-based; slug-based link is a follow-up). */
+	/**
+	 *  Best-effort CurseForge page URL — slug-based exact-file page when available
+	 *  (`resolve_and_build_cf_plan`), else the numeric `…/projects/{id}` redirect.
+	 */
 	pageUrl: string,
+	/**
+	 *  SHA-1 of the file if CF declared one; `None` → name/size match only when the
+	 *  user later drops the jar in (auto-recovery, Pillar 3).
+	 */
+	expectedSha1?: string | null,
+	/**  Declared file size in bytes, if known. */
+	size?: number | null,
 };
 
 /**
@@ -557,6 +567,17 @@ export type Instance = {
 	 *  Old manifests missing this field deserialize as `false`.
 	 */
 	packLocked?: boolean,
+	/**
+	 *  CF files that must be downloaded manually (distribution disabled). Drives the
+	 *  "incomplete pack" badge/panel and the pre-launch warning. Empty for old manifests
+	 *  and packs with no manual files. See `docs/design/cf-manual-download-ux.md`.
+	 */
+	pendingManual?: PendingManual[],
+	/**
+	 *  Per-instance "don't warn me again" for the pre-launch missing-mods dialog.
+	 *  Old manifests deserialize as `false`.
+	 */
+	suppressPendingLaunchWarning?: boolean,
 	mods: ModEntry[],
 	created: string,
 	lastPlayed: string | null,
@@ -854,6 +875,28 @@ export type PackUpdateResult = {
 	failed: number,
 	/**  Files the user must download manually (CF only; empty for mrpack). */
 	manual: CfManualFile[],
+};
+
+/**
+ *  A CurseForge file whose distribution is disabled (`allowModDistribution: false`)
+ *  or which lacks a verifiable hash — the user must download it manually. Persisted on
+ *  the manifest so the "incomplete pack" state survives restarts (see
+ *  `docs/design/cf-manual-download-ux.md`). Cleared by `reconcile_pending_manual` once
+ *  the matching jar appears in `mods/`.
+ */
+export type PendingManual = {
+	/**  CF mod (project) id, stringified to match `ModEntry` convention. */
+	projectId: string,
+	/**  CF file id. */
+	fileId: string,
+	/**  Exact filename the user must drop into `mods/`. */
+	fileName: string,
+	/**  Slug-based exact-file URL (or numeric fallback) to fetch the jar from. */
+	pageUrl: string,
+	/**  SHA-1 to verify the dropped file against; `None` → name/size match only. */
+	expectedSha1?: string | null,
+	/**  Declared size in bytes for the name-only acceptance fallback. */
+	size?: number | null,
 };
 
 /**

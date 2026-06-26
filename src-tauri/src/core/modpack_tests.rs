@@ -1002,6 +1002,26 @@ async fn b4_resolve_and_build_cf_plan_routes_through_pure_build_cf_pack_plan() {
 // ── Pillar 1: cf_file_page_url + slug enrichment ─────────────────────────
 
 #[test]
+fn pending_manual_from_cf_manual_file_maps_fields() {
+    use crate::core::instances::PendingManual;
+    let m = CfManualFile {
+        project_id: 238222,
+        file_id: 4536804,
+        file_name: "jei.jar".to_string(),
+        page_url: "https://www.curseforge.com/minecraft/mc-mods/jei/files/4536804".to_string(),
+        expected_sha1: Some("aabbcc".to_string()),
+        size: Some(2048),
+    };
+    let p = PendingManual::from(&m);
+    assert_eq!(p.project_id, "238222");
+    assert_eq!(p.file_id, "4536804");
+    assert_eq!(p.file_name, "jei.jar");
+    assert_eq!(p.page_url, m.page_url);
+    assert_eq!(p.expected_sha1.as_deref(), Some("aabbcc"));
+    assert_eq!(p.size, Some(2048));
+}
+
+#[test]
 fn cf_file_page_url_with_slug_targets_exact_file_page() {
     assert_eq!(
         cf_file_page_url(Some("jei"), 238222, 4536804),

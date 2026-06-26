@@ -18,7 +18,7 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 
 use crate::core::download::{DownloadItem, ExpectedHash};
-use crate::core::instances::ModEntry;
+use crate::core::instances::{ModEntry, PendingManual};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -401,8 +401,31 @@ pub struct CfManualFile {
     pub file_id: u64,
     /// Filename as declared by the resolved file.
     pub file_name: String,
-    /// Best-effort project page URL (projectID-based; slug-based link is a follow-up).
+    /// Best-effort CurseForge page URL — slug-based exact-file page when available
+    /// (`resolve_and_build_cf_plan`), else the numeric `…/projects/{id}` redirect.
     pub page_url: String,
+    /// SHA-1 of the file if CF declared one; `None` → name/size match only when the
+    /// user later drops the jar in (auto-recovery, Pillar 3).
+    #[serde(default)]
+    pub expected_sha1: Option<String>,
+    /// Declared file size in bytes, if known.
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
+impl From<&CfManualFile> for PendingManual {
+    /// Map a planner-side manual entry to its persisted manifest form. Ids are
+    /// stringified to match the `ModEntry`/`PendingManual` convention.
+    fn from(m: &CfManualFile) -> Self {
+        PendingManual {
+            project_id: m.project_id.to_string(),
+            file_id: m.file_id.to_string(),
+            file_name: m.file_name.clone(),
+            page_url: m.page_url.clone(),
+            expected_sha1: m.expected_sha1.clone(),
+            size: m.size,
+        }
+    }
 }
 
 /// A CurseForge `files[]` entry whose resolution (`get_file`) itself failed
@@ -526,6 +549,8 @@ pub fn build_cf_pack_plan(
                         manifest_file.project_id,
                         manifest_file.file_id,
                     ),
+                    expected_sha1: sha1.cloned(),
+                    size: file.size,
                 });
             }
         }

@@ -32,6 +32,8 @@ fn stub_instance(mods: Vec<ModEntry>) -> Instance {
         },
         source: None,
         pack_locked: false,
+        pending_manual: vec![],
+        suppress_pending_launch_warning: false,
         mods,
         created: "2024-01-01T00:00:00Z".into(),
         last_played: None,
@@ -866,4 +868,73 @@ fn cp3_old_manifest_missing_summary_categories_defaults() {
 
     assert!(src.summary.is_none(), "summary must default to None for old manifests");
     assert!(src.categories.is_empty(), "categories must default to [] for old manifests");
+}
+
+// -----------------------------------------------------------------------
+// CP-2: pending_manual / suppress_pending_launch_warning back-compat
+// -----------------------------------------------------------------------
+
+/// An old `instance.json` with neither `pendingManual` nor
+/// `suppressPendingLaunchWarning` must deserialize to `[]` / `false` (serde
+/// defaults, no schema bump).
+#[test]
+fn cp2_old_manifest_missing_pending_fields_defaults() {
+    let tmp = TempDir::new().unwrap();
+    let old_json = r#"{
+        "schema": 1,
+        "id": "test-id",
+        "name": "Test",
+        "slug": "test",
+        "icon": null,
+        "minecraft": "1.20.1",
+        "loader": { "kind": "vanilla", "version": null },
+        "java": { "major": null, "argsOverride": null, "memoryMb": 2048 },
+        "source": null,
+        "packLocked": false,
+        "mods": [],
+        "created": "2024-01-01T00:00:00Z",
+        "lastPlayed": null,
+        "totalPlaytimeSec": 0
+    }"#;
+    let path = tmp.path().join("instance.json");
+    std::fs::write(&path, old_json).unwrap();
+    let inst = read_manifest_pub(&path).unwrap();
+
+    assert!(
+        inst.pending_manual.is_empty(),
+        "pendingManual must default to [] for old manifests"
+    );
+    assert!(
+        !inst.suppress_pending_launch_warning,
+        "suppressPendingLaunchWarning must default to false for old manifests"
+    );
+}
+
+/// A populated `pending_manual` plus `suppress_pending_launch_warning = true`
+/// survives a write→read round-trip.
+#[test]
+fn cp2_pending_manual_round_trips() {
+    let tmp = TempDir::new().unwrap();
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![PendingManual {
+        project_id: "238222".into(),
+        file_id: "4536804".into(),
+        file_name: "jei-1.20.1.jar".into(),
+        page_url: "https://www.curseforge.com/minecraft/mc-mods/jei/files/4536804".into(),
+        expected_sha1: Some("aabbcc".into()),
+        size: Some(1024),
+    }];
+    inst.suppress_pending_launch_warning = true;
+
+    let path = write_inst(tmp.path(), &inst);
+    let reloaded = read_manifest_pub(&path).unwrap();
+
+    assert_eq!(reloaded.pending_manual.len(), 1);
+    assert_eq!(reloaded.pending_manual[0].file_name, "jei-1.20.1.jar");
+    assert_eq!(
+        reloaded.pending_manual[0].expected_sha1.as_deref(),
+        Some("aabbcc")
+    );
+    assert_eq!(reloaded.pending_manual[0].size, Some(1024));
+    assert!(reloaded.suppress_pending_launch_warning);
 }
