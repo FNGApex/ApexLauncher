@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Loader2, AlertCircle, ExternalLink, AlertTriangle, RefreshCw } from "lucide-react";
+import { Loader2, AlertCircle, ExternalLink, AlertTriangle, RefreshCw, Upload } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { InstanceTabContext } from "@/routes/InstanceDetail";
 import {
   getPackInfo,
+  importManualFile,
   rescanPendingManual,
   startPendingWatch,
   stopPendingWatch,
@@ -17,6 +20,9 @@ export function InfoTab() {
   const pending = instance.pendingManual ?? [];
   const pendingCount = pending.length;
   const [rescanning, setRescanning] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
 
   // Lazy mods/ watcher: run only while this detail page is mounted AND the pack
   // still has pending manual files. Stops on unmount or when the list empties.
@@ -42,6 +48,66 @@ export function InfoTab() {
       setRescanning(false);
     }
   }
+
+  async function importPaths(paths: string[]) {
+    const jars = paths.filter((p) => p.toLowerCase().endsWith(".jar"));
+    if (jars.length === 0) {
+      setImportError("Only .jar files can be added.");
+      return;
+    }
+    setImporting(true);
+    setImportError(null);
+    try {
+      for (const p of jars) {
+        await importManualFile(slug, p);
+      }
+      invalidate();
+    } catch (e) {
+      setImportError(String(e));
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function handlePick() {
+    const selected = await open({
+      multiple: true,
+      directory: false,
+      filters: [{ name: "Mod jar", extensions: ["jar"] }],
+    });
+    if (!selected) return;
+    await importPaths(Array.isArray(selected) ? selected : [selected]);
+  }
+
+  // Tauri native file-drop: while the panel is visible with pending files, accept
+  // dropped .jar paths. The drop event is webview-global; we only act while the
+  // pending panel is mounted (pendingCount > 0).
+  useEffect(() => {
+    if (pendingCount === 0) return;
+    let unlisten: (() => void) | undefined;
+    let active = true;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === "over" || event.payload.type === "enter") {
+          setDragOver(true);
+        } else if (event.payload.type === "leave") {
+          setDragOver(false);
+        } else if (event.payload.type === "drop") {
+          setDragOver(false);
+          void importPaths(event.payload.paths);
+        }
+      })
+      .then((fn) => {
+        if (active) unlisten = fn;
+        else fn();
+      })
+      .catch(console.error);
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug, pendingCount]);
 
   // Provider routing: wire value "modrinth" | "curseForge" → routing string "modrinth" | "curseforge".
   const providerRoute: "modrinth" | "curseforge" | null = instance.source
@@ -112,6 +178,40 @@ export function InfoTab() {
               </li>
             ))}
           </ul>
+
+          {/* Drop zone + pick-file fallback */}
+          <div
+            className={
+              "mt-3 flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed px-4 py-5 text-center text-xs transition-colors " +
+              (dragOver
+                ? "border-amber-400 bg-amber-500/15 text-amber-200"
+                : "border-amber-500/30 text-amber-200/70")
+            }
+          >
+            {importing ? (
+              <span className="inline-flex items-center gap-2">
+                <Loader2 className="size-4 animate-spin" />
+                Adding…
+              </span>
+            ) : (
+              <>
+                <Upload className="size-5 text-amber-300/80" />
+                <span>Drag .jar files here to add them</span>
+                <button
+                  onClick={handlePick}
+                  className="mt-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1 font-medium text-amber-200 transition-colors hover:bg-amber-500/25"
+                >
+                  Pick file…
+                </button>
+              </>
+            )}
+          </div>
+
+          {importError && (
+            <p className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger">
+              {importError}
+            </p>
+          )}
         </section>
       )}
 

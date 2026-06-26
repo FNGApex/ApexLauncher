@@ -1085,6 +1085,48 @@ fn cp5_reconcile_idempotent_and_empties_when_all_resolved() {
     assert_eq!(inst.mods.len(), 2, "idempotent — no duplicate entries");
 }
 
+// -----------------------------------------------------------------------
+// CP-6: manual file import (copy + reconcile)
+// -----------------------------------------------------------------------
+
+/// Copying a correctly-named jar into mods/ then reconciling resolves the entry
+/// (the copy step is `import_manual_file`'s only side effect before reconcile).
+#[test]
+fn cp6_copy_named_jar_then_reconcile_resolves() {
+    let tmp = TempDir::new().unwrap();
+    let src_dir = tmp.path().join("downloads");
+    let mods = tmp.path().join("mods");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&mods).unwrap();
+    fs::write(src_dir.join("jei.jar"), b"jar bytes").unwrap();
+    // import_manual_file copies the picked file under its own basename.
+    fs::copy(src_dir.join("jei.jar"), mods.join("jei.jar")).unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", None)];
+    let resolved = reconcile_pending_manual(&mut inst, &mods);
+
+    assert_eq!(resolved.len(), 1);
+    assert!(inst.pending_manual.is_empty());
+    assert_eq!(inst.mods.len(), 1);
+}
+
+/// Copying an unrelated jar leaves the pending entry untouched.
+#[test]
+fn cp6_unrelated_jar_leaves_pending() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    fs::write(mods.join("some-other-mod.jar"), b"jar bytes").unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", None)];
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert!(resolved.is_empty());
+    assert_eq!(inst.pending_manual.len(), 1);
+    assert!(inst.mods.is_empty());
+}
+
 /// `set_pending_launch_warning_suppressed_on_disk` flips and persists the flag.
 #[test]
 fn cp3_suppress_pending_launch_warning_persists() {

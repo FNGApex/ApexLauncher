@@ -804,6 +804,37 @@ fn rescan_pending_manual(
     reconcile_and_emit(&app, &slug)
 }
 
+/// Manual fallback: copy a user-picked / dropped `.jar` into the instance's
+/// `mods/` dir under its own file name, then reconcile. Resolves a pending entry
+/// when the chosen file is named as the entry expects. Returns the remaining
+/// pending list. Sync.
+#[tauri::command]
+#[specta::specta]
+fn import_manual_file(
+    app: tauri::AppHandle,
+    slug: String,
+    src_path: String,
+) -> Result<Vec<instances::PendingManual>, String> {
+    let slug = instances::validate_slug(&slug)?;
+    let src = std::path::Path::new(&src_path);
+    if !src.is_file() {
+        return Err(format!("file not found: {src_path}"));
+    }
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "invalid source path".to_string())?;
+    // Rejects non-.jar, path separators, `..` — same guard as add_mod's file names.
+    let name = instances::validate_mod_file_name(name)?;
+
+    let mods_dir = instance_mods_dir(&app, &slug)?;
+    std::fs::create_dir_all(&mods_dir).map_err(|e| format!("could not create mods dir: {e}"))?;
+    let dest = mods_dir.join(&name);
+    std::fs::copy(src, &dest).map_err(|e| format!("could not copy file: {e}"))?;
+
+    reconcile_and_emit(&app, &slug)
+}
+
 /// Start a lazy watch on an instance's `mods/` dir (called from the detail page
 /// when it mounts with pending files). Idempotent; replaces any prior watch.
 #[tauri::command]
@@ -3696,6 +3727,7 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             set_pack_lock,
             set_pending_launch_warning_suppressed,
             rescan_pending_manual,
+            import_manual_file,
             start_pending_watch,
             stop_pending_watch,
             set_instance_java,

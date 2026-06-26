@@ -422,6 +422,14 @@ export async function stopPendingWatch(slug: string): Promise<void> {
 }
 
 /**
+ * Manual fallback: copy a picked / dropped .jar into the instance's mods/ dir,
+ * then reconcile. Returns the remaining pending list.
+ */
+export function importManualFile(slug: string, srcPath: string) {
+  return unwrap(commands.importManualFile(slug, srcPath));
+}
+
+/**
  * Refresh a managed instance's pack metadata (icon / author / latest version) and
  * check for an update. Throttled to once per 24h in the BACKEND (zero network when
  * within 24h — it returns the cached result). Returns `{ updateAvailable, latestVersion,

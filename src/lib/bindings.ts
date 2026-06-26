@@ -247,6 +247,13 @@ export const commands = {
 	 */
 	rescanPendingManual: (slug: string) => typedError<PendingManual[], string>(__TAURI_INVOKE("rescan_pending_manual", { slug })),
 	/**
+	 *  Manual fallback: copy a user-picked / dropped `.jar` into the instance's
+	 *  `mods/` dir under its own file name, then reconcile. Resolves a pending entry
+	 *  when the chosen file is named as the entry expects. Returns the remaining
+	 *  pending list. Sync.
+	 */
+	importManualFile: (slug: string, srcPath: string) => typedError<PendingManual[], string>(__TAURI_INVOKE("import_manual_file", { slug, srcPath })),
+	/**
 	 *  Start a lazy watch on an instance's `mods/` dir (called from the detail page
 	 *  when it mounts with pending files). Idempotent; replaces any prior watch.
 	 */
