@@ -1,0 +1,40 @@
+{
+  "id": 100,
+  "name": "FTB Test Pack",
+  "synopsis": "A test FTB pack",
+  "description": "# Heading\nMarkdown body, not HTML.",
+  "art": [
+    { "url": "https://example.invalid/splash.png", "type": "splash", "width": 800, "height": 450 },
+    { "url": "https://example.invalid/square.png", "type": "square", "width": 256, "height": 256 }
+  ],
+  "authors": [{ "name": "FTB Team", "type": "team", "id": 1 }],
+  "tags": [
+    { "id": 1, "name": "FTB Official" },
+    { "id": 2, "name": "Tech" }
+  ],
+  "versions": [
+    {
+      "id": 2275,
+      "name": "1.3.0",
+      "type": "Release",
+      "updated": 1719360000,
+      "targets": [
+        { "name": "neoforge", "type": "modloader", "version": "21.1.74" },
+        { "name": "minecraft", "type": "game", "version": "1.21.1" },
+        { "name": "java", "type": "runtime", "version": "21" }
+      ]
+    },
+    {
+      "id": 2200,
+      "name": "1.2.0",
+      "type": "beta",
+      "updated": 1717000000,
+      "targets": [
+        { "name": "neoforge", "type": "modloader", "version": "21.0.0" },
+        { "name": "minecraft", "type": "game", "version": "1.21" }
+      ]
+    }
+  ],
+  "installs": 1100000,
+  "plays": 50000
+}

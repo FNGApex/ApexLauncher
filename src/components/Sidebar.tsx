@@ -283,16 +283,19 @@ function BrowseNav({ collapsed }: { collapsed: boolean }) {
             Modrinth
           </NavLink>
 
-          {/* FTB — coming soon (not a link) */}
-          <div
-            title="Coming soon"
-            className="flex cursor-not-allowed items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium text-muted/40"
+          {/* FTB — active link */}
+          <NavLink
+            to="/browse/ftb"
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors",
+                "text-muted hover:bg-surface-2 hover:text-foreground",
+                isActive && "bg-surface-2 text-foreground",
+              )
+            }
           >
             FTB
-            <span className="rounded bg-muted/20 px-1 py-0.5 text-[10px] leading-tight">
-              Soon
-            </span>
-          </div>
+          </NavLink>
 
           {/* ATLauncher — coming soon (not a link) */}
           <div

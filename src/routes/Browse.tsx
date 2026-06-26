@@ -50,12 +50,15 @@ export function BrowseProvider() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const filtersButtonRef = useRef<HTMLButtonElement | null>(null);
 
-  // Remember last-used provider for the two real providers.
+  // Remember last-used provider for the real providers.
   useEffect(() => {
-    if (provider === "curseforge" || provider === "modrinth") {
+    if (provider === "curseforge" || provider === "modrinth" || provider === "ftb") {
       setBrowseProvider(provider);
     }
   }, [provider, setBrowseProvider]);
+
+  // FTB has no server-side loader/category facets — hide the filters UI for it.
+  const supportsFilters = provider !== "ftb";
 
   // Reset filters when provider changes so stale cross-provider categories are cleared.
   useEffect(() => {
@@ -101,7 +104,7 @@ export function BrowseProvider() {
   }
 
   // Coming-soon placeholder for unimplemented providers.
-  if (provider !== "curseforge" && provider !== "modrinth") {
+  if (provider !== "curseforge" && provider !== "modrinth" && provider !== "ftb") {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4 px-8 py-7">
         <Package className="size-12 text-muted" />
@@ -145,8 +148,8 @@ export function BrowseProvider() {
             )}
           </div>
 
-          {/* Filters button — with active-filter count badge */}
-          <div className="relative">
+          {/* Filters button — with active-filter count badge (hidden for FTB) */}
+          <div className={cn("relative", !supportsFilters && "hidden")}>
             <button
               ref={filtersButtonRef}
               onClick={() => setFiltersOpen((o) => !o)}
@@ -238,7 +241,7 @@ function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }
 // ---------------------------------------------------------------------------
 
 interface SingleProviderFeedProps {
-  provider: "curseforge" | "modrinth";
+  provider: "curseforge" | "modrinth" | "ftb";
   query: string;
   filters: FiltersState;
   installedIndex: Map<string, string>;

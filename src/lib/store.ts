@@ -115,8 +115,8 @@ interface UiState {
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
   setSidebarCollapsed: (v: boolean) => void;
-  browseProvider: "curseforge" | "modrinth";
-  setBrowseProvider: (p: "curseforge" | "modrinth") => void;
+  browseProvider: "curseforge" | "modrinth" | "ftb";
+  setBrowseProvider: (p: "curseforge" | "modrinth" | "ftb") => void;
 }
 
 export const useUiStore = create<UiState>()(
