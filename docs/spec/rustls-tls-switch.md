@@ -151,3 +151,10 @@ CP-2 exercises the actual rustls handshake exactly once:
   Verified against `Cargo.lock` (reqwest 0.12.28 / rustls 0.23.40 / ring present, aws-lc-rs
   absent) and reqwest 0.12 feature docs. Two CPs: (1) the `Cargo.toml` feature swap +
   dep-graph gates, (2) a live-TLS smoke since unit tests mock HTTP. No `bindings.ts` regen.
+- 2026-06-26 — **Implemented.** `Cargo.toml` reqwest line swapped to
+  `default-features = false` + `rustls-tls`/`charset`/`http2`/`macos-system-configuration`.
+  Gates met: `cargo tree -i openssl-sys` and `-i native-tls` → not found; `webpki-roots`/`ring`
+  resolve; `aws-lc-rs` absent; `build.sh check` + full suite green (679 lib tests). CP-2 covered
+  by a new keyless ignored integration test `src-tauri/tests/tls_live.rs` (Modrinth + Mojang
+  piston-meta through the production `ReqwestProviderClient`) — both pass over rustls, replacing
+  the key-gated `curseforge_live` smoke (no CF key available in this environment).
