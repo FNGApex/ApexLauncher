@@ -249,6 +249,10 @@ struct CfModResponse {
 #[derive(Debug, Deserialize)]
 struct CfModData {
     name: String,
+    /// URL slug of the project (e.g. `"jei"`) — used to build the exact file-page
+    /// URL for manual-download entries. Absent on older/partial responses.
+    #[serde(default)]
+    slug: Option<String>,
     logo: Option<CfModLogo>,
     /// Author list — present on the single-mod endpoint. Used for pack summary author.
     #[serde(default)]
@@ -454,6 +458,36 @@ impl CurseForgeProvider {
             serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
 
         Ok(raw.data.into_version_file())
+    }
+
+    /// Fetch a project's URL slug via `GET /v1/mods/{project_id}`.
+    ///
+    /// Used by the modpack importer to build the exact CurseForge file-page URL for
+    /// manual-download entries (`allowModDistribution: false`). Returns `Ok(None)` when
+    /// the project response carries no `slug` (older/partial data) — the caller then
+    /// falls back to the numeric `…/projects/{id}` redirect. Network/HTTP/JSON failures
+    /// surface as `Err`; an unconfigured key surfaces as `ProviderError::KeyMissing`.
+    pub async fn get_mod_slug(
+        &self,
+        client: &dyn ProviderHttpClient,
+        project_id: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        let key = self.require_key()?;
+        let url = Self::build_mod_url(project_id);
+
+        let (status, body) = client
+            .get(&url, &[("x-api-key", key)])
+            .await
+            .map_err(ProviderError::from)?;
+
+        if status != 200 {
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let raw: CfModResponse =
+            serde_json::from_str(&body).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+
+        Ok(raw.data.slug)
     }
 }
 

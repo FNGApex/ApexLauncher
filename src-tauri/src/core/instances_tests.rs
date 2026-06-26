@@ -32,6 +32,8 @@ fn stub_instance(mods: Vec<ModEntry>) -> Instance {
         },
         source: None,
         pack_locked: false,
+        pending_manual: vec![],
+        suppress_pending_launch_warning: false,
         mods,
         created: "2024-01-01T00:00:00Z".into(),
         last_played: None,
@@ -866,4 +868,277 @@ fn cp3_old_manifest_missing_summary_categories_defaults() {
 
     assert!(src.summary.is_none(), "summary must default to None for old manifests");
     assert!(src.categories.is_empty(), "categories must default to [] for old manifests");
+}
+
+// -----------------------------------------------------------------------
+// CP-2: pending_manual / suppress_pending_launch_warning back-compat
+// -----------------------------------------------------------------------
+
+/// An old `instance.json` with neither `pendingManual` nor
+/// `suppressPendingLaunchWarning` must deserialize to `[]` / `false` (serde
+/// defaults, no schema bump).
+#[test]
+fn cp2_old_manifest_missing_pending_fields_defaults() {
+    let tmp = TempDir::new().unwrap();
+    let old_json = r#"{
+        "schema": 1,
+        "id": "test-id",
+        "name": "Test",
+        "slug": "test",
+        "icon": null,
+        "minecraft": "1.20.1",
+        "loader": { "kind": "vanilla", "version": null },
+        "java": { "major": null, "argsOverride": null, "memoryMb": 2048 },
+        "source": null,
+        "packLocked": false,
+        "mods": [],
+        "created": "2024-01-01T00:00:00Z",
+        "lastPlayed": null,
+        "totalPlaytimeSec": 0
+    }"#;
+    let path = tmp.path().join("instance.json");
+    std::fs::write(&path, old_json).unwrap();
+    let inst = read_manifest_pub(&path).unwrap();
+
+    assert!(
+        inst.pending_manual.is_empty(),
+        "pendingManual must default to [] for old manifests"
+    );
+    assert!(
+        !inst.suppress_pending_launch_warning,
+        "suppressPendingLaunchWarning must default to false for old manifests"
+    );
+}
+
+/// A populated `pending_manual` plus `suppress_pending_launch_warning = true`
+/// survives a write→read round-trip.
+#[test]
+fn cp2_pending_manual_round_trips() {
+    let tmp = TempDir::new().unwrap();
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![PendingManual {
+        project_id: "238222".into(),
+        file_id: "4536804".into(),
+        file_name: "jei-1.20.1.jar".into(),
+        page_url: "https://www.curseforge.com/minecraft/mc-mods/jei/files/4536804".into(),
+        expected_sha1: Some("aabbcc".into()),
+        size: Some(1024),
+    }];
+    inst.suppress_pending_launch_warning = true;
+
+    let path = write_inst(tmp.path(), &inst);
+    let reloaded = read_manifest_pub(&path).unwrap();
+
+    assert_eq!(reloaded.pending_manual.len(), 1);
+    assert_eq!(reloaded.pending_manual[0].file_name, "jei-1.20.1.jar");
+    assert_eq!(
+        reloaded.pending_manual[0].expected_sha1.as_deref(),
+        Some("aabbcc")
+    );
+    assert_eq!(reloaded.pending_manual[0].size, Some(1024));
+    assert!(reloaded.suppress_pending_launch_warning);
+}
+
+// -----------------------------------------------------------------------
+// CP-5: reconcile_pending_manual
+// -----------------------------------------------------------------------
+
+fn pending(file_name: &str, expected_sha1: Option<&str>) -> PendingManual {
+    PendingManual {
+        project_id: "238222".into(),
+        file_id: "4536804".into(),
+        file_name: file_name.to_string(),
+        page_url: "https://www.curseforge.com/minecraft/mc-mods/jei/files/4536804".into(),
+        expected_sha1: expected_sha1.map(|s| s.to_string()),
+        size: None,
+    }
+}
+
+/// Write `content` into `mods_dir/<name>` and return the file's hex SHA-1.
+fn write_jar(mods_dir: &Path, name: &str, content: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    fs::write(mods_dir.join(name), content).unwrap();
+    let mut h = Sha1::new();
+    h.update(content);
+    hex::encode(h.finalize())
+}
+
+#[test]
+fn cp5_reconcile_exact_name_matching_sha1_resolves_enabled() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    let sha = write_jar(mods, "jei.jar", b"jar bytes");
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", Some(&sha))];
+
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert_eq!(resolved.len(), 1);
+    assert!(resolved[0].enabled);
+    assert!(inst.pending_manual.is_empty(), "resolved entry removed");
+    assert_eq!(inst.mods.len(), 1);
+    assert_eq!(inst.mods[0].file_name, "jei.jar");
+    assert!(inst.mods[0].enabled);
+    assert_eq!(inst.mods[0].hashes.get("sha1"), Some(&sha));
+    assert_eq!(inst.mods[0].provider, "curseforge");
+    assert!(inst.mods[0].from_pack);
+}
+
+#[test]
+fn cp5_reconcile_disabled_form_resolves_disabled() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    write_jar(mods, "jei.jar.disabled", b"jar bytes");
+
+    let mut inst = stub_instance(vec![]);
+    // name-only acceptance (no sha) so the .disabled form is accepted on name.
+    inst.pending_manual = vec![pending("jei.jar", None)];
+
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert_eq!(resolved.len(), 1);
+    assert!(!resolved[0].enabled, "disabled-form match → enabled=false");
+    assert!(inst.pending_manual.is_empty());
+    assert_eq!(inst.mods.len(), 1);
+    assert!(!inst.mods[0].enabled);
+}
+
+#[test]
+fn cp5_reconcile_exact_wins_over_disabled() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    write_jar(mods, "jei.jar", b"enabled bytes");
+    write_jar(mods, "jei.jar.disabled", b"disabled bytes");
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", None)];
+
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert_eq!(resolved.len(), 1);
+    assert!(resolved[0].enabled, "exact name wins when both present");
+}
+
+#[test]
+fn cp5_reconcile_wrong_sha1_not_resolved() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    write_jar(mods, "jei.jar", b"jar bytes");
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", Some("deadbeefdeadbeef"))];
+
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert!(resolved.is_empty(), "hash mismatch → not resolved");
+    assert_eq!(inst.pending_manual.len(), 1, "entry stays pending");
+    assert!(inst.mods.is_empty());
+}
+
+#[test]
+fn cp5_reconcile_name_only_accepts() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    write_jar(mods, "jei.jar", b"whatever");
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", None)];
+
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert_eq!(resolved.len(), 1);
+    assert!(inst.mods[0].hashes.get("sha1").is_none(), "no hash recorded for name-only");
+}
+
+#[test]
+fn cp5_reconcile_missing_file_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("absent.jar", None)];
+
+    let resolved = reconcile_pending_manual(&mut inst, tmp.path());
+
+    assert!(resolved.is_empty());
+    assert_eq!(inst.pending_manual.len(), 1);
+    assert!(inst.mods.is_empty());
+}
+
+#[test]
+fn cp5_reconcile_idempotent_and_empties_when_all_resolved() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    write_jar(mods, "a.jar", b"a");
+    write_jar(mods, "b.jar", b"b");
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("a.jar", None), pending("b.jar", None)];
+
+    let first = reconcile_pending_manual(&mut inst, mods);
+    assert_eq!(first.len(), 2);
+    assert!(inst.pending_manual.is_empty(), "list empties when all resolved");
+    assert_eq!(inst.mods.len(), 2);
+
+    // Second call is a no-op — nothing pending, no duplicate ModEntry.
+    let second = reconcile_pending_manual(&mut inst, mods);
+    assert!(second.is_empty());
+    assert_eq!(inst.mods.len(), 2, "idempotent — no duplicate entries");
+}
+
+// -----------------------------------------------------------------------
+// CP-6: manual file import (copy + reconcile)
+// -----------------------------------------------------------------------
+
+/// Copying a correctly-named jar into mods/ then reconciling resolves the entry
+/// (the copy step is `import_manual_file`'s only side effect before reconcile).
+#[test]
+fn cp6_copy_named_jar_then_reconcile_resolves() {
+    let tmp = TempDir::new().unwrap();
+    let src_dir = tmp.path().join("downloads");
+    let mods = tmp.path().join("mods");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&mods).unwrap();
+    fs::write(src_dir.join("jei.jar"), b"jar bytes").unwrap();
+    // import_manual_file copies the picked file under its own basename.
+    fs::copy(src_dir.join("jei.jar"), mods.join("jei.jar")).unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", None)];
+    let resolved = reconcile_pending_manual(&mut inst, &mods);
+
+    assert_eq!(resolved.len(), 1);
+    assert!(inst.pending_manual.is_empty());
+    assert_eq!(inst.mods.len(), 1);
+}
+
+/// Copying an unrelated jar leaves the pending entry untouched.
+#[test]
+fn cp6_unrelated_jar_leaves_pending() {
+    let tmp = TempDir::new().unwrap();
+    let mods = tmp.path();
+    fs::write(mods.join("some-other-mod.jar"), b"jar bytes").unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    inst.pending_manual = vec![pending("jei.jar", None)];
+    let resolved = reconcile_pending_manual(&mut inst, mods);
+
+    assert!(resolved.is_empty());
+    assert_eq!(inst.pending_manual.len(), 1);
+    assert!(inst.mods.is_empty());
+}
+
+/// `set_pending_launch_warning_suppressed_on_disk` flips and persists the flag.
+#[test]
+fn cp3_suppress_pending_launch_warning_persists() {
+    let tmp = TempDir::new().unwrap();
+    let inst = stub_instance(vec![]);
+    let path = write_inst(tmp.path(), &inst);
+
+    assert!(!read_manifest_pub(&path).unwrap().suppress_pending_launch_warning);
+
+    set_pending_launch_warning_suppressed_on_disk(&path, true).unwrap();
+    assert!(read_manifest_pub(&path).unwrap().suppress_pending_launch_warning);
+
+    set_pending_launch_warning_suppressed_on_disk(&path, false).unwrap();
+    assert!(!read_manifest_pub(&path).unwrap().suppress_pending_launch_warning);
 }

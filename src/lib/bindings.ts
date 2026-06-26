@@ -236,6 +236,34 @@ export const commands = {
 	 */
 	setPackLock: (slug: string, locked: boolean) => typedError<null, string>(__TAURI_INVOKE("set_pack_lock", { slug, locked })),
 	/**
+	 *  Persist the per-instance "don't warn me again" choice for the pre-launch
+	 *  missing-mods dialog (CF manual-download UX). Sync, instant local op.
+	 */
+	setPendingLaunchWarningSuppressed: (slug: string, suppressed: boolean) => typedError<null, string>(__TAURI_INVOKE("set_pending_launch_warning_suppressed", { slug, suppressed })),
+	/**
+	 *  Rescan an instance's `mods/` for dropped manual downloads (Re-scan button /
+	 *  fallback). Sync — instant local op, off the task queue. Returns the remaining
+	 *  pending list.
+	 */
+	rescanPendingManual: (slug: string) => typedError<PendingManual[], string>(__TAURI_INVOKE("rescan_pending_manual", { slug })),
+	/**
+	 *  Manual fallback: copy a user-picked / dropped `.jar` into the instance's
+	 *  `mods/` dir under its own file name, then reconcile. Resolves a pending entry
+	 *  when the chosen file is named as the entry expects. Returns the remaining
+	 *  pending list. Sync.
+	 */
+	importManualFile: (slug: string, srcPath: string) => typedError<PendingManual[], string>(__TAURI_INVOKE("import_manual_file", { slug, srcPath })),
+	/**
+	 *  Start a lazy watch on an instance's `mods/` dir (called from the detail page
+	 *  when it mounts with pending files). Idempotent; replaces any prior watch.
+	 */
+	startPendingWatch: (slug: string) => typedError<null, string>(__TAURI_INVOKE("start_pending_watch", { slug })),
+	/**
+	 *  Stop the lazy `mods/` watch for an instance (detail page unmount / list
+	 *  emptied). No-op if a different instance (or none) is being watched.
+	 */
+	stopPendingWatch: (slug: string) => typedError<null, string>(__TAURI_INVOKE("stop_pending_watch", { slug })),
+	/**
 	 *  Persist a `JavaCfg` override to an instance's manifest.
 	 * 
 	 *  When `cfg.use_pack_settings` is `true` the launcher uses this instance's own
@@ -302,6 +330,7 @@ export const events = {
 	installLog: makeEvent<InstallLogPayload>("install://log"),
 	launchExit: makeEvent<LaunchExitPayload>("launch://exit"),
 	launchLog: makeEvent<LaunchLogPayload>("launch://log"),
+	manualResolved: makeEvent<ManualResolvedPayload>("manual://resolved"),
 	runUpdate: makeEvent<RunUpdatePayload>("run://update"),
 	taskProgress: makeEvent<TaskProgressPayload>("task://progress"),
 	taskUpdate: makeEvent<TaskUpdatePayload_Deserialize>("task://update"),
@@ -437,8 +466,18 @@ export type CfManualFile = {
 	fileId: number,
 	/**  Filename as declared by the resolved file. */
 	fileName: string,
-	/**  Best-effort project page URL (projectID-based; slug-based link is a follow-up). */
+	/**
+	 *  Best-effort CurseForge page URL — slug-based exact-file page when available
+	 *  (`resolve_and_build_cf_plan`), else the numeric `…/projects/{id}` redirect.
+	 */
 	pageUrl: string,
+	/**
+	 *  SHA-1 of the file if CF declared one; `None` → name/size match only when the
+	 *  user later drops the jar in (auto-recovery, Pillar 3).
+	 */
+	expectedSha1?: string | null,
+	/**  Declared file size in bytes, if known. */
+	size?: number | null,
 };
 
 /**
@@ -557,6 +596,17 @@ export type Instance = {
 	 *  Old manifests missing this field deserialize as `false`.
 	 */
 	packLocked?: boolean,
+	/**
+	 *  CF files that must be downloaded manually (distribution disabled). Drives the
+	 *  "incomplete pack" badge/panel and the pre-launch warning. Empty for old manifests
+	 *  and packs with no manual files. See `docs/design/cf-manual-download-ux.md`.
+	 */
+	pendingManual?: PendingManual[],
+	/**
+	 *  Per-instance "don't warn me again" for the pre-launch missing-mods dialog.
+	 *  Old manifests deserialize as `false`.
+	 */
+	suppressPendingLaunchWarning?: boolean,
 	mods: ModEntry[],
 	created: string,
 	lastPlayed: string | null,
@@ -710,6 +760,17 @@ export type ManualMod = {
 	pageUrl: string,
 };
 
+/**
+ *  Payload emitted on `manual://resolved` when a pending manual download is
+ *  detected in an instance's `mods/` dir and recorded.
+ */
+export type ManualResolvedPayload = {
+	slug: string,
+	fileName: string,
+	/**  Number of pending manual files still unresolved after this one. */
+	remaining: number,
+};
+
 export type McVersion = {
 	id: string,
 	releaseTime: string,
@@ -854,6 +915,28 @@ export type PackUpdateResult = {
 	failed: number,
 	/**  Files the user must download manually (CF only; empty for mrpack). */
 	manual: CfManualFile[],
+};
+
+/**
+ *  A CurseForge file whose distribution is disabled (`allowModDistribution: false`)
+ *  or which lacks a verifiable hash — the user must download it manually. Persisted on
+ *  the manifest so the "incomplete pack" state survives restarts (see
+ *  `docs/design/cf-manual-download-ux.md`). Cleared by `reconcile_pending_manual` once
+ *  the matching jar appears in `mods/`.
+ */
+export type PendingManual = {
+	/**  CF mod (project) id, stringified to match `ModEntry` convention. */
+	projectId: string,
+	/**  CF file id. */
+	fileId: string,
+	/**  Exact filename the user must drop into `mods/`. */
+	fileName: string,
+	/**  Slug-based exact-file URL (or numeric fallback) to fetch the jar from. */
+	pageUrl: string,
+	/**  SHA-1 to verify the dropped file against; `None` → name/size match only. */
+	expectedSha1?: string | null,
+	/**  Declared size in bytes for the name-only acceptance fallback. */
+	size?: number | null,
 };
 
 /**

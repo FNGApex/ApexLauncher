@@ -12,6 +12,7 @@ import {
   type RunLogPayload,
 } from "@/lib/ipc";
 import { useAppStore, useUiStore, type Task, type RunState, type RunLogLine } from "@/lib/store";
+import { queryClient } from "@/lib/query";
 
 /** Top-level chrome: fixed sidebar + scrollable content area.
  *
@@ -106,6 +107,18 @@ export function AppShell() {
       if (preparingSlug) {
         appendLog(preparingSlug, { stream: `install:${stream}`, line });
       }
+    }).then((fn) => {
+      if (cancelled) fn();
+      else reg(fn);
+    }).catch(console.error);
+
+    // CF manual-download auto-recovery: when a dropped jar is detected, refresh
+    // the affected instance so the Pending panel + badge re-derive from the
+    // updated manifest (and the instances list, for its incomplete indicator).
+    events.manualResolved.listen((event) => {
+      const { slug } = event.payload;
+      queryClient.invalidateQueries({ queryKey: ["instance", slug] });
+      queryClient.invalidateQueries({ queryKey: ["instances"] });
     }).then((fn) => {
       if (cancelled) fn();
       else reg(fn);

@@ -39,6 +39,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 async-trait = "0.1"
 thiserror = "1"
+# CF manual-download auto-recovery: watch an open instance's mods/ dir for dropped
+# jars. Exact pins (MSRV 1.85; project on 1.96). See docs/design/cf-manual-download-ux.md.
+notify = "=8.2.0"
+notify-debouncer-full = "=0.7.0"
 specta = { version = "=2.0.0-rc.25", features = ["serde_json", "function"] }
 specta-typescript = "=0.0.12"
 tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }

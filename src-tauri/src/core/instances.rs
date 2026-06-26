@@ -126,6 +126,30 @@ pub struct ModEntry {
     pub summary: Option<String>,
 }
 
+/// A CurseForge file whose distribution is disabled (`allowModDistribution: false`)
+/// or which lacks a verifiable hash — the user must download it manually. Persisted on
+/// the manifest so the "incomplete pack" state survives restarts (see
+/// `docs/design/cf-manual-download-ux.md`). Cleared by `reconcile_pending_manual` once
+/// the matching jar appears in `mods/`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingManual {
+    /// CF mod (project) id, stringified to match `ModEntry` convention.
+    pub project_id: String,
+    /// CF file id.
+    pub file_id: String,
+    /// Exact filename the user must drop into `mods/`.
+    pub file_name: String,
+    /// Slug-based exact-file URL (or numeric fallback) to fetch the jar from.
+    pub page_url: String,
+    /// SHA-1 to verify the dropped file against; `None` → name/size match only.
+    #[serde(default)]
+    pub expected_sha1: Option<String>,
+    /// Declared size in bytes for the name-only acceptance fallback.
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Instance {
@@ -143,6 +167,15 @@ pub struct Instance {
     /// Old manifests missing this field deserialize as `false`.
     #[serde(default)]
     pub pack_locked: bool,
+    /// CF files that must be downloaded manually (distribution disabled). Drives the
+    /// "incomplete pack" badge/panel and the pre-launch warning. Empty for old manifests
+    /// and packs with no manual files. See `docs/design/cf-manual-download-ux.md`.
+    #[serde(default)]
+    pub pending_manual: Vec<PendingManual>,
+    /// Per-instance "don't warn me again" for the pre-launch missing-mods dialog.
+    /// Old manifests deserialize as `false`.
+    #[serde(default)]
+    pub suppress_pending_launch_warning: bool,
     pub mods: Vec<ModEntry>,
     pub created: String,
     pub last_played: Option<String>,
@@ -234,6 +267,8 @@ pub fn create(app: &AppHandle, req: CreateInstanceReq) -> Result<Instance, Strin
         },
         source: None,
         pack_locked: false,
+        pending_manual: Vec::new(),
+        suppress_pending_launch_warning: false,
         mods: Vec::new(),
         created: chrono::Utc::now().to_rfc3339(),
         last_played: None,
@@ -369,6 +404,119 @@ fn scan_mods(mods_dir: &Path, instance: &Instance) -> Vec<FolderMod> {
     }
     out.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
     out
+}
+
+// ---------------------------------------------------------------------------
+// CF manual-download auto-recovery (CP-5)
+// ---------------------------------------------------------------------------
+
+/// One pending entry that `reconcile_pending_manual` resolved: the file appeared
+/// in `mods/` and validated. Used to drive `manual://resolved` events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedManual {
+    /// The base file name (no `.disabled` suffix) that was resolved.
+    pub file_name: String,
+    /// `true` when matched via the exact name, `false` when matched via the
+    /// `.disabled` form (the recorded `ModEntry` mirrors this).
+    pub enabled: bool,
+}
+
+/// Compute the lowercase hex SHA-1 of a file, or `None` if it can't be read.
+fn sha1_file(path: &Path) -> Option<String> {
+    use sha1::{Digest, Sha1};
+    use std::io::Read;
+    let mut f = fs::File::open(path).ok()?;
+    let mut hasher = Sha1::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(hex::encode(hasher.finalize()))
+}
+
+/// Try to resolve a single pending entry against `mods/`. Returns
+/// `Some((enabled, computed_sha1))` when the file is present and validates:
+/// - the exact `mods/<file_name>` (→ `enabled = true`) takes precedence over the
+///   `mods/<file_name>.disabled` form (→ `enabled = false`);
+/// - when `expected_sha1` is set, the file's SHA-1 must match (else `None`);
+/// - otherwise the file is accepted on name alone.
+fn try_resolve_pending(p: &PendingManual, mods_dir: &Path) -> Option<(bool, Option<String>)> {
+    let exact = mods_dir.join(&p.file_name);
+    let disabled = mods_dir.join(format!("{}.disabled", p.file_name));
+
+    let (path, enabled) = if exact.is_file() {
+        (exact, true)
+    } else if disabled.is_file() {
+        (disabled, false)
+    } else {
+        return None;
+    };
+
+    match &p.expected_sha1 {
+        Some(expected) => {
+            let computed = sha1_file(&path)?;
+            if computed.eq_ignore_ascii_case(expected) {
+                Some((enabled, Some(computed)))
+            } else {
+                None
+            }
+        }
+        // Name-only acceptance (no declared hash).
+        None => Some((enabled, None)),
+    }
+}
+
+/// Inspect `mods/` against `inst.pending_manual`. For each pending entry whose
+/// file now exists and validates, remove it from `pending_manual` and append a
+/// real `ModEntry`. Returns the list of resolutions (for event emission).
+///
+/// Pure (a dir read + optional hash, no network) and **idempotent** — it only
+/// acts on entries still in `pending_manual`, so a second call is a no-op once
+/// everything is resolved.
+pub fn reconcile_pending_manual(inst: &mut Instance, mods_dir: &Path) -> Vec<ResolvedManual> {
+    let pending = std::mem::take(&mut inst.pending_manual);
+    let mut resolved = Vec::new();
+    let mut still_pending = Vec::new();
+
+    for p in pending {
+        match try_resolve_pending(&p, mods_dir) {
+            Some((enabled, sha1_opt)) => {
+                // Defensive idempotency: don't double-record if a ModEntry for
+                // this file already exists.
+                if !inst.mods.iter().any(|m| m.file_name == p.file_name) {
+                    let mut hashes = BTreeMap::new();
+                    if let Some(h) = sha1_opt {
+                        hashes.insert("sha1".to_string(), h);
+                    }
+                    inst.mods.push(ModEntry {
+                        provider: "curseforge".to_string(),
+                        project_id: p.project_id.clone(),
+                        version_id: p.file_id.clone(),
+                        file_name: p.file_name.clone(),
+                        hashes,
+                        enabled,
+                        side: "both".to_string(),
+                        from_pack: true,
+                        name: None,
+                        icon_url: None,
+                        summary: None,
+                    });
+                }
+                resolved.push(ResolvedManual {
+                    file_name: p.file_name.clone(),
+                    enabled,
+                });
+            }
+            None => still_pending.push(p),
+        }
+    }
+
+    inst.pending_manual = still_pending;
+    resolved
 }
 
 /// Lowercase, alphanumerics kept, runs of anything else collapsed to a single `-`.
@@ -517,6 +665,31 @@ pub fn set_pack_lock(app: &AppHandle, slug: &str, locked: bool) -> Result<(), St
         return Err(format!("Instance '{slug}' not found"));
     }
     set_pack_lock_on_disk(&path, locked)
+}
+
+/// Persist the per-instance "don't warn me again" choice for the pre-launch
+/// missing-mods dialog (CF manual-download UX, CP-3).
+pub fn set_pending_launch_warning_suppressed_on_disk(
+    manifest_path: &Path,
+    suppressed: bool,
+) -> Result<(), String> {
+    let mut inst = read_manifest(manifest_path)?;
+    inst.suppress_pending_launch_warning = suppressed;
+    write_manifest(manifest_path, &inst)
+}
+
+/// AppHandle-aware wrapper for [`set_pending_launch_warning_suppressed_on_disk`].
+pub fn set_pending_launch_warning_suppressed(
+    app: &AppHandle,
+    slug: &str,
+    suppressed: bool,
+) -> Result<(), String> {
+    let slug = validate_slug(slug)?;
+    let path = store::instances_dir(app)?.join(&slug).join("instance.json");
+    if !path.is_file() {
+        return Err(format!("Instance '{slug}' not found"));
+    }
+    set_pending_launch_warning_suppressed_on_disk(&path, suppressed)
 }
 
 // ---------------------------------------------------------------------------

@@ -718,6 +718,188 @@ impl InstallSink for TauriInstallSink {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CF manual-download auto-recovery (CP-5): rescan + lazy mods/ watcher
+// ---------------------------------------------------------------------------
+
+/// Payload emitted on `manual://resolved` when a pending manual download is
+/// detected in an instance's `mods/` dir and recorded.
+#[derive(Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+#[tauri_specta(event_name = "manual://resolved")]
+struct ManualResolvedPayload {
+    slug: String,
+    file_name: String,
+    /// Number of pending manual files still unresolved after this one.
+    remaining: u32,
+}
+
+/// The single open-instance file watch. `notify-debouncer-full` collapses
+/// editor/AV/temp churn; dropping the debouncer stops the watch.
+type PendingDebouncer = notify_debouncer_full::Debouncer<
+    notify::RecommendedWatcher,
+    notify_debouncer_full::RecommendedCache,
+>;
+
+/// Tauri-managed state holding at most the currently-open instance's mods/ watch
+/// (lazy, detail-page scoped — there is no app-wide watcher).
+struct PendingWatcher {
+    inner: std::sync::Mutex<Option<(String, PendingDebouncer)>>,
+}
+
+/// The `mc/mods/` directory for an instance.
+fn instance_mods_dir(app: &tauri::AppHandle, slug: &str) -> Result<std::path::PathBuf, String> {
+    Ok(core::store::instances_dir(app)?
+        .join(slug)
+        .join("mc")
+        .join("mods"))
+}
+
+/// Emit one `manual://resolved` event (best-effort).
+fn emit_manual_resolved(app: &tauri::AppHandle, slug: &str, file_name: &str, remaining: u32) {
+    use tauri::Emitter as _;
+    let _ = app.emit(
+        "manual://resolved",
+        ManualResolvedPayload {
+            slug: slug.to_string(),
+            file_name: file_name.to_string(),
+            remaining,
+        },
+    );
+}
+
+/// Load the instance, reconcile its `pending_manual` against `mods/`, persist if
+/// anything resolved, emit `manual://resolved` per resolution, and return the
+/// remaining pending list. Idempotent; the shared path for the command, the
+/// watcher, and the launch-time scan.
+fn reconcile_and_emit(
+    app: &tauri::AppHandle,
+    slug: &str,
+) -> Result<Vec<instances::PendingManual>, String> {
+    let mut inst = instances::load_manifest(app, slug)?;
+    if inst.pending_manual.is_empty() {
+        return Ok(inst.pending_manual);
+    }
+    let mods_dir = instance_mods_dir(app, slug)?;
+    let resolved = instances::reconcile_pending_manual(&mut inst, &mods_dir);
+    if !resolved.is_empty() {
+        instances::save_manifest(app, slug, &inst)?;
+        let remaining = inst.pending_manual.len() as u32;
+        for r in &resolved {
+            emit_manual_resolved(app, slug, &r.file_name, remaining);
+        }
+    }
+    Ok(inst.pending_manual)
+}
+
+/// Rescan an instance's `mods/` for dropped manual downloads (Re-scan button /
+/// fallback). Sync — instant local op, off the task queue. Returns the remaining
+/// pending list.
+#[tauri::command]
+#[specta::specta]
+fn rescan_pending_manual(
+    app: tauri::AppHandle,
+    slug: String,
+) -> Result<Vec<instances::PendingManual>, String> {
+    reconcile_and_emit(&app, &slug)
+}
+
+/// Manual fallback: copy a user-picked / dropped `.jar` into the instance's
+/// `mods/` dir under its own file name, then reconcile. Resolves a pending entry
+/// when the chosen file is named as the entry expects. Returns the remaining
+/// pending list. Sync.
+#[tauri::command]
+#[specta::specta]
+fn import_manual_file(
+    app: tauri::AppHandle,
+    slug: String,
+    src_path: String,
+) -> Result<Vec<instances::PendingManual>, String> {
+    let slug = instances::validate_slug(&slug)?;
+    let src = std::path::Path::new(&src_path);
+    if !src.is_file() {
+        return Err(format!("file not found: {src_path}"));
+    }
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "invalid source path".to_string())?;
+    // Rejects non-.jar, path separators, `..` — same guard as add_mod's file names.
+    let name = instances::validate_mod_file_name(name)?;
+
+    let mods_dir = instance_mods_dir(&app, &slug)?;
+    std::fs::create_dir_all(&mods_dir).map_err(|e| format!("could not create mods dir: {e}"))?;
+    let dest = mods_dir.join(&name);
+    std::fs::copy(src, &dest).map_err(|e| format!("could not copy file: {e}"))?;
+
+    reconcile_and_emit(&app, &slug)
+}
+
+/// Start a lazy watch on an instance's `mods/` dir (called from the detail page
+/// when it mounts with pending files). Idempotent; replaces any prior watch.
+#[tauri::command]
+#[specta::specta]
+fn start_pending_watch(
+    app: tauri::AppHandle,
+    watcher: tauri::State<'_, PendingWatcher>,
+    slug: String,
+) -> Result<(), String> {
+    let slug = instances::validate_slug(&slug)?;
+    let mods_dir = instance_mods_dir(&app, &slug)?;
+    if !mods_dir.is_dir() {
+        return Err(format!("mods dir not found for '{slug}'"));
+    }
+
+    let mut guard = watcher.inner.lock().unwrap();
+    if let Some((cur, _)) = guard.as_ref() {
+        if cur == &slug {
+            return Ok(()); // already watching this instance
+        }
+    }
+
+    let app_h = app.clone();
+    let slug_h = slug.clone();
+    let mut debouncer = notify_debouncer_full::new_debouncer(
+        std::time::Duration::from_millis(800),
+        None,
+        move |result: notify_debouncer_full::DebounceEventResult| {
+            // On any debounced batch, reconcile. `reconcile_pending_manual` only
+            // acts on files matching a pending entry, so temp/AV churn that the
+            // debouncer didn't already collapse is a cheap no-op here.
+            if result.is_ok() {
+                if let Err(e) = reconcile_and_emit(&app_h, &slug_h) {
+                    log::warn!("pending watch reconcile failed for '{slug_h}': {e}");
+                }
+            }
+        },
+    )
+    .map_err(|e| format!("could not create file watcher: {e}"))?;
+
+    debouncer
+        .watch(&mods_dir, notify::RecursiveMode::NonRecursive)
+        .map_err(|e| format!("could not watch mods dir: {e}"))?;
+
+    *guard = Some((slug, debouncer));
+    Ok(())
+}
+
+/// Stop the lazy `mods/` watch for an instance (detail page unmount / list
+/// emptied). No-op if a different instance (or none) is being watched.
+#[tauri::command]
+#[specta::specta]
+fn stop_pending_watch(
+    watcher: tauri::State<'_, PendingWatcher>,
+    slug: String,
+) -> Result<(), String> {
+    let mut guard = watcher.inner.lock().unwrap();
+    if let Some((cur, _)) = guard.as_ref() {
+        if cur == &slug {
+            *guard = None; // drops the debouncer → stops watching
+        }
+    }
+    Ok(())
+}
+
 /// Launch a vanilla Minecraft instance.
 ///
 /// Orchestrates: load instance → resolve → download → ensure Java →
@@ -746,7 +928,25 @@ async fn launch_instance(
     let inst_detail = instances::get(&app, &slug).map_err(|e| {
         format!("failed to load instance '{slug}': {e}")
     })?;
-    let inst = inst_detail.instance;
+    let mut inst = inst_detail.instance;
+
+    // --- 1b. CF manual-download auto-recovery (primary safety net): heal any
+    //         pending entries whose jar was dropped into mods/ while the detail
+    //         page was closed, then persist — so a launch reflects reality even
+    //         if the user never opened the Pending panel. ---
+    if !inst.pending_manual.is_empty() {
+        let mods_dir = instance_mods_dir(&app, &slug)?;
+        let resolved = instances::reconcile_pending_manual(&mut inst, &mods_dir);
+        if !resolved.is_empty() {
+            if let Err(e) = instances::save_manifest(&app, &slug, &inst) {
+                log::warn!("launch: persist reconciled pending_manual failed: {e}");
+            }
+            let remaining = inst.pending_manual.len() as u32;
+            for r in &resolved {
+                emit_manual_resolved(&app, &slug, &r.file_name, remaining);
+            }
+        }
+    }
 
     // --- 2. Reject if already active (keyed by slug; only a Running/Preparing
     //        entry blocks — terminal leftovers are reusable. Check before async). ---
@@ -1650,6 +1850,18 @@ fn remove_mod(app: tauri::AppHandle, slug: String, file_name: String) -> Result<
 #[specta::specta]
 fn set_pack_lock(app: tauri::AppHandle, slug: String, locked: bool) -> Result<(), String> {
     instances::set_pack_lock(&app, &slug, locked)
+}
+
+/// Persist the per-instance "don't warn me again" choice for the pre-launch
+/// missing-mods dialog (CF manual-download UX). Sync, instant local op.
+#[tauri::command]
+#[specta::specta]
+fn set_pending_launch_warning_suppressed(
+    app: tauri::AppHandle,
+    slug: String,
+    suppressed: bool,
+) -> Result<(), String> {
+    instances::set_pending_launch_warning_suppressed(&app, &slug, suppressed)
 }
 
 // ---------------------------------------------------------------------------
@@ -2818,6 +3030,10 @@ impl TaskJob for ImportCfZipJob {
                 }
                 // LB-1: instances created from a modpack start locked.
                 instance.pack_locked = true;
+                // CF manual-download UX: persist the manual list so the incomplete-pack
+                // badge/panel and pre-launch warning survive restarts (CP-2).
+                instance.pending_manual =
+                    manual.iter().map(instances::PendingManual::from).collect();
                 match instances::save_manifest(&self.app, &inst.slug, &instance) {
                     Ok(_) => Ok(CfImportResult {
                         slug: inst.slug,
@@ -3275,6 +3491,10 @@ impl TaskJob for UpdateModpackJob {
             src.file_id = self.resolved_version_id.clone();
             src.pack_version = self.resolved_version_name.clone();
         }
+        // CF manual-download UX: refresh the persisted manual list to the new pack
+        // version's manual files (CP-2). Empty for mrpack/non-CF updates.
+        instance.pending_manual =
+            manual.iter().map(instances::PendingManual::from).collect();
         if let Err(e) = instances::save_manifest(&self.app, &self.slug, &instance) {
             ctx.finish_failed(e).await;
             return;
@@ -3505,6 +3725,11 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             remove_mod,
             update_mod,
             set_pack_lock,
+            set_pending_launch_warning_suppressed,
+            rescan_pending_manual,
+            import_manual_file,
+            start_pending_watch,
+            stop_pending_watch,
             set_instance_java,
             validate_java_path,
             import_mrpack,
@@ -3522,6 +3747,7 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             TaskProgressPayload,
             TaskUpdatePayload,
             InstallLogPayload,
+            ManualResolvedPayload,
         ])
 }
 
@@ -3537,6 +3763,11 @@ pub fn run() {
 
     // Cancel token for in-flight begin_login.
     let cancel_token: CancelToken = std::sync::Mutex::new(None);
+
+    // CF manual-download auto-recovery: holds the single open-instance mods/ watch.
+    let pending_watcher = PendingWatcher {
+        inner: std::sync::Mutex::new(None),
+    };
 
     let builder = make_builder();
 
@@ -3590,6 +3821,7 @@ pub fn run() {
         .manage(registry)
         .manage(prep_semaphore)
         .manage(cancel_token)
+        .manage(pending_watcher)
         .setup(move |app| {
             // Mount typed event registry so Event::listen / Event::emit resolve
             // channel names at runtime (required when collect_events! is used).

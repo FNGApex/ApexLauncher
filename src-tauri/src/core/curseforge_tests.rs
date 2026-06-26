@@ -705,6 +705,51 @@ async fn get_file_returns_http_error_on_404() {
     );
 }
 
+// ── get_mod_slug ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn get_mod_slug_parses_data_slug() {
+    let client = CapturingMockClient::new(vec![MockResp::ok(CF_MOD_FIXTURE)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let slug = provider.get_mod_slug(&client, "238222").await.unwrap();
+
+    assert_eq!(slug, Some("jei".to_string()));
+    let urls = client.captured_urls().await;
+    assert!(
+        urls[0].ends_with("/v1/mods/238222"),
+        "unexpected url: {}",
+        urls[0]
+    );
+}
+
+#[tokio::test]
+async fn get_mod_slug_missing_slug_returns_none() {
+    // A `/v1/mods/{id}` response with no `slug` field → Ok(None) (numeric fallback).
+    const NO_SLUG: &str = r#"{"data":{"id":238222,"name":"Some Mod"}}"#;
+    let client = CapturingMockClient::new(vec![MockResp::ok(NO_SLUG)]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let slug = provider.get_mod_slug(&client, "238222").await.unwrap();
+
+    assert_eq!(slug, None);
+}
+
+#[tokio::test]
+async fn get_mod_slug_key_absent_returns_key_missing_without_http() {
+    let client = CapturingMockClient::new(vec![]);
+    let provider = CurseForgeProvider::new(None);
+
+    let err = provider.get_mod_slug(&client, "238222").await.unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::KeyMissing),
+        "expected KeyMissing, got {:?}",
+        err
+    );
+    assert_eq!(client.request_count().await, 0);
+}
+
 // ── get_project: fixture → PackInfo ───────────────────────────────────────
 
 const CF_MOD_FIXTURE: &str = include_str!("fixtures/cf_mod_jei.json");
