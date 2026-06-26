@@ -1987,3 +1987,152 @@ fn d3_mixed_scenario_merged_is_correct() {
     );
     assert_eq!(plan.merged.len(), 3, "merged must have exactly 3 entries");
 }
+
+// ── FTB pack planner (CP-2) ──────────────────────────────────────────────
+
+use crate::core::ftb::{FtbCurseforge, FtbFile, FtbVersionManifest};
+
+fn ftb_file(
+    name: &str,
+    path: &str,
+    url: &str,
+    sha1: &str,
+    ftype: &str,
+    serveronly: bool,
+    cf: Option<(u64, u64)>,
+) -> FtbFile {
+    FtbFile {
+        name: name.to_string(),
+        path: path.to_string(),
+        url: url.to_string(),
+        sha1: sha1.to_string(),
+        size: 100,
+        file_type: ftype.to_string(),
+        clientonly: false,
+        serveronly,
+        optional: false,
+        curseforge: cf.map(|(project, file)| FtbCurseforge { project, file }),
+    }
+}
+
+fn ftb_manifest(files: Vec<FtbFile>) -> FtbVersionManifest {
+    FtbVersionManifest {
+        name: "1.0".to_string(),
+        manifest_type: "release".to_string(),
+        targets: vec![],
+        specs: None,
+        files,
+    }
+}
+
+#[test]
+fn ftb_dest_path_strips_dot_slash() {
+    assert_eq!(ftb_dest_path("./mods/", "jei.jar"), "mods/jei.jar");
+    assert_eq!(ftb_dest_path("./config/foo/", "a.json"), "config/foo/a.json");
+    assert_eq!(ftb_dest_path("./", "x.jar"), "x.jar");
+    assert_eq!(ftb_dest_path("", "y.jar"), "y.jar");
+}
+
+#[test]
+fn build_ftb_pack_plan_routes_file_kinds() {
+    use std::collections::HashMap;
+    let tmp = mc_dir();
+    let mc = tmp.path();
+
+    let manifest = ftb_manifest(vec![
+        // FTB-hosted mod → item + ftb ModEntry
+        ftb_file("a.jar", "./mods/", "https://ftb.cdn/a.jar", "aaa", "mod", false, None),
+        // FTB-hosted config → item only (no ModEntry)
+        ftb_file("opts.txt", "./config/", "https://ftb.cdn/opts.txt", "bbb", "config", false, None),
+        // CF-referenced normal → item + curseforge ModEntry
+        ftb_file("b.jar", "./mods/", "", "", "mod", false, Some((111, 222))),
+        // CF-referenced manual (resolves to url=None) → CfManualFile
+        ftb_file("c.jar", "./mods/", "", "", "mod", false, Some((333, 444))),
+        // serveronly → skipped
+        ftb_file("s.jar", "./mods/", "https://ftb.cdn/s.jar", "ddd", "mod", true, None),
+    ]);
+
+    let mut resolved = HashMap::new();
+    resolved.insert(
+        (111u64, 222u64),
+        version_file_with(Some("https://cf.cdn/b.jar"), "b.jar", &[("sha1", "ccc")]),
+    );
+    resolved.insert((333u64, 444u64), version_file_with(None, "c.jar", &[]));
+
+    let plan = build_ftb_pack_plan(&manifest, &resolved, mc).unwrap();
+
+    assert_eq!(plan.items.len(), 3, "a.jar + opts.txt + b.jar");
+    assert_eq!(plan.mods.len(), 2, "a.jar(ftb) + b.jar(curseforge)");
+    assert_eq!(plan.manual.len(), 1, "c.jar manual");
+    assert_eq!(plan.skipped, vec!["s.jar"]);
+
+    // dest paths honor `path`
+    assert!(plan.items.iter().any(|i| i.dest == mc.join("mods/a.jar")));
+    assert!(plan.items.iter().any(|i| i.dest == mc.join("config/opts.txt")));
+
+    let ftb_mod = plan.mods.iter().find(|m| m.file_name == "a.jar").unwrap();
+    assert_eq!(ftb_mod.provider, "ftb");
+    let cf_mod = plan.mods.iter().find(|m| m.file_name == "b.jar").unwrap();
+    assert_eq!(cf_mod.provider, "curseforge");
+    assert_eq!(cf_mod.project_id, "111");
+    assert_eq!(cf_mod.version_id, "222");
+
+    assert_eq!(plan.manual[0].project_id, 333);
+    assert_eq!(plan.manual[0].file_id, 444);
+}
+
+#[test]
+fn build_ftb_pack_plan_rejects_path_traversal() {
+    use std::collections::HashMap;
+    let tmp = mc_dir();
+    let manifest = ftb_manifest(vec![ftb_file(
+        "evil.jar",
+        "../../etc/",
+        "https://ftb.cdn/evil.jar",
+        "aaa",
+        "mod",
+        false,
+        None,
+    )]);
+    let result = build_ftb_pack_plan(&manifest, &HashMap::new(), tmp.path());
+    assert!(matches!(result, Err(ModpackError::UnsafePath(_))), "got {result:?}");
+}
+
+#[tokio::test]
+async fn resolve_and_build_ftb_plan_dedups_cf_resolution() {
+    // Two manifest files reference the SAME CF (111,222); one references (333,444).
+    // → exactly 2 get_file calls (dedup). Queue exactly 2 responses; a 3rd call
+    // would underflow the mock.
+    let tmp = mc_dir();
+    let cf_file = include_str!("fixtures/cf_file.json");
+    let manifest = ftb_manifest(vec![
+        ftb_file("m1.jar", "./mods/", "", "", "mod", false, Some((111, 222))),
+        ftb_file("m2.jar", "./mods/", "", "", "mod", false, Some((111, 222))),
+        ftb_file("m3.jar", "./mods/", "", "", "mod", false, Some((333, 444))),
+    ]);
+    let client = MockCfClient::new(vec![
+        MockResp(200, cf_file.to_string()),
+        MockResp(200, cf_file.to_string()),
+    ]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let plan = resolve_and_build_ftb_plan(&provider, &client, &manifest, tmp.path())
+        .await
+        .expect("two distinct CF resolutions should suffice");
+
+    assert_eq!(plan.items.len(), 3, "one download item per manifest file");
+    assert!(plan.failed.is_empty());
+}
+
+#[tokio::test]
+async fn resolve_and_build_ftb_plan_key_missing_aborts() {
+    let tmp = mc_dir();
+    let manifest = ftb_manifest(vec![ftb_file(
+        "m.jar", "./mods/", "", "", "mod", false, Some((111, 222)),
+    )]);
+    let client = MockCfClient::new(vec![]); // no key → no HTTP
+    let provider = CurseForgeProvider::new(None);
+
+    let result = resolve_and_build_ftb_plan(&provider, &client, &manifest, tmp.path()).await;
+    assert!(matches!(result, Err(ModpackError::ResolverKeyMissing)), "got {result:?}");
+}

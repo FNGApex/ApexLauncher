@@ -653,6 +653,231 @@ pub async fn resolve_and_build_cf_plan(
     Ok(plan)
 }
 
+// ── FTB pack planner ──────────────────────────────────────────────────────────
+
+/// The result of [`build_ftb_pack_plan`] — same shape family as [`CfPackPlan`], so
+/// it feeds the existing `remap_to_staging`/`promote_staging`/`execute_plan_cancellable`
+/// pipeline unchanged.
+#[derive(Debug, Clone)]
+pub struct FtbPackPlan {
+    /// Download items ready for the engine (FTB-CDN + resolved CF files).
+    pub items: Vec<DownloadItem>,
+    /// Mod entries for files that auto-resolved to a download (`type=="mod"`).
+    pub mods: Vec<ModEntry>,
+    /// CF-referenced files the user must download manually (distribution disabled).
+    pub manual: Vec<CfManualFile>,
+    /// Files skipped (`serveronly`, or neither url nor CF ref).
+    pub skipped: Vec<String>,
+    /// CF-referenced files whose `get_file` resolution itself failed.
+    pub failed: Vec<CfResolveFailure>,
+}
+
+/// Dest path for an FTB manifest file: strip a leading `./` / `/` from `path`,
+/// join `name`, forward-slash relative (fed to `validate_relative_path`).
+pub fn ftb_dest_path(path: &str, name: &str) -> String {
+    let p = path
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .trim_end_matches('/');
+    if p.is_empty() {
+        name.to_string()
+    } else {
+        format!("{p}/{name}")
+    }
+}
+
+/// Build an [`FtbPackPlan`] from a version manifest + the resolved CF-referenced files.
+///
+/// `resolved_cf` maps `(curseforge.project, curseforge.file)` → the `VersionFile` from
+/// `CurseForgeProvider::get_file`. FTB-hosted files (non-empty `url`) use their own
+/// url+sha1; CF-referenced files use the resolved `VersionFile`, falling back to a
+/// `CfManualFile` when distribution is disabled (url=None) — reusing the CF manual
+/// pipeline verbatim. `serveronly` files are skipped; `optional` files are included.
+/// CF refs absent from `resolved_cf` (resolution failed upstream) are skipped here and
+/// recorded in `failed` by [`resolve_and_build_ftb_plan`].
+///
+/// # Errors
+/// - [`ModpackError::UnsafePath`] — a computed dest path is unsafe (`..`, absolute, …).
+pub fn build_ftb_pack_plan(
+    manifest: &crate::core::ftb::FtbVersionManifest,
+    resolved_cf: &std::collections::HashMap<(u64, u64), crate::core::providers::VersionFile>,
+    mc_dir: &Path,
+) -> Result<FtbPackPlan, ModpackError> {
+    let mut items: Vec<DownloadItem> = Vec::new();
+    let mut mods: Vec<ModEntry> = Vec::new();
+    let mut manual: Vec<CfManualFile> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    for file in &manifest.files {
+        if file.serveronly {
+            skipped.push(file.name.clone());
+            continue;
+        }
+
+        let rel = ftb_dest_path(&file.path, &file.name);
+        validate_relative_path(&rel)?;
+        let dest = mc_dir.join(&rel);
+
+        if !file.url.is_empty() {
+            // FTB-CDN hosted file.
+            let expected_hash = if file.sha1.is_empty() {
+                None
+            } else {
+                Some(ExpectedHash::Sha1(file.sha1.clone()))
+            };
+            items.push(DownloadItem {
+                url: file.url.clone(),
+                dest,
+                expected_hash,
+                size: if file.size > 0 { Some(file.size) } else { None },
+            });
+            // FTB-hosted jars have no provider project/version id; record a bare
+            // pack-managed entry only for actual mods (config/script/resource files
+            // are pure download items, like mrpack overrides).
+            if file.file_type.eq_ignore_ascii_case("mod") {
+                let mut hashes = BTreeMap::new();
+                if !file.sha1.is_empty() {
+                    hashes.insert("sha1".to_string(), file.sha1.clone());
+                }
+                mods.push(ModEntry {
+                    provider: "ftb".to_string(),
+                    project_id: String::new(),
+                    version_id: String::new(),
+                    file_name: file.name.clone(),
+                    hashes,
+                    enabled: true,
+                    side: "both".to_string(),
+                    from_pack: true,
+                    name: None,
+                    icon_url: None,
+                    summary: None,
+                });
+            }
+        } else if let Some(cf) = &file.curseforge {
+            // CurseForge-referenced — resolved out-of-band via `get_file`.
+            match resolved_cf.get(&(cf.project, cf.file)) {
+                Some(vf) => {
+                    let sha1 = vf.hashes.get("sha1");
+                    match (&vf.url, sha1) {
+                        (Some(url), Some(hash)) => {
+                            items.push(DownloadItem {
+                                url: url.clone(),
+                                dest,
+                                expected_hash: Some(ExpectedHash::Sha1(hash.clone())),
+                                size: vf.size,
+                            });
+                            mods.push(ModEntry {
+                                provider: "curseforge".to_string(),
+                                project_id: cf.project.to_string(),
+                                version_id: cf.file.to_string(),
+                                file_name: file.name.clone(),
+                                hashes: vf.hashes.clone().into_iter().collect(),
+                                enabled: true,
+                                side: "both".to_string(),
+                                from_pack: true,
+                                name: None,
+                                icon_url: None,
+                                summary: None,
+                            });
+                        }
+                        // Distribution disabled / hashless → manual (reuse CF pipeline).
+                        _ => {
+                            manual.push(CfManualFile {
+                                project_id: cf.project,
+                                file_id: cf.file,
+                                file_name: file.name.clone(),
+                                page_url: cf_file_page_url(None, cf.project, cf.file),
+                                expected_sha1: vf.hashes.get("sha1").cloned(),
+                                size: vf.size,
+                            });
+                        }
+                    }
+                }
+                // Resolution failed upstream (recorded in `failed`); skip here.
+                None => {
+                    log::warn!(
+                        "modpack: FTB CF-referenced file '{}' (project={} file={}) not resolved — counted as failed",
+                        file.name, cf.project, cf.file
+                    );
+                }
+            }
+        } else {
+            // Neither a direct url nor a CF ref — nothing to download.
+            log::warn!(
+                "modpack: FTB file '{}' has neither url nor curseforge ref — skipped",
+                file.name
+            );
+            skipped.push(file.name.clone());
+        }
+    }
+
+    Ok(FtbPackPlan {
+        items,
+        mods,
+        manual,
+        skipped,
+        failed: Vec::new(),
+    })
+}
+
+/// Resolve a version manifest's CF-referenced files via `CurseForgeProvider::get_file`,
+/// then build the [`FtbPackPlan`]. The async seam (mirrors [`resolve_and_build_cf_plan`]);
+/// injectable `ProviderHttpClient` → mock-testable, no live network.
+///
+/// # Errors
+/// - [`ModpackError::ResolverKeyMissing`] — no CF API key (FTB jars are CF-hosted, so
+///   nothing can resolve; abort rather than produce an all-manual pack).
+/// - [`ModpackError::UnsafePath`] — propagated from [`build_ftb_pack_plan`].
+pub async fn resolve_and_build_ftb_plan(
+    cf_provider: &crate::core::curseforge::CurseForgeProvider,
+    client: &dyn crate::core::providers::ProviderHttpClient,
+    manifest: &crate::core::ftb::FtbVersionManifest,
+    mc_dir: &Path,
+) -> Result<FtbPackPlan, ModpackError> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut resolved_cf: HashMap<(u64, u64), crate::core::providers::VersionFile> = HashMap::new();
+    let mut failed: Vec<CfResolveFailure> = Vec::new();
+    let mut seen: HashSet<(u64, u64)> = HashSet::new();
+
+    for file in &manifest.files {
+        if file.serveronly || !file.url.is_empty() {
+            continue;
+        }
+        let Some(cf) = &file.curseforge else { continue };
+        let key = (cf.project, cf.file);
+        if !seen.insert(key) {
+            continue; // resolve each distinct CF file once
+        }
+        match cf_provider
+            .get_file(client, cf.project as u32, cf.file as u32)
+            .await
+        {
+            Ok(vf) => {
+                resolved_cf.insert(key, vf);
+            }
+            Err(crate::core::providers::ProviderError::KeyMissing) => {
+                return Err(ModpackError::ResolverKeyMissing);
+            }
+            Err(e) => {
+                log::warn!(
+                    "modpack: resolve_and_build_ftb_plan — could not resolve CF project={} file={}: {e}",
+                    cf.project, cf.file
+                );
+                failed.push(CfResolveFailure {
+                    project_id: cf.project,
+                    file_id: cf.file,
+                    reason: e.to_string(),
+                });
+            }
+        }
+    }
+
+    let mut plan = build_ftb_pack_plan(manifest, &resolved_cf, mc_dir)?;
+    plan.failed = failed;
+    Ok(plan)
+}
+
 /// Open a CurseForge pack `.zip` from raw bytes and parse its `manifest.json`.
 ///
 /// Pure (no network); the in-memory analog of `read_mrpack`'s index read. The
