@@ -8,9 +8,20 @@ import {
   type Settings as SettingsModel,
 } from "@/lib/ipc";
 import { Toggle } from "@/components/Toggle";
+import { getThemePref, setThemePref, type ThemePref } from "@/lib/theme";
+
+const THEME_OPTIONS: { value: ThemePref; label: string }[] = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
 
 export function Settings() {
   const qc = useQueryClient();
+
+  // Theme lives in localStorage (applied before paint), not the backend Settings
+  // model — so it's managed here independently of the Save flow.
+  const [theme, setTheme] = useState<ThemePref>(() => getThemePref());
   const { data, isLoading } = useQuery({ queryKey: ["settings"], queryFn: getSettings });
   const { data: paths } = useQuery({ queryKey: ["app-paths"], queryFn: getAppPaths });
 
@@ -111,6 +122,38 @@ export function Settings() {
             </span>
           </SettingRow>
         )}
+      </div>
+
+      <div className="mt-8 space-y-4">
+        <div>
+          <h2 className="text-base font-semibold">Appearance</h2>
+          <p className="text-xs text-muted">Theme is saved on this device.</p>
+        </div>
+
+        <SettingRow
+          title="Theme"
+          desc="System follows your OS light/dark setting."
+        >
+          <div className="flex gap-1 rounded-lg border border-border bg-surface p-1">
+            {THEME_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => {
+                  setThemePref(opt.value);
+                  setTheme(opt.value);
+                }}
+                className={
+                  "rounded-md px-3 py-1 text-xs font-medium transition-colors " +
+                  (theme === opt.value
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted hover:text-foreground")
+                }
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </SettingRow>
       </div>
 
       <div className="mt-8 space-y-4">

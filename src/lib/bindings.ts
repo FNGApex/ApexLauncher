@@ -236,6 +236,13 @@ export const commands = {
 	 */
 	setPackLock: (slug: string, locked: boolean) => typedError<null, string>(__TAURI_INVOKE("set_pack_lock", { slug, locked })),
 	/**
+	 *  Set an instance's custom icon: copy the picked image into the instance dir
+	 *  and record the relative filename on the manifest. Sync, instant FS op.
+	 */
+	setInstanceIcon: (slug: string, srcPath: string) => typedError<null, string>(__TAURI_INVOKE("set_instance_icon", { slug, srcPath })),
+	/**  Clear an instance's custom icon (delete the file, reset `icon` to `None`). */
+	clearInstanceIcon: (slug: string) => typedError<null, string>(__TAURI_INVOKE("clear_instance_icon", { slug })),
+	/**
 	 *  Persist the per-instance "don't warn me again" choice for the pre-launch
 	 *  missing-mods dialog (CF manual-download UX). Sync, instant local op.
 	 */

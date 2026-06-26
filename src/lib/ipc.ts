@@ -389,6 +389,16 @@ export async function setPackLock(slug: string, locked: boolean): Promise<void> 
   await unwrap(commands.setPackLock(slug, locked));
 }
 
+/** Set an instance's custom icon: copy the picked image into the instance dir. */
+export async function setInstanceIcon(slug: string, srcPath: string): Promise<void> {
+  await unwrap(commands.setInstanceIcon(slug, srcPath));
+}
+
+/** Clear an instance's custom icon (revert to pack icon / placeholder). */
+export async function clearInstanceIcon(slug: string): Promise<void> {
+  await unwrap(commands.clearInstanceIcon(slug));
+}
+
 /**
  * Persist the per-instance "don't warn me again" choice for the pre-launch
  * missing-mods dialog (CF manual-download UX). Sync local op.

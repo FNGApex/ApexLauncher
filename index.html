@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ApexLauncher</title>
+    <!-- No-FOUC theme boot: apply the saved theme before first paint. Mirrors
+         src/lib/theme.ts (dark = no class, light = .light). -->
+    <script>
+      (function () {
+        try {
+          var p = localStorage.getItem("apex-theme") || "system";
+          var light =
+            p === "light" ||
+            (p === "system" &&
+              window.matchMedia("(prefers-color-scheme: light)").matches);
+          document.documentElement.classList.toggle("light", light);
+        } catch (e) {}
+      })();
+    </script>
   </head>
 
   <body>
