@@ -436,6 +436,20 @@ pub struct CfPackPlan {
     pub failed: Vec<CfResolveFailure>,
 }
 
+/// Build the best CurseForge page URL for a manual-download file.
+///
+/// With a known project `slug` this is the **exact file page**
+/// `…/minecraft/mc-mods/{slug}/files/{file_id}`; without one (slug fetch failed or the
+/// project carried none) it falls back to the numeric `…/projects/{project_id}` redirect.
+pub fn cf_file_page_url(slug: Option<&str>, project_id: u64, file_id: u64) -> String {
+    match slug {
+        Some(slug) => format!(
+            "https://www.curseforge.com/minecraft/mc-mods/{slug}/files/{file_id}"
+        ),
+        None => format!("https://www.curseforge.com/projects/{project_id}"),
+    }
+}
+
 /// Build a [`CfPackPlan`] from a parsed [`CfManifest`] and its resolved files.
 ///
 /// `resolved` pairs each manifest file entry with its [`crate::core::providers::VersionFile`]
@@ -505,9 +519,12 @@ pub fn build_cf_pack_plan(
                     project_id: manifest_file.project_id,
                     file_id: manifest_file.file_id,
                     file_name: file.file_name.clone(),
-                    page_url: format!(
-                        "https://www.curseforge.com/projects/{}",
-                        manifest_file.project_id
+                    // Numeric fallback; `resolve_and_build_cf_plan` rewrites this to the
+                    // slug-based exact-file URL when it can fetch the project slug.
+                    page_url: cf_file_page_url(
+                        None,
+                        manifest_file.project_id,
+                        manifest_file.file_id,
                     ),
                 });
             }
@@ -578,6 +595,36 @@ pub async fn resolve_and_build_cf_plan(
 
     let mut plan = build_cf_pack_plan(&resolved, mc_dir)?;
     plan.failed = failed;
+
+    // Slug enrichment (Pillar 1): only the manual entries need an exact file-page URL,
+    // and the slug lives on the parent mod (`/v1/mods/{id}`) which `get_file` does not
+    // fetch. Look it up once per distinct project (api-frugality) and rewrite `page_url`.
+    // A failed/absent slug leaves the numeric fallback already set by `build_cf_pack_plan`.
+    let mut slug_cache: BTreeMap<u64, Option<String>> = BTreeMap::new();
+    for entry in &mut plan.manual {
+        let slug = match slug_cache.get(&entry.project_id) {
+            Some(cached) => cached.clone(),
+            None => {
+                let fetched = provider
+                    .get_mod_slug(client, &entry.project_id.to_string())
+                    .await
+                    .unwrap_or_else(|e| {
+                        log::warn!(
+                            "modpack: get_mod_slug failed for project_id={}: {e}",
+                            entry.project_id
+                        );
+                        None
+                    });
+                slug_cache.insert(entry.project_id, fetched.clone());
+                fetched
+            }
+        };
+        if slug.is_some() {
+            entry.page_url =
+                cf_file_page_url(slug.as_deref(), entry.project_id, entry.file_id);
+        }
+    }
+
     Ok(plan)
 }
 

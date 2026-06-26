@@ -973,9 +973,12 @@ async fn b4_resolve_and_build_cf_plan_routes_through_pure_build_cf_pack_plan() {
 
     let cf_file_fixture = include_str!("fixtures/cf_file.json");
     let cf_file_no_url = include_str!("fixtures/cf_file_no_url_md5_only.json");
+    let cf_mod = include_str!("fixtures/cf_mod_jei.json");
     let client = MockCfClient::new(vec![
         MockResp(200, cf_file_fixture.to_string()),
         MockResp(200, cf_file_no_url.to_string()),
+        // Slug fetch for the single manual entry (Pillar 1 enrichment).
+        MockResp(200, cf_mod.to_string()),
     ]);
     let provider = CurseForgeProvider::new(Some("key".to_string()));
 
@@ -994,6 +997,102 @@ async fn b4_resolve_and_build_cf_plan_routes_through_pure_build_cf_pack_plan() {
         1,
         "null-url/no-sha1 file routes to manual"
     );
+}
+
+// ── Pillar 1: cf_file_page_url + slug enrichment ─────────────────────────
+
+#[test]
+fn cf_file_page_url_with_slug_targets_exact_file_page() {
+    assert_eq!(
+        cf_file_page_url(Some("jei"), 238222, 4536804),
+        "https://www.curseforge.com/minecraft/mc-mods/jei/files/4536804"
+    );
+}
+
+#[test]
+fn cf_file_page_url_without_slug_falls_back_to_numeric() {
+    assert_eq!(
+        cf_file_page_url(None, 238222, 4536804),
+        "https://www.curseforge.com/projects/238222"
+    );
+}
+
+#[tokio::test]
+async fn resolve_and_build_cf_plan_rewrites_manual_page_url_with_slug() {
+    // One file routes to manual; the enrichment pass fetches its slug and
+    // rewrites page_url to the slug-based exact-file URL.
+    let json = include_str!("fixtures/cf_manifest_forge.json");
+    let manifest = parse_cf_manifest(json).unwrap();
+    let tmp = mc_dir();
+
+    let cf_file_fixture = include_str!("fixtures/cf_file.json");
+    let cf_file_no_url = include_str!("fixtures/cf_file_no_url_md5_only.json");
+    let cf_mod = include_str!("fixtures/cf_mod_jei.json");
+    let client = MockCfClient::new(vec![
+        MockResp(200, cf_file_fixture.to_string()),
+        MockResp(200, cf_file_no_url.to_string()),
+        MockResp(200, cf_mod.to_string()),
+    ]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let plan = resolve_and_build_cf_plan(&provider, &client, &manifest, tmp.path())
+        .await
+        .unwrap();
+
+    assert_eq!(plan.manual.len(), 1);
+    let m = &plan.manual[0];
+    assert_eq!(
+        m.page_url,
+        format!(
+            "https://www.curseforge.com/minecraft/mc-mods/jei/files/{}",
+            m.file_id
+        ),
+        "manual entry should carry the slug-based exact-file URL"
+    );
+}
+
+#[tokio::test]
+async fn resolve_and_build_cf_plan_fetches_slug_once_per_project() {
+    // Two manual files from the SAME project must trigger exactly one slug GET
+    // (cached) — api-frugality. The forge manifest has two files; resolve both
+    // to null-url (manual) but with the same project id, then queue exactly one
+    // slug response: if the cache failed, the second slug GET would underflow.
+    let manifest = CfManifest {
+        name: "Two Manual Same Project".to_string(),
+        version: "1.0".to_string(),
+        author: "tester".to_string(),
+        minecraft: "1.20.1".to_string(),
+        loader: PackLoader {
+            kind: "forge".to_string(),
+            version: Some("47.0.0".to_string()),
+        },
+        files: vec![cf_manifest_file(238222, 111), cf_manifest_file(238222, 222)],
+        overrides: "overrides".to_string(),
+    };
+    let tmp = mc_dir();
+
+    let cf_file_no_url = include_str!("fixtures/cf_file_no_url_md5_only.json");
+    let cf_mod = include_str!("fixtures/cf_mod_jei.json");
+    let client = MockCfClient::new(vec![
+        MockResp(200, cf_file_no_url.to_string()),
+        MockResp(200, cf_file_no_url.to_string()),
+        // Exactly ONE slug response for the shared project.
+        MockResp(200, cf_mod.to_string()),
+    ]);
+    let provider = CurseForgeProvider::new(Some("key".to_string()));
+
+    let plan = resolve_and_build_cf_plan(&provider, &client, &manifest, tmp.path())
+        .await
+        .expect("single slug fetch should satisfy both manual entries");
+
+    assert_eq!(plan.manual.len(), 2);
+    for m in &plan.manual {
+        assert!(
+            m.page_url.contains("/mc-mods/jei/files/"),
+            "both manual entries should be rewritten from the cached slug: {}",
+            m.page_url
+        );
+    }
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ origin: |
 kind: finding
 severity: nit
 review_by: "2026-08-15"
-status: open
+status: closed
 file: src-tauri/src/core/modpack.rs
 ---
 
