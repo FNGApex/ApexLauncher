@@ -126,3 +126,13 @@ theme CPs are pure frontend). The CP-3 regen: `scripts/build.sh dev` → wait fo
   (`set_instance_icon`/`clear_instance_icon`) — single bindings regen at CP-3. Three open
   questions carried to approval (theme persistence location, light-palette polish scope, icon
   path assembly JS-join vs Rust-returned).
+- 2026-06-26 — Open questions resolved: theme → **localStorage** (`apex-theme`, no-flash);
+  light palette → **minimal** (reuse existing `.light` flip, already coherent); icon path →
+  **JS-join** via `convertFileSrc`. **Implemented CP-1…CP-5.** `theme.ts` + index.html no-flash
+  script + main.tsx; Settings Appearance segmented control; `write_instance_icon`/
+  `clear_instance_icon_file` + `set_instance_icon`/`clear_instance_icon` commands (6 instances
+  tests); asset protocol enabled (`protocol-asset` Cargo feature + `$DATA/ApexLauncher/instances/**`
+  scope); shared `useInstanceIconSrc` hook (custom > pack > placeholder) in InstanceCard +
+  InstanceDetail; hover Set/Remove picker. `build.sh check` + full suite green (685 lib tests);
+  bindings regenerated at CP-3. Runtime-only paths (theme visuals, icon render via asset
+  protocol in a bundled build) not yet smoke-tested headlessly — flagged for a manual/`build` check.
