@@ -38,7 +38,7 @@ export interface FiltersPopoverProps {
   filters: FiltersState;
   onFiltersChange: (next: FiltersState) => void;
   /** Active provider — determines which categories are shown. */
-  provider: "curseforge" | "modrinth";
+  provider: "curseforge" | "modrinth" | "ftb";
 }
 
 const LOADER_OPTIONS = [
@@ -211,7 +211,11 @@ export function FiltersPopover({
           </p>
           <div className="flex flex-wrap gap-1.5">
             {CATEGORY_MAP.filter((row) =>
-              provider === "modrinth" ? row.modrinth != null : row.cfId != null,
+              provider === "modrinth"
+                ? row.modrinth != null
+                : provider === "curseforge"
+                  ? row.cfId != null
+                  : false,
             ).map((row) => {
               const checked = filters.categories.has(row.label);
               return (

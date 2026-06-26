@@ -47,7 +47,9 @@ function formatDownloads(n: number): string {
  * When `pack` is available, prefer `pack.provider` (already wire form).
  */
 function toWireProvider(routeProvider: string): string {
-  return routeProvider === "curseforge" ? "curseForge" : "modrinth";
+  if (routeProvider === "curseforge") return "curseForge";
+  if (routeProvider === "ftb") return "ftb";
+  return "modrinth";
 }
 
 // ---------------------------------------------------------------------------
@@ -60,8 +62,8 @@ export function BrowsePackInfo() {
   const navigate = useNavigate();
   const pack = (location.state as { pack?: ProjectSummary } | null)?.pack;
 
-  // provider is the routing string "modrinth" | "curseforge"
-  const providerParam = provider as "modrinth" | "curseforge";
+  // provider is the routing string "modrinth" | "curseforge" | "ftb"
+  const providerParam = provider as "modrinth" | "curseforge" | "ftb";
 
   const [promptOpen, setPromptOpen] = useState(false);
 
@@ -117,7 +119,7 @@ export function BrowsePackInfo() {
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-2xl font-semibold">{title}</h1>
-            <ProviderBadge provider={wireProvider as "modrinth" | "curseForge"} />
+            <ProviderBadge provider={wireProvider as "modrinth" | "curseForge" | "ftb"} />
             {/* BR-B-3: installed pill */}
             {installedSlug != null && (
               <button
@@ -210,7 +212,7 @@ function DownloadPrompt({ provider, providerWire, id, pack, onClose }: DownloadP
   // Lazy: versions fetched only when the prompt opens.
   const versionsQuery = useQuery({
     queryKey: ["packVersions", provider, id],
-    queryFn: () => getModVersions(provider as "modrinth" | "curseforge", id, null, null),
+    queryFn: () => getModVersions(provider as "modrinth" | "curseforge" | "ftb", id, null, null),
     staleTime: 30_000,
     enabled: true, // prompt is already open when this mounts
   });

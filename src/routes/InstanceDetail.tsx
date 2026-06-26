@@ -384,10 +384,12 @@ export function InstanceDetail() {
                   {/* Pack source link (PB-F1) */}
                   {data.instance.source && (() => {
                     const src = data.instance.source;
-                    const providerRoute: "modrinth" | "curseforge" =
+                    const providerRoute: "modrinth" | "curseforge" | "ftb" =
                       src.provider === "modrinth"
                         ? "modrinth"
-                        : "curseforge";
+                        : src.provider === "ftb"
+                          ? "ftb"
+                          : "curseforge";
                     const pageUrl: string | null =
                       src.pageUrl ?? (providerRoute === "modrinth"
                         ? `https://modrinth.com/modpack/${src.projectId}`
@@ -611,10 +613,12 @@ function VersionUpdateModal({
   const [updateError, setUpdateError] = useState<string | null>(null);
 
   // Resolve the provider routing string (InstanceSource stores the wire value).
-  const providerRoute: "modrinth" | "curseforge" =
+  const providerRoute: "modrinth" | "curseforge" | "ftb" =
     source.provider === "modrinth"
       ? "modrinth"
-      : "curseforge";
+      : source.provider === "ftb"
+        ? "ftb"
+        : "curseforge";
 
   // Lazy: versions fetched only when modal is open (it's mounted only when open).
   const versionsQuery = useQuery({

@@ -3939,6 +3939,13 @@ async fn update_modpack(
                 .await
                 .map_err(|e| e.to_string())?
         }
+        // FTB update-apply is out of v1 scope (check-only). Fail clearly rather than
+        // falling through to the generic unknown-provider error.
+        "ftb" => {
+            return Err(
+                "FTB pack updates aren't supported yet — reinstall the pack to update.".to_string(),
+            );
+        }
         other => {
             return Err(format!("unknown provider in instance source: {other}"));
         }

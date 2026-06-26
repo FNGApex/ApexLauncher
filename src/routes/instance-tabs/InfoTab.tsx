@@ -109,13 +109,15 @@ export function InfoTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, pendingCount]);
 
-  // Provider routing: wire value "modrinth" | "curseForge" → routing string "modrinth" | "curseforge".
-  const providerRoute: "modrinth" | "curseforge" | null = instance.source
+  // Provider routing: wire value → lowercase routing string.
+  const providerRoute: "modrinth" | "curseforge" | "ftb" | null = instance.source
     ? instance.source.provider === "modrinth"
       ? "modrinth"
       : instance.source.provider === "curseForge"
         ? "curseforge"
-        : null
+        : instance.source.provider === "ftb"
+          ? "ftb"
+          : null
     : null;
 
   const infoQuery = useQuery({
