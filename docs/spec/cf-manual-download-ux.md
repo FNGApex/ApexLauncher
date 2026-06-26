@@ -116,3 +116,14 @@ stop → commit the regenerated `src/lib/bindings.ts` alongside the Rust change.
   `stop_pending_watch`, not app-wide); `.disabled`-form drop accepted (→ `enabled:false`);
   `notify`/`notify-debouncer-full` exact-pinned; toast kept as pointer; no `get_pending_manual`
   command. Regen flags unchanged (CP-2/3/5/6).
+- 2026-06-26 — **Implemented CP-1…CP-6.** All checkpoints landed and green
+  (`build.sh check` + full Rust suite: 679 lib tests). New surface: `CfModData.slug` +
+  `get_mod_slug`, `cf_file_page_url`; `PendingManual` + 2 `Instance` fields; `CfManualFile`
+  gained `expected_sha1`/`size`; `reconcile_pending_manual`; commands
+  `set_pending_launch_warning_suppressed`, `rescan_pending_manual`, `import_manual_file`,
+  `start_pending_watch`, `stop_pending_watch`; event `manual://resolved`; `notify`/
+  `notify-debouncer-full` deps. Frontend: Info-tab pending panel (Open page / Re-scan /
+  Pick file / drag-drop), `N missing` header badge, `PendingLaunchModal`, AppShell
+  `manualResolved` listener. Toast left as-is (already navigates to the instance + offers
+  Open-page, so it serves as the pointer — no regression). `bindings.ts` regenerated at
+  CP-2/3/5/6. Closed followup `modpack-import-cf-manual-slug-link`.
