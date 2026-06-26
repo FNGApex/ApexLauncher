@@ -554,6 +554,31 @@ pub fn set_pack_lock(app: &AppHandle, slug: &str, locked: bool) -> Result<(), St
     set_pack_lock_on_disk(&path, locked)
 }
 
+/// Persist the per-instance "don't warn me again" choice for the pre-launch
+/// missing-mods dialog (CF manual-download UX, CP-3).
+pub fn set_pending_launch_warning_suppressed_on_disk(
+    manifest_path: &Path,
+    suppressed: bool,
+) -> Result<(), String> {
+    let mut inst = read_manifest(manifest_path)?;
+    inst.suppress_pending_launch_warning = suppressed;
+    write_manifest(manifest_path, &inst)
+}
+
+/// AppHandle-aware wrapper for [`set_pending_launch_warning_suppressed_on_disk`].
+pub fn set_pending_launch_warning_suppressed(
+    app: &AppHandle,
+    slug: &str,
+    suppressed: bool,
+) -> Result<(), String> {
+    let slug = validate_slug(slug)?;
+    let path = store::instances_dir(app)?.join(&slug).join("instance.json");
+    if !path.is_file() {
+        return Err(format!("Instance '{slug}' not found"));
+    }
+    set_pending_launch_warning_suppressed_on_disk(&path, suppressed)
+}
+
 // ---------------------------------------------------------------------------
 // Mod state operations
 // ---------------------------------------------------------------------------

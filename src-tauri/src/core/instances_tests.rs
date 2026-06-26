@@ -938,3 +938,19 @@ fn cp2_pending_manual_round_trips() {
     assert_eq!(reloaded.pending_manual[0].size, Some(1024));
     assert!(reloaded.suppress_pending_launch_warning);
 }
+
+/// `set_pending_launch_warning_suppressed_on_disk` flips and persists the flag.
+#[test]
+fn cp3_suppress_pending_launch_warning_persists() {
+    let tmp = TempDir::new().unwrap();
+    let inst = stub_instance(vec![]);
+    let path = write_inst(tmp.path(), &inst);
+
+    assert!(!read_manifest_pub(&path).unwrap().suppress_pending_launch_warning);
+
+    set_pending_launch_warning_suppressed_on_disk(&path, true).unwrap();
+    assert!(read_manifest_pub(&path).unwrap().suppress_pending_launch_warning);
+
+    set_pending_launch_warning_suppressed_on_disk(&path, false).unwrap();
+    assert!(!read_manifest_pub(&path).unwrap().suppress_pending_launch_warning);
+}

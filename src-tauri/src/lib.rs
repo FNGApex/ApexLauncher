@@ -1652,6 +1652,18 @@ fn set_pack_lock(app: tauri::AppHandle, slug: String, locked: bool) -> Result<()
     instances::set_pack_lock(&app, &slug, locked)
 }
 
+/// Persist the per-instance "don't warn me again" choice for the pre-launch
+/// missing-mods dialog (CF manual-download UX). Sync, instant local op.
+#[tauri::command]
+#[specta::specta]
+fn set_pending_launch_warning_suppressed(
+    app: tauri::AppHandle,
+    slug: String,
+    suppressed: bool,
+) -> Result<(), String> {
+    instances::set_pending_launch_warning_suppressed(&app, &slug, suppressed)
+}
+
 // ---------------------------------------------------------------------------
 // D-3: Java tab — set per-instance Java config + validate a Java path
 // ---------------------------------------------------------------------------
@@ -3513,6 +3525,7 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             remove_mod,
             update_mod,
             set_pack_lock,
+            set_pending_launch_warning_suppressed,
             set_instance_java,
             validate_java_path,
             import_mrpack,

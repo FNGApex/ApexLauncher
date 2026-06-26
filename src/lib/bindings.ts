@@ -236,6 +236,11 @@ export const commands = {
 	 */
 	setPackLock: (slug: string, locked: boolean) => typedError<null, string>(__TAURI_INVOKE("set_pack_lock", { slug, locked })),
 	/**
+	 *  Persist the per-instance "don't warn me again" choice for the pre-launch
+	 *  missing-mods dialog (CF manual-download UX). Sync, instant local op.
+	 */
+	setPendingLaunchWarningSuppressed: (slug: string, suppressed: boolean) => typedError<null, string>(__TAURI_INVOKE("set_pending_launch_warning_suppressed", { slug, suppressed })),
+	/**
 	 *  Persist a `JavaCfg` override to an instance's manifest.
 	 * 
 	 *  When `cfg.use_pack_settings` is `true` the launcher uses this instance's own

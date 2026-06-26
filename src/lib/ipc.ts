@@ -73,6 +73,7 @@ export type {
   UpdateModResult,
   MrpackImportResult,
   CfManualFile,
+  PendingManual,
   CfImportResult,
   ModpackInstallResult,
   PackUpdateResult,
@@ -386,6 +387,17 @@ export function updateModpack(slug: string, versionId?: string) {
  */
 export async function setPackLock(slug: string, locked: boolean): Promise<void> {
   await unwrap(commands.setPackLock(slug, locked));
+}
+
+/**
+ * Persist the per-instance "don't warn me again" choice for the pre-launch
+ * missing-mods dialog (CF manual-download UX). Sync local op.
+ */
+export async function setPendingLaunchWarningSuppressed(
+  slug: string,
+  suppressed: boolean,
+): Promise<void> {
+  await unwrap(commands.setPendingLaunchWarningSuppressed(slug, suppressed));
 }
 
 /**

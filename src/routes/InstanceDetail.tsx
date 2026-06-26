@@ -38,11 +38,13 @@ import {
   removeMod,
   searchMods,
   setModEnabled,
+  setPendingLaunchWarningSuppressed,
   updateMod,
   updateModpack,
   type FolderMod,
   type Instance,
   type ModEntry,
+  type PendingManual,
   type ProjectSummary,
   type ProviderCommandError,
 } from "@/lib/ipc";
@@ -116,6 +118,9 @@ export function InstanceDetail() {
   // PB-F3: version/update modal open state.
   const [versionModalOpen, setVersionModalOpen] = useState(false);
 
+  // CF manual-download UX (CP-4): pre-launch missing-mods warning modal.
+  const [pendingModalOpen, setPendingModalOpen] = useState(false);
+
   // Seed console expanded state once settings load (only once — null guard).
   useEffect(() => {
     if (appSettings !== undefined && consoleExpanded === null) {
@@ -154,7 +159,21 @@ export function InstanceDetail() {
       });
   }, [slug, data?.instance.source, qc]);
 
-  async function handleLaunch() {
+  // Launch entrypoint: gate on pending manual downloads (CP-4) before doing the
+  // real launch. When the pack has unresolved manual files and the user hasn't
+  // suppressed the warning, open the modal instead of launching.
+  function handleLaunch() {
+    if (!slug) return;
+    const pending = data?.instance.pendingManual ?? [];
+    const suppressed = data?.instance.suppressPendingLaunchWarning ?? false;
+    if (pending.length > 0 && !suppressed) {
+      setPendingModalOpen(true);
+      return;
+    }
+    void doLaunch();
+  }
+
+  async function doLaunch() {
     if (!slug) return;
     setLaunchError(null);
 
@@ -261,6 +280,17 @@ export function InstanceDetail() {
                       v{data.instance.source.packVersion}
                     </button>
                   )}
+                  {/* Incomplete-pack badge — manual CF downloads still pending. */}
+                  {(data.instance.pendingManual?.length ?? 0) > 0 && (
+                    <Link
+                      to="info"
+                      title="Some mods need a manual download — see the Info tab"
+                      className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-sm font-medium text-amber-300 transition-colors hover:bg-amber-500/25"
+                    >
+                      <AlertCircle className="size-3.5" />
+                      {data.instance.pendingManual!.length} missing
+                    </Link>
+                  )}
                 </div>
 
                 {/* Author (PB-F1) — only when present */}
@@ -362,6 +392,26 @@ export function InstanceDetail() {
                 setUpdateAvailable(false);
                 qc.invalidateQueries({ queryKey: ["instance", slug] });
                 qc.invalidateQueries({ queryKey: ["instances"] });
+              }}
+            />
+          )}
+
+          {/* CP-4: Pre-launch missing-mods warning */}
+          {pendingModalOpen && (
+            <PendingLaunchModal
+              pending={data.instance.pendingManual ?? []}
+              onClose={() => setPendingModalOpen(false)}
+              onLaunchAnyway={async (dontWarnAgain) => {
+                setPendingModalOpen(false);
+                if (dontWarnAgain && slug) {
+                  try {
+                    await setPendingLaunchWarningSuppressed(slug, true);
+                    qc.invalidateQueries({ queryKey: ["instance", slug] });
+                  } catch (e) {
+                    console.warn("suppress pending warning failed:", e);
+                  }
+                }
+                void doLaunch();
               }}
             />
           )}
@@ -592,6 +642,96 @@ function VersionUpdateModal({
               <RefreshCw className="size-4" />
             )}
             {updating ? "Updating…" : "Update"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CP-4: Pre-launch missing-mods warning modal
+// Reuses the VersionUpdateModal markup (centered card + backdrop). Lists the
+// pending files with Open-page links, a "don't warn me again" checkbox, and
+// Cancel / Launch-anyway actions.
+// ---------------------------------------------------------------------------
+
+interface PendingLaunchModalProps {
+  pending: PendingManual[];
+  onClose: () => void;
+  onLaunchAnyway: (dontWarnAgain: boolean) => void;
+}
+
+function PendingLaunchModal({ pending, onClose, onLaunchAnyway }: PendingLaunchModalProps) {
+  const [dontWarn, setDontWarn] = useState(false);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 shadow-xl">
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="flex items-center gap-2 text-base font-semibold text-amber-300">
+            <AlertCircle className="size-4" />
+            Missing mods
+          </h2>
+          <button
+            onClick={onClose}
+            className="rounded-md p-1 text-muted hover:bg-surface-2 hover:text-foreground"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+
+        <p className="mb-3 text-sm text-muted">
+          This pack has {pending.length} mod{pending.length !== 1 ? "s" : ""} that haven't been
+          downloaded yet. It may crash or behave incorrectly.
+        </p>
+
+        <ul className="mb-4 flex max-h-48 flex-col gap-1.5 overflow-y-auto">
+          {pending.map((p) => (
+            <li
+              key={`${p.projectId}:${p.fileId}`}
+              className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-2/50 px-3 py-1.5"
+            >
+              <span className="min-w-0 truncate font-mono text-xs text-foreground">
+                {p.fileName}
+              </span>
+              <button
+                onClick={() => openUrl(p.pageUrl).catch(console.error)}
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs text-muted hover:text-foreground"
+              >
+                <ExternalLink className="size-3" />
+                Open page
+              </button>
+            </li>
+          ))}
+        </ul>
+
+        <label className="mb-4 flex cursor-pointer items-center gap-2 text-sm text-muted">
+          <input
+            type="checkbox"
+            checked={dontWarn}
+            onChange={(e) => setDontWarn(e.target.checked)}
+            className="size-4 rounded border-border"
+          />
+          Don't warn me again for this instance
+        </label>
+
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 rounded-lg border border-border px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onLaunchAnyway(dontWarn)}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+          >
+            <Play className="size-4" />
+            Launch anyway
           </button>
         </div>
       </div>
