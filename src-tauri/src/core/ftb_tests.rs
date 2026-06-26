@@ -217,6 +217,36 @@ async fn get_projects_brief_is_noop_without_http() {
 
 // ── version manifest fetch + loader/mc helpers ────────────────────────────────
 
+// ── newest_release_version (install / update "latest" selection) ──────────────
+
+#[tokio::test]
+async fn newest_release_version_picks_highest_release() {
+    // Fixture has 2275 (Release) and 2200 (beta) → newest release is 2275.
+    let client = MockClient::new(vec![MockResp::ok(DETAIL)]);
+    let provider = FtbProvider::new();
+
+    let pick = provider.newest_release_version(&client, 100).await.unwrap();
+    assert_eq!(pick, Some((2275, "1.3.0".to_string())));
+}
+
+#[tokio::test]
+async fn newest_release_version_skips_newer_beta() {
+    // A higher-id beta must not win over a lower-id release.
+    let detail = r#"{
+        "id": 7,
+        "name": "P",
+        "versions": [
+            {"id": 3000, "name": "2.0-beta", "type": "beta", "targets": []},
+            {"id": 2000, "name": "1.0", "type": "release", "targets": []}
+        ]
+    }"#;
+    let client = MockClient::new(vec![MockResp::ok(detail)]);
+    let provider = FtbProvider::new();
+
+    let pick = provider.newest_release_version(&client, 7).await.unwrap();
+    assert_eq!(pick, Some((2000, "1.0".to_string())), "release beats newer beta");
+}
+
 #[tokio::test]
 async fn get_version_manifest_exposes_loader_and_mc() {
     let manifest_json = r#"{

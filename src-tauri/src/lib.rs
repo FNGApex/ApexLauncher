@@ -1374,6 +1374,10 @@ async fn search_mods(
             let p = CurseForgeProvider::new(key);
             p.search(&http, &params).await.map_err(ProviderCommandError::from)
         }
+        "ftb" => {
+            let p = crate::core::ftb::FtbProvider::new();
+            p.search(&http, &params).await.map_err(ProviderCommandError::from)
+        }
         other => Err(unknown_provider_err(other)),
     }
 }
@@ -1411,6 +1415,12 @@ async fn get_mod_versions(
                 .await
                 .map_err(ProviderCommandError::from)
         }
+        "ftb" => {
+            let p = crate::core::ftb::FtbProvider::new();
+            p.get_versions(&http, &project_id, mc_version.as_deref(), loader.as_deref())
+                .await
+                .map_err(ProviderCommandError::from)
+        }
         other => Err(unknown_provider_err(other)),
     }
 }
@@ -1444,6 +1454,12 @@ async fn get_pack_info(
                 option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
             );
             let p = CurseForgeProvider::new(key);
+            p.get_project(&http, &project_id)
+                .await
+                .map_err(ProviderCommandError::from)
+        }
+        "ftb" => {
+            let p = crate::core::ftb::FtbProvider::new();
             p.get_project(&http, &project_id)
                 .await
                 .map_err(ProviderCommandError::from)
@@ -1534,6 +1550,14 @@ async fn refresh_pack_meta(
         }
         "curseforge" | "curseForge" => {
             let p = CurseForgeProvider::new(cf_key);
+            let s = p.get_pack_summary(&http, &project_id).await;
+            let v = p.get_versions(&http, &project_id, None, None).await;
+            (s, v)
+        }
+        "ftb" => {
+            // FTB is keyless; `get_versions` returns versions newest-first so the
+            // generic [0]=newest update-check below is correct (CP-5).
+            let p = crate::core::ftb::FtbProvider::new();
             let s = p.get_pack_summary(&http, &project_id).await;
             let v = p.get_versions(&http, &project_id, None, None).await;
             (s, v)
@@ -3135,6 +3159,297 @@ async fn enqueue_import_cf_zip(
     Ok(id)
 }
 
+// ---------------------------------------------------------------------------
+// FTB CP-3: ImportFtbJob + install_ftb_modpack
+// ---------------------------------------------------------------------------
+
+/// [`TaskJob`] that installs an FTB pack version (a file manifest, not an archive)
+/// into a new instance. Mirrors [`ImportCfZipJob`] minus the zip/override steps —
+/// the plan comes from `resolve_and_build_ftb_plan` over the held manifest.
+struct ImportFtbJob {
+    app: tauri::AppHandle,
+    task_id_cell: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    manifest: core::ftb::FtbVersionManifest,
+    instance_name: String,
+    minecraft: String,
+    loader_kind: String,
+    loader_version: Option<String>,
+    pack_source: Option<instances::Source>,
+}
+
+#[async_trait::async_trait]
+impl TaskJob for ImportFtbJob {
+    async fn run(self: Box<Self>, ctx: &core::task_manager::TaskContext) {
+        use core::modpack::{promote_staging, remap_to_staging, resolve_and_build_ftb_plan};
+        use std::sync::atomic::Ordering;
+
+        let task_id = self.task_id_cell.load(Ordering::SeqCst);
+        log::info!("modpack: ImportFtbJob task_id={task_id} starting");
+
+        // --- PLAN ---
+        ctx.enter_planning().await;
+
+        let inst = match instances::create(
+            &self.app,
+            CreateInstanceReq {
+                name: self.instance_name.clone(),
+                minecraft: self.minecraft.clone(),
+                loader: instances::Loader {
+                    kind: self.loader_kind.clone(),
+                    version: self.loader_version.clone(),
+                },
+            },
+        ) {
+            Ok(i) => i,
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+
+        let inst_dir = match core::store::instances_dir(&self.app) {
+            Ok(d) => d.join(&inst.slug),
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+        let mc_dir = inst_dir.join("mc");
+        let staging_dir = staging_dir_for(&inst_dir, task_id);
+
+        // Resolve the CF-referenced subset (the bulk of FTB jars) + build the plan.
+        let settings = settings::load(&self.app).unwrap_or_default();
+        let cf_key = cf_api_key_from(
+            std::env::var(providers::CF_API_KEY_ENV).ok(),
+            settings.curseforge_api_key,
+            option_env!("MODLOADER_CF_API_KEY").map(str::to_string),
+        );
+        let cf_provider = CurseForgeProvider::new(cf_key);
+        let http = ReqwestProviderClient(reqwest::Client::new());
+
+        let plan =
+            match resolve_and_build_ftb_plan(&cf_provider, &http, &self.manifest, &mc_dir).await {
+                Ok(p) => p,
+                Err(e) => { ctx.finish_failed(e.to_string()).await; return; }
+            };
+
+        let manual = plan.manual.clone();
+        let mod_entries = plan.mods.clone();
+        let resolve_failed_count = plan.failed.len() as u32;
+
+        let staged_items = remap_to_staging(plan.items, &mc_dir, &staging_dir);
+        let children = children_from_items(&staged_items);
+
+        // --- DOWNLOAD ---
+        let staged_plan = DownloadPlan::new(staged_items);
+        ctx.enter_downloading(children).await;
+
+        let http_client = match download::build_client() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                ctx.finish_failed(e.to_string()).await;
+                return;
+            }
+        };
+
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 8, ctx.cancel_token()).await
+        }).await;
+
+        if dl_result.cancelled || ctx.is_cancelled() {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_cancelled().await;
+            return;
+        }
+
+        let (installed, dl_failed, _) = tally_cancellable(&dl_result.outcomes);
+        let failed = resolve_failed_count + dl_failed;
+
+        // --- APPLY ---
+        ctx.enter_applying().await;
+
+        if let Err(e) = promote_staging(&staging_dir, &mc_dir) {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_failed(format!("promote failed: {e}")).await;
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        // No override extraction — FTB config/script files are first-class manifest
+        // entries already downloaded to their declared paths.
+
+        let result = match instances::load_manifest(&self.app, &inst.slug) {
+            Ok(mut instance) => {
+                instance.mods = mod_entries;
+                if let Some(src) = self.pack_source {
+                    instance.source = Some(src);
+                }
+                instance.pack_locked = true;
+                instance.pending_manual =
+                    manual.iter().map(instances::PendingManual::from).collect();
+                match instances::save_manifest(&self.app, &inst.slug, &instance) {
+                    Ok(_) => Ok(CfImportResult {
+                        slug: inst.slug,
+                        name: inst.name,
+                        installed,
+                        failed,
+                        manual,
+                    }),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        };
+
+        match result {
+            Ok(r) => {
+                log::info!(
+                    "modpack: ImportFtbJob done — slug='{}' installed={} failed={}",
+                    r.slug, r.installed, r.failed
+                );
+                match mod_install_outcome(r.installed as usize, r.failed as usize, r.manual.len()) {
+                    ModInstallOutcome::Failed(_) => {
+                        let msg = if r.failed == 1 {
+                            "1 file failed to download; pack may be incomplete".to_string()
+                        } else {
+                            format!("{} files failed to download; pack may be incomplete", r.failed)
+                        };
+                        ctx.finish_failed(msg).await;
+                    }
+                    ModInstallOutcome::Done => match serde_json::to_value(&r) {
+                        Ok(v) => ctx.finish_done_with_result(v).await,
+                        Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                    },
+                }
+            }
+            Err(e) => ctx.finish_failed(e).await,
+        }
+    }
+}
+
+/// Enqueue an FTB install task (shared by `install_modpack`'s ftb arm).
+async fn enqueue_import_ftb(
+    app: &tauri::AppHandle,
+    manager: &tauri::State<'_, TaskManager>,
+    manifest: core::ftb::FtbVersionManifest,
+    instance_name: String,
+    minecraft: String,
+    loader_kind: String,
+    loader_version: Option<String>,
+    pack_source: Option<instances::Source>,
+) -> Result<u64, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let task_id_cell: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let task_id_cell_job = Arc::clone(&task_id_cell);
+    let label = format!("Install {instance_name}");
+
+    let id = manager
+        .enqueue(TaskSpec {
+            kind: TaskKind::PackInstall,
+            parent_label: label,
+            job: Box::new(ImportFtbJob {
+                app: app.clone(),
+                task_id_cell: task_id_cell_job,
+                manifest,
+                instance_name,
+                minecraft,
+                loader_kind,
+                loader_version,
+                pack_source,
+            }),
+        })
+        .await;
+
+    task_id_cell.store(id, Ordering::SeqCst);
+    Ok(id)
+}
+
+/// `install_modpack`'s FTB arm: resolve the version + manifest, build `Source`,
+/// enqueue `ImportFtbJob`. FTB browse is keyless; the CF key is only needed inside
+/// the job to resolve CF-referenced files (it surfaces as the existing KeyMissing).
+async fn install_ftb_modpack(
+    app: &tauri::AppHandle,
+    manager: &tauri::State<'_, TaskManager>,
+    project_id: &str,
+    version_id: Option<&str>,
+    page_url: Option<String>,
+) -> Result<u64, String> {
+    let id_num: u64 = project_id
+        .parse()
+        .map_err(|_| format!("invalid FTB pack id: {project_id}"))?;
+    let provider = core::ftb::FtbProvider::new();
+    let http = ReqwestProviderClient(reqwest::Client::new());
+
+    // Pack summary (name/icon/author/synopsis) for the Source provenance.
+    let summary = provider
+        .get_pack_summary(&http, project_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Resolve the version id (explicit, or newest release).
+    let (vid, vname) = match version_id {
+        Some(v) => {
+            let vid: u64 = v
+                .parse()
+                .map_err(|_| format!("invalid FTB version id: {v}"))?;
+            (vid, v.to_string())
+        }
+        None => provider
+            .newest_release_version(&http, id_num)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "FTB pack has no versions".to_string())?,
+    };
+
+    // Version manifest → files, loader/mc targets, recommended RAM.
+    let manifest = provider
+        .get_version_manifest(&http, id_num, vid)
+        .await
+        .map_err(|e| e.to_string())?;
+    let minecraft = manifest
+        .minecraft()
+        .ok_or_else(|| "FTB pack version has no Minecraft target".to_string())?;
+    let loader_kind = manifest.loader().unwrap_or_else(|| "vanilla".to_string());
+    let loader_version = manifest.loader_version();
+    let recommended = manifest
+        .specs
+        .as_ref()
+        .and_then(|s| s.recommended)
+        .map(|mb| instances::RecommendedJava {
+            memory_mb: Some(mb as u32),
+            java_args: None,
+        });
+
+    let pack_version = if vname.is_empty() {
+        vid.to_string()
+    } else {
+        vname
+    };
+    let source = instances::Source {
+        provider: "ftb".to_string(),
+        project_id: project_id.to_string(),
+        file_id: vid.to_string(),
+        pack_version,
+        recommended,
+        page_url,
+        icon_url: summary.icon_url,
+        author: summary.author,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
+        summary: summary.summary,
+        categories: summary.categories,
+    };
+
+    enqueue_import_ftb(
+        app,
+        manager,
+        manifest,
+        summary.name,
+        minecraft,
+        loader_kind,
+        loader_version,
+        Some(source),
+    )
+    .await
+}
+
 /// Enqueue a CurseForge `.zip` import task and return its id synchronously.
 #[tauri::command]
 #[specta::specta]
@@ -3206,6 +3521,14 @@ async fn install_modpack(
     use core::providers::ProviderKind;
 
     log::info!("modpack: install_modpack provider={provider} project_id={project_id}");
+
+    // FTB diverges from the single-archive path: an FTB pack version is a JSON file
+    // manifest, not a downloadable archive. Resolve the version + manifest, then
+    // enqueue ImportFtbJob.
+    if provider == "ftb" {
+        return install_ftb_modpack(&app, &manager, &project_id, version_id.as_deref(), page_url)
+            .await;
+    }
 
     // 1. Resolve the pack file (network call — must happen before enqueue so we
     //    can detect the Manual case synchronously).

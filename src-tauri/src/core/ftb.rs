@@ -172,6 +172,10 @@ impl FtbVersionManifest {
     pub fn minecraft(&self) -> Option<String> {
         target_version(&self.targets, "game")
     }
+    /// The modloader version (e.g. `"21.1.74"`), if any.
+    pub fn loader_version(&self) -> Option<String> {
+        target_version(&self.targets, "modloader")
+    }
 }
 
 /// First target `name` whose `type` matches (lowercased compare).
@@ -262,6 +266,24 @@ impl FtbProvider {
         Self::get_json(client, &Self::build_detail_url(&id.to_string())).await
     }
 
+    /// Pick the newest version (by id), preferring release-type; returns
+    /// `(version_id, version_name)`. Used to resolve "latest" on install / update.
+    pub async fn newest_release_version(
+        &self,
+        client: &dyn ProviderHttpClient,
+        id: u64,
+    ) -> Result<Option<(u64, String)>, ProviderError> {
+        let detail: FtbModpackDetail =
+            Self::get_json(client, &Self::build_detail_url(&id.to_string())).await?;
+        let mut versions = detail.versions;
+        versions.sort_by(|a, b| b.id.cmp(&a.id)); // newest first
+        let pick = versions
+            .iter()
+            .find(|v| v.version_type.eq_ignore_ascii_case("release"))
+            .or_else(|| versions.first());
+        Ok(pick.map(|v| (v.id, v.name.clone())))
+    }
+
     /// Fetch a version manifest (used by the install planner, CP-2/CP-3).
     pub async fn get_version_manifest(
         &self,
@@ -347,8 +369,12 @@ impl ModProvider for FtbProvider {
         _mc_version: Option<&str>,
         _loader: Option<&str>,
     ) -> Result<Vec<ProjectVersion>, ProviderError> {
-        let detail: FtbModpackDetail =
+        let mut detail: FtbModpackDetail =
             Self::get_json(client, &Self::build_detail_url(project_id)).await?;
+
+        // Newest first (by version id) — so the version modal lists newest at top
+        // and the generic "latest = [0]" update-check is correct.
+        detail.versions.sort_by(|a, b| b.id.cmp(&a.id));
 
         Ok(detail
             .versions
