@@ -678,6 +678,82 @@ pub fn set_pending_launch_warning_suppressed_on_disk(
     write_manifest(manifest_path, &inst)
 }
 
+// ---------------------------------------------------------------------------
+// Instance icons (Phase 7 polish)
+// ---------------------------------------------------------------------------
+
+/// Allowed user icon image extensions (lowercase, no dot).
+const ICON_EXTS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
+/// Hard cap on a copied icon file (4 MiB).
+const ICON_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Delete any existing `icon-*` file in `inst_dir` (best-effort).
+fn remove_existing_icons(inst_dir: &Path) {
+    if let Ok(rd) = fs::read_dir(inst_dir) {
+        for entry in rd.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("icon-") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
+/// Copy `src_path` into `inst_dir` as `icon-<unix_millis>.<ext>`, replacing any
+/// prior icon, and point `inst.icon` at the new relative filename.
+///
+/// Rejects a non-image extension (allowlist) or a file over [`ICON_MAX_BYTES`].
+/// The timestamped name busts the webview's image cache on replace. Pure w.r.t.
+/// Tauri — unit-testable with a tempdir.
+pub fn write_instance_icon(
+    inst_dir: &Path,
+    inst: &mut Instance,
+    src_path: &Path,
+) -> Result<(), String> {
+    let ext = src_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .ok_or_else(|| "icon file has no extension".to_string())?;
+    if !ICON_EXTS.contains(&ext.as_str()) {
+        return Err(format!(
+            "unsupported image type '.{ext}' (use png/jpg/jpeg/webp/gif)"
+        ));
+    }
+
+    let meta = fs::metadata(src_path).map_err(|e| format!("could not read icon file: {e}"))?;
+    if !meta.is_file() {
+        return Err("icon source is not a file".to_string());
+    }
+    if meta.len() > ICON_MAX_BYTES {
+        return Err(format!(
+            "icon is too large ({} MiB max)",
+            ICON_MAX_BYTES / (1024 * 1024)
+        ));
+    }
+
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let file_name = format!("icon-{millis}.{ext}");
+
+    fs::create_dir_all(inst_dir).map_err(|e| format!("could not create instance dir: {e}"))?;
+    remove_existing_icons(inst_dir);
+    fs::copy(src_path, inst_dir.join(&file_name)).map_err(|e| format!("could not copy icon: {e}"))?;
+
+    inst.icon = Some(file_name);
+    Ok(())
+}
+
+/// Remove the instance's custom icon file (if any) and clear `inst.icon`.
+pub fn clear_instance_icon_file(inst_dir: &Path, inst: &mut Instance) -> Result<(), String> {
+    remove_existing_icons(inst_dir);
+    inst.icon = None;
+    Ok(())
+}
+
 /// AppHandle-aware wrapper for [`set_pending_launch_warning_suppressed_on_disk`].
 pub fn set_pending_launch_warning_suppressed(
     app: &AppHandle,

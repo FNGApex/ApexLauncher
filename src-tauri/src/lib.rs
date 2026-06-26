@@ -1852,6 +1852,29 @@ fn set_pack_lock(app: tauri::AppHandle, slug: String, locked: bool) -> Result<()
     instances::set_pack_lock(&app, &slug, locked)
 }
 
+/// Set an instance's custom icon: copy the picked image into the instance dir
+/// and record the relative filename on the manifest. Sync, instant FS op.
+#[tauri::command]
+#[specta::specta]
+fn set_instance_icon(app: tauri::AppHandle, slug: String, src_path: String) -> Result<(), String> {
+    let slug = instances::validate_slug(&slug)?;
+    let inst_dir = core::store::instances_dir(&app)?.join(&slug);
+    let mut inst = instances::load_manifest(&app, &slug)?;
+    instances::write_instance_icon(&inst_dir, &mut inst, std::path::Path::new(&src_path))?;
+    instances::save_manifest(&app, &slug, &inst)
+}
+
+/// Clear an instance's custom icon (delete the file, reset `icon` to `None`).
+#[tauri::command]
+#[specta::specta]
+fn clear_instance_icon(app: tauri::AppHandle, slug: String) -> Result<(), String> {
+    let slug = instances::validate_slug(&slug)?;
+    let inst_dir = core::store::instances_dir(&app)?.join(&slug);
+    let mut inst = instances::load_manifest(&app, &slug)?;
+    instances::clear_instance_icon_file(&inst_dir, &mut inst)?;
+    instances::save_manifest(&app, &slug, &inst)
+}
+
 /// Persist the per-instance "don't warn me again" choice for the pre-launch
 /// missing-mods dialog (CF manual-download UX). Sync, instant local op.
 #[tauri::command]
@@ -3725,6 +3748,8 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             remove_mod,
             update_mod,
             set_pack_lock,
+            set_instance_icon,
+            clear_instance_icon,
             set_pending_launch_warning_suppressed,
             rescan_pending_manual,
             import_manual_file,

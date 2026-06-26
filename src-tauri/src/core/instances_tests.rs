@@ -1127,6 +1127,110 @@ fn cp6_unrelated_jar_leaves_pending() {
     assert!(inst.mods.is_empty());
 }
 
+// -----------------------------------------------------------------------
+// Instance icons: write_instance_icon / clear_instance_icon_file
+// -----------------------------------------------------------------------
+
+/// Count files in a dir whose name starts with `icon-`.
+fn icon_files(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|n| n.starts_with("icon-"))
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn icon_write_sets_field_and_copies_file() {
+    let tmp = TempDir::new().unwrap();
+    let inst_dir = tmp.path();
+    let src = inst_dir.join("source.png");
+    fs::write(&src, b"\x89PNG fake").unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    write_instance_icon(inst_dir, &mut inst, &src).unwrap();
+
+    let name = inst.icon.clone().expect("icon set");
+    assert!(name.starts_with("icon-") && name.ends_with(".png"), "name: {name}");
+    assert!(inst_dir.join(&name).is_file(), "icon file copied");
+}
+
+#[test]
+fn icon_write_replaces_prior_icon() {
+    let tmp = TempDir::new().unwrap();
+    let inst_dir = tmp.path();
+    let src1 = inst_dir.join("a.png");
+    let src2 = inst_dir.join("b.jpg");
+    fs::write(&src1, b"one").unwrap();
+    fs::write(&src2, b"two").unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    write_instance_icon(inst_dir, &mut inst, &src1).unwrap();
+    write_instance_icon(inst_dir, &mut inst, &src2).unwrap();
+
+    // Only one icon-* file remains, matching the current field.
+    let icons = icon_files(inst_dir);
+    assert_eq!(icons.len(), 1, "exactly one icon survives: {icons:?}");
+    assert_eq!(Some(&icons[0]), inst.icon.as_ref());
+    assert!(icons[0].ends_with(".jpg"));
+}
+
+#[test]
+fn icon_write_rejects_bad_extension() {
+    let tmp = TempDir::new().unwrap();
+    let inst_dir = tmp.path();
+    let src = inst_dir.join("evil.txt");
+    fs::write(&src, b"nope").unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    let err = write_instance_icon(inst_dir, &mut inst, &src).unwrap_err();
+    assert!(err.contains("unsupported"), "err: {err}");
+    assert!(inst.icon.is_none(), "icon unchanged on reject");
+}
+
+#[test]
+fn icon_write_rejects_oversize() {
+    let tmp = TempDir::new().unwrap();
+    let inst_dir = tmp.path();
+    let src = inst_dir.join("huge.png");
+    // 4 MiB + 1 byte.
+    fs::write(&src, vec![0u8; (4 * 1024 * 1024) + 1]).unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    let err = write_instance_icon(inst_dir, &mut inst, &src).unwrap_err();
+    assert!(err.contains("too large"), "err: {err}");
+    assert!(inst.icon.is_none());
+}
+
+#[test]
+fn icon_clear_removes_file_and_field() {
+    let tmp = TempDir::new().unwrap();
+    let inst_dir = tmp.path();
+    let src = inst_dir.join("a.webp");
+    fs::write(&src, b"img").unwrap();
+
+    let mut inst = stub_instance(vec![]);
+    write_instance_icon(inst_dir, &mut inst, &src).unwrap();
+    assert!(inst.icon.is_some());
+
+    clear_instance_icon_file(inst_dir, &mut inst).unwrap();
+    assert!(inst.icon.is_none());
+    assert!(icon_files(inst_dir).is_empty(), "icon file removed");
+}
+
+#[test]
+fn icon_field_round_trips_through_manifest() {
+    let tmp = TempDir::new().unwrap();
+    let mut inst = stub_instance(vec![]);
+    inst.icon = Some("icon-123.png".into());
+    let path = write_inst(tmp.path(), &inst);
+    let reloaded = read_manifest_pub(&path).unwrap();
+    assert_eq!(reloaded.icon.as_deref(), Some("icon-123.png"));
+}
+
 /// `set_pending_launch_warning_suppressed_on_disk` flips and persists the flag.
 #[test]
 fn cp3_suppress_pending_launch_warning_persists() {
