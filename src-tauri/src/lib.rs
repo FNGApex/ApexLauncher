@@ -3280,6 +3280,9 @@ async fn install_modpack(
     let provider_str = match resolved.provider {
         ProviderKind::Modrinth => "modrinth".to_string(),
         ProviderKind::CurseForge => "curseForge".to_string(),
+        // FTB never reaches the single-archive path — `install_modpack` routes it
+        // to `ImportFtbJob` before `resolve_pack_file` is called.
+        ProviderKind::Ftb => unreachable!("FTB installs via the dedicated ftb arm"),
     };
     let source = instances::Source {
         provider: provider_str,
@@ -3312,6 +3315,7 @@ async fn install_modpack(
         ProviderKind::CurseForge => {
             enqueue_import_cf_zip(&app, &manager, bytes, name_override, Some(source)).await
         }
+        ProviderKind::Ftb => unreachable!("FTB installs via the dedicated ftb arm"),
     }
 }
 
@@ -3425,6 +3429,9 @@ impl TaskJob for UpdateModpackJob {
                         Err(e) => { ctx.finish_failed(e.to_string()).await; return; }
                     }
                 }
+                // FTB update-apply is out of v1 scope (check-only); FTB packs never
+                // enqueue an UpdateModpackJob.
+                ProviderKind::Ftb => unreachable!("FTB update-apply is not wired in v1"),
             };
 
         // Reconcile mods.

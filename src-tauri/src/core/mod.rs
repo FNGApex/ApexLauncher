@@ -24,6 +24,7 @@ pub mod auth;
 pub mod curseforge;
 pub mod download;
 pub mod forge_installer;
+pub mod ftb;
 pub mod instances;
 pub mod java;
 pub mod java_resolve;

@@ -1180,13 +1180,11 @@ function ModSearchCard({
   const qc = useQueryClient();
 
   // Resolve the provider routing string from the ProviderKind response value.
-  // ProviderKind serializes as "modrinth" | "curseForge" (camelCase from Rust).
+  // ProviderKind serializes as "modrinth" | "curseForge" | "ftb". This is the
+  // per-mod add path; FTB is a pack-only source and never appears here, so it
+  // falls through to the curseforge default (dead branch).
   const providerRoute: "modrinth" | "curseforge" =
-    mod.provider === "modrinth"
-      ? "modrinth"
-      : mod.provider === "curseForge"
-        ? "curseforge"
-        : ((_: never) => "curseforge" as const)(mod.provider);
+    mod.provider === "modrinth" ? "modrinth" : "curseforge";
 
   // Check whether this mod is already in the installed list.
   const installed = modEntries.find((e) => e.projectId === mod.id);

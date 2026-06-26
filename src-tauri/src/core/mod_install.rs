@@ -128,6 +128,9 @@ pub fn page_url_for(provider: ProviderKind, slug_or_id: &str) -> String {
         ProviderKind::CurseForge => {
             format!("https://www.curseforge.com/minecraft/mc-mods/{slug_or_id}")
         }
+        // FTB is a pack-only source (no per-mod add), so this is never hit for an
+        // FTB mod in practice; link to the FTB pack page as a sane fallback.
+        ProviderKind::Ftb => format!("https://www.feed-the-beast.com/modpacks/{slug_or_id}"),
     }
 }
 
@@ -502,6 +505,7 @@ fn provider_kind_str(kind: ProviderKind) -> String {
     match kind {
         ProviderKind::Modrinth => "modrinth".to_string(),
         ProviderKind::CurseForge => "curseforge".to_string(),
+        ProviderKind::Ftb => "ftb".to_string(),
     }
 }
 

@@ -1049,7 +1049,7 @@ export type ProviderCommandError = {
 };
 
 /**  Identifies which provider owns a result. */
-export type ProviderKind = "modrinth" | "curseForge";
+export type ProviderKind = "modrinth" | "curseForge" | "ftb";
 
 /**
  *  Pack-recommended Java/memory hint embedded in the instance source.

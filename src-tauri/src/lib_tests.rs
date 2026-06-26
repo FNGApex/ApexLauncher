@@ -198,6 +198,7 @@ fn d1_source_built_from_resolved_pack_file_fields() {
     let provider_str = match resolved.provider {
         crate::core::providers::ProviderKind::Modrinth => "modrinth".to_string(),
         crate::core::providers::ProviderKind::CurseForge => "curseForge".to_string(),
+        crate::core::providers::ProviderKind::Ftb => "ftb".to_string(),
     };
 
     let source = instances::Source {

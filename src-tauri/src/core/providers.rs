@@ -209,6 +209,7 @@ pub struct SearchResult {
 pub enum ProviderKind {
     Modrinth,
     CurseForge,
+    Ftb,
 }
 
 // ── HTTP seam ─────────────────────────────────────────────────────────────────
