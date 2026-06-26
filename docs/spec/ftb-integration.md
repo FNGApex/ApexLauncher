@@ -140,3 +140,13 @@ generated DTOs/commands/events (verify at CP-3 that no helper DTO slipped in). R
   prompt; no FTB-specific gating); **O-3** update **check-only** (defer apply; do not wire FTB
   into `update_modpack`); **O-4** include `optional` files; **O-5** populate `Source.recommended`
   from `specs.recommended`. Ready for execution.
+- 2026-06-26 — **Implemented CP-1…CP-5.** `core/ftb.rs` (FtbProvider, manifest types,
+  newest-release selection); `ProviderKind::Ftb` (bindings regenerated at CP-1); `modpack.rs`
+  FTB planner (`build_ftb_pack_plan`/`resolve_and_build_ftb_plan`, reuses CF resolution +
+  `pending_manual`); `install_modpack` ftb arm + `ImportFtbJob`; `"ftb"` arms in
+  search/get_versions/get_pack_info/refresh_pack_meta; Browse UI enabled (Sidebar NavLink,
+  union widening across ~14 sites, filters hidden for FTB, instance source routing);
+  `update_modpack` returns a clear unsupported message for ftb (check-only). `build.sh check`
+  + full suite green (701 lib tests; +16 FTB: 11 ftb + 5 modpack planner). Single bindings
+  regen at CP-1. Runtime-only paths (live FTB browse/install, asset-less manifest download with
+  a real CF key) not smoke-tested headlessly — flagged for a manual/`dev` check.

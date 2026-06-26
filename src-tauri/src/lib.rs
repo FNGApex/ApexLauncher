@@ -1555,11 +1555,26 @@ async fn refresh_pack_meta(
             (s, v)
         }
         "ftb" => {
-            // FTB is keyless; `get_versions` returns versions newest-first so the
-            // generic [0]=newest update-check below is correct (CP-5).
+            // FTB is keyless. Target the newest *release* for the update banner
+            // (not a newer beta): return a single synthetic version so the generic
+            // [0]=latest check below points at the release (CP-5).
             let p = crate::core::ftb::FtbProvider::new();
             let s = p.get_pack_summary(&http, &project_id).await;
-            let v = p.get_versions(&http, &project_id, None, None).await;
+            let pack_num = project_id.parse::<u64>().unwrap_or(0);
+            let v = match p.newest_release_version(&http, pack_num).await {
+                Ok(Some((vid, vname))) => Ok(vec![core::providers::ProjectVersion {
+                    provider: core::providers::ProviderKind::Ftb,
+                    id: vid.to_string(),
+                    name: vname.clone(),
+                    version_number: vname,
+                    game_versions: vec![],
+                    loaders: vec![],
+                    files: vec![],
+                    dependencies: vec![],
+                }]),
+                Ok(None) => Ok(vec![]),
+                Err(e) => Err(e),
+            };
             (s, v)
         }
         other => {
