@@ -199,3 +199,14 @@ Rust change. Confirm `type ProviderKind = "modrinth" | "curseForge" | "ftb" | "a
   + bindings regen. CP-2 done: `ExpectedHash::Md5` + `md-5` crate. **Spec correction:**
   `ExpectedHash` IS surfaced in `bindings.ts`, so CP-2 DID require a regen (original spec said
   none). Browse-`ProviderBadge` atlauncher label/color pulled forward at CP-1 (regen-forced).
+- 2026-06-26 — **ALL CHECKPOINTS IMPLEMENTED.** Commits: CP-1 `ebdf862`, CP-2 `99316f9`,
+  CP-3 `5e07ca2`, CP-4 `78ee1c8`, CP-5 `c42cdc0`, CP-6 `de78563` on branch
+  `feat/atlauncher-integration`. Full Rust suite **757 passed / 0 failed**; `check` green.
+  Bindings regenerated at CP-1 (`ProviderKind`) + CP-2 (`ExpectedHash` += `md5`). New ATL
+  unit tests: 18 atl provider + 3 providers + 3 download(md5) + 20 modpack planner + 12
+  lib (loader/version/recommended). Each checkpoint reviewed (ax-reviewer CONFIDENCE 87–92,
+  0 blockers) or self-reviewed (CP-2/CP-5/CP-6); review-driven fixes folded in (version URL
+  encoding, envelope leniency, planner docstring + datapack/jarmods/abs-path tests, pure
+  helper extraction, circular-test removal). **NOT yet done:** a live end-to-end install
+  against the real ATL API/CDN (a GUI/network smoke test) — only automated tests + tsc were
+  run. Update-APPLY for ATL packs remains out of scope (check-only, O-3).
