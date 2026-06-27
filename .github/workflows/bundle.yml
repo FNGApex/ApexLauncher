@@ -73,3 +73,55 @@ jobs:
             src-tauri/target/release/bundle/appimage/*.AppImage
             ApexLauncher_0.1.0_amd64.tar.gz
           retention-days: 14
+
+  macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # targets: installs the required cross-compilation target alongside the stable
+      # toolchain.  On macos-latest (Apple Silicon M-series runner), aarch64-apple-darwin
+      # is the native target; x86_64-apple-darwin is cross-compiled.  Using the dtolnay
+      # action's targets: input (rather than a separate rustup-target-add step) installs
+      # the target before rust-cache runs, so it is included in the cache key.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # prefix-key includes the matrix target to prevent the two legs from sharing a
+      # cache entry: both run on macos-latest with stable Rust, so without the target
+      # suffix their keys would collide and the slower x86_64 cross-compile could
+      # overwrite the aarch64 cache (or vice-versa).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          prefix-key: bundle-${{ matrix.target }}
+
+      # --target routes output to target/<target>/release/... (not target/release/)
+      # because tauri build uses a target-specific subdirectory when --target is given.
+      # --bundles dmg limits the output to the DMG format only.
+      # No apt/Linux deps or ilammy/msvc-dev-cmd needed on macOS.
+      - name: Build DMG
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles dmg
+
+      # Artifact name is per-arch (macos-dmg-aarch64-apple-darwin /
+      # macos-dmg-x86_64-apple-darwin) to avoid the upload-artifact@v4 name-collision
+      # error that would fire if both matrix legs uploaded under the same artifact name.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-${{ matrix.target }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          retention-days: 14
