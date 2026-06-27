@@ -137,7 +137,7 @@ export const commands = {
 	/**
 	 *  Search mods across a single provider.
 	 * 
-	 *  `provider` must be `"modrinth"` or `"curseforge"` (case-sensitive).
+	 *  `provider` must be `"modrinth"`, `"curseforge"`, `"ftb"`, or `"atlauncher"` (case-sensitive).
 	 *  Unknown provider strings return a typed `unknown_provider` error rather than panicking.
 	 *  The CF key is resolved from `MODLOADER_CF_API_KEY` env or `settings.curseforge_api_key`.
 	 *  `project_type` selects the content class: `"mod"` (default) or `"modpack"`.
@@ -540,8 +540,9 @@ export type DownloadPlan = {
  *  The expected hash for a single download item.
  * 
  *  The engine supports SHA-1 (used by Mojang asset objects), SHA-512
- *  (used by Modrinth files), and SHA-256 (used by Adoptium/Temurin JRE
- *  checksums). CurseForge fingerprints are out of scope until Phase 5.
+ *  (used by Modrinth files), SHA-256 (used by Adoptium/Temurin JRE
+ *  checksums), and MD5 (used by ATLauncher mod jars).
+ *  CurseForge fingerprints are out of scope until Phase 5.
  */
 export type ExpectedHash = 
 /**  SHA-1 hex digest. */
@@ -549,7 +550,9 @@ export type ExpectedHash =
 /**  SHA-256 hex digest. */
 { type: "sha256"; value: string } | 
 /**  SHA-512 hex digest. */
-{ type: "sha512"; value: string };
+{ type: "sha512"; value: string } | 
+/**  MD5 hex digest (used by ATLauncher mod jars). */
+{ type: "md5"; value: string };
 
 /**  A single file download that failed during `add_mod`. */
 export type FailedMod = {

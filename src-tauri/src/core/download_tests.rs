@@ -1459,6 +1459,44 @@ async fn f2_1_item_done_fires_once_per_item_success_fail_skip_mix() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// -----------------------------------------------------------------------
+// MD5 hash support tests (ATLauncher CP-2)
+// -----------------------------------------------------------------------
+
+/// `Md5` variant serializes with `"type":"md5"` tag and round-trips.
+#[test]
+fn expected_hash_md5_tag() {
+    let h = ExpectedHash::Md5("5d41402abc4b2a76b9719d911017c592".to_owned());
+    let json = serde_json::to_string(&h).unwrap();
+    assert!(json.contains("\"md5\""), "md5 tag missing: {json}");
+    assert!(json.contains("5d41402abc4b2a76b9719d911017c592"));
+    let rt: ExpectedHash = serde_json::from_str(&json).unwrap();
+    assert_eq!(h, rt);
+}
+
+/// `verify` returns true for a file whose content matches the expected MD5.
+/// MD5("hello") = 5d41402abc4b2a76b9719d911017c592 (well-known vector).
+#[test]
+fn verify_md5_match() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("cp2_atl_verify_md5_match.bin");
+    std::fs::write(&path, b"hello").unwrap();
+    let expected = ExpectedHash::Md5("5d41402abc4b2a76b9719d911017c592".to_owned());
+    assert!(verify(&path, &expected), "expected verify to return true for MD5 match");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `verify` returns false when the expected MD5 does not match the file content.
+#[test]
+fn verify_md5_mismatch() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("cp2_atl_verify_md5_mismatch.bin");
+    std::fs::write(&path, b"wrong content").unwrap();
+    let expected = ExpectedHash::Md5("5d41402abc4b2a76b9719d911017c592".to_owned());
+    assert!(!verify(&path, &expected), "expected verify to return false for MD5 mismatch");
+    let _ = std::fs::remove_file(&path);
+}
+
 /// `item_done` fires for cancelled items (success=false) and the total count
 /// still equals the plan length.
 #[tokio::test]

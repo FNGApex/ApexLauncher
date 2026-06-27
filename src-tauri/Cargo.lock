@@ -2362,6 +2362,7 @@ dependencies = [
  "hex",
  "keyring",
  "log",
+ "md-5",
  "notify",
  "notify-debouncer-full",
  "reqwest 0.12.28",

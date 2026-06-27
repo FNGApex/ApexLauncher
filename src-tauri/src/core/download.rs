@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-// `sha1::Digest` and `sha2::Digest` are re-exports of the same `digest::Digest`
-// trait; import once via sha1 and it covers both hasher types.
+// `sha1::Digest`, `sha2::Digest`, and `md5::Digest` are all re-exports of the
+// same `digest::Digest` trait; import once via sha1 and it covers all hasher types.
 use sha1::Digest;
 
 // ---------------------------------------------------------------------------
@@ -20,8 +20,9 @@ use sha1::Digest;
 /// The expected hash for a single download item.
 ///
 /// The engine supports SHA-1 (used by Mojang asset objects), SHA-512
-/// (used by Modrinth files), and SHA-256 (used by Adoptium/Temurin JRE
-/// checksums). CurseForge fingerprints are out of scope until Phase 5.
+/// (used by Modrinth files), SHA-256 (used by Adoptium/Temurin JRE
+/// checksums), and MD5 (used by ATLauncher mod jars).
+/// CurseForge fingerprints are out of scope until Phase 5.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum ExpectedHash {
@@ -31,6 +32,8 @@ pub enum ExpectedHash {
     Sha256(String),
     /// SHA-512 hex digest.
     Sha512(String),
+    /// MD5 hex digest (used by ATLauncher mod jars).
+    Md5(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +192,7 @@ impl ProgressSink for CapturingItemSink {
 // Incremental hashing
 // ---------------------------------------------------------------------------
 
-/// An incremental hasher that wraps a SHA-1, SHA-256, or SHA-512 computation.
+/// An incremental hasher that wraps a SHA-1, SHA-256, SHA-512, or MD5 computation.
 ///
 /// Call [`update`](Self::update) with successive byte slices (e.g. network
 /// chunks or read-buffer chunks), then [`finalize`](Self::finalize) to obtain
@@ -199,6 +202,7 @@ pub enum IncrementalHasher {
     Sha1(sha1::Sha1),
     Sha256(sha2::Sha256),
     Sha512(sha2::Sha512),
+    Md5(md5::Md5),
 }
 
 impl IncrementalHasher {
@@ -208,6 +212,7 @@ impl IncrementalHasher {
             ExpectedHash::Sha1(_) => IncrementalHasher::Sha1(sha1::Sha1::new()),
             ExpectedHash::Sha256(_) => IncrementalHasher::Sha256(sha2::Sha256::new()),
             ExpectedHash::Sha512(_) => IncrementalHasher::Sha512(sha2::Sha512::new()),
+            ExpectedHash::Md5(_) => IncrementalHasher::Md5(md5::Md5::new()),
         }
     }
 
@@ -217,6 +222,7 @@ impl IncrementalHasher {
             IncrementalHasher::Sha1(h) => h.update(data),
             IncrementalHasher::Sha256(h) => h.update(data),
             IncrementalHasher::Sha512(h) => h.update(data),
+            IncrementalHasher::Md5(h) => h.update(data),
         }
     }
 
@@ -226,6 +232,7 @@ impl IncrementalHasher {
             IncrementalHasher::Sha1(h) => hex::encode(h.finalize()),
             IncrementalHasher::Sha256(h) => hex::encode(h.finalize()),
             IncrementalHasher::Sha512(h) => hex::encode(h.finalize()),
+            IncrementalHasher::Md5(h) => hex::encode(h.finalize()),
         }
     }
 }
@@ -264,7 +271,7 @@ pub(crate) fn verify(path: &Path, expected: &ExpectedHash) -> bool {
     }
     let actual = hasher.finalize();
     let expected_hex = match expected {
-        ExpectedHash::Sha1(h) | ExpectedHash::Sha256(h) | ExpectedHash::Sha512(h) => h,
+        ExpectedHash::Sha1(h) | ExpectedHash::Sha256(h) | ExpectedHash::Sha512(h) | ExpectedHash::Md5(h) => h,
     };
     // Case-insensitive comparison in case the caller stored an uppercase digest.
     actual.eq_ignore_ascii_case(expected_hex)
@@ -477,7 +484,7 @@ pub async fn download_item(
     if let (Some(h), Some(expected)) = (hasher, &item.expected_hash) {
         let actual = h.finalize();
         let expected_hex = match expected {
-            ExpectedHash::Sha1(s) | ExpectedHash::Sha256(s) | ExpectedHash::Sha512(s) => s,
+            ExpectedHash::Sha1(s) | ExpectedHash::Sha256(s) | ExpectedHash::Sha512(s) | ExpectedHash::Md5(s) => s,
         };
         if !actual.eq_ignore_ascii_case(expected_hex) {
             // Cleanup .part — best-effort, ignore secondary I/O errors.
