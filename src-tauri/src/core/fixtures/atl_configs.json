@@ -1,0 +1,111 @@
+{
+  "version": "1.2.0",
+  "minecraft": "1.20.1",
+  "loader": {
+    "type": "neoforge",
+    "metadata": {
+      "version": "47.1.84",
+      "loader": ""
+    }
+  },
+  "mods": [
+    {
+      "name": "JEI",
+      "version": "15.3.0.4",
+      "url": "mods/jei-1.20.1-forge-15.3.0.4.jar",
+      "file": "jei-1.20.1-forge-15.3.0.4.jar",
+      "md5": "abc123def456abc123def456abc12345",
+      "type": "mods",
+      "download": "server",
+      "filesize": 524288,
+      "path": "",
+      "client": true,
+      "optional": false,
+      "curseId": 238222,
+      "curseFileId": 5034058
+    },
+    {
+      "name": "DirectMod",
+      "version": "1.0.0",
+      "url": "https://external.site.com/files/direct-mod-1.0.0.jar",
+      "file": "direct-mod-1.0.0.jar",
+      "md5": "111222333444555666777888999000aa",
+      "type": "mods",
+      "download": "direct",
+      "filesize": 131072,
+      "path": "",
+      "client": true,
+      "optional": false
+    },
+    {
+      "name": "BrowserMod",
+      "version": "2.0.0",
+      "url": "https://some-mod-site.com/download/browser-mod-2.0.0",
+      "file": "browser-mod-2.0.0.jar",
+      "md5": "",
+      "type": "mods",
+      "download": "browser",
+      "filesize": 262144,
+      "path": "",
+      "client": true,
+      "optional": false
+    },
+    {
+      "name": "Fancy Resource Pack",
+      "version": "3.0",
+      "url": "resourcepacks/fancy-rp-3.0.zip",
+      "file": "fancy-rp-3.0.zip",
+      "md5": "aabbccddeeffaabbccddeeffaabbccdd",
+      "type": "resourcepack",
+      "download": "server",
+      "filesize": 4194304,
+      "path": "",
+      "client": true,
+      "optional": false
+    },
+    {
+      "name": "OptionalHelper",
+      "version": "0.5.0",
+      "url": "mods/optional-helper-0.5.0.jar",
+      "file": "optional-helper-0.5.0.jar",
+      "md5": "optionalhash1234567890abcdef1234",
+      "type": "mods",
+      "download": "server",
+      "filesize": 65536,
+      "path": "",
+      "client": true,
+      "optional": true
+    },
+    {
+      "name": "ServerOnlyLib",
+      "version": "1.0.0",
+      "url": "mods/server-only-lib-1.0.0.jar",
+      "file": "server-only-lib-1.0.0.jar",
+      "md5": "serveronlyhash123456789012345678",
+      "type": "mods",
+      "download": "server",
+      "filesize": 32768,
+      "path": "",
+      "client": false,
+      "optional": false
+    },
+    {
+      "name": "OldLegacyMod",
+      "version": "1.0",
+      "url": "mods/old-legacy-1.0.jar",
+      "file": "old-legacy-1.0.jar",
+      "md5": "",
+      "type": "decomp",
+      "download": "server",
+      "filesize": 16384,
+      "path": "",
+      "client": true,
+      "optional": false
+    }
+  ],
+  "configs": {
+    "filesize": 8192,
+    "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+  },
+  "memory": 4096
+}
