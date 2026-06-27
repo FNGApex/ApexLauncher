@@ -2,17 +2,17 @@
 
 ## What it does
 
-Concurrent, hash-verified download engine that executes a `DownloadPlan` (list of `(url, dest, expected_hash, size)` items), verifies each file's SHA-1, SHA-256, or SHA-512 hash on completion, skips files already present with a matching hash, resumes `.part` files via HTTP `Range` requests with a TOCTOU guard (detects `.part` file growth between metadata read and append-open; triggers a clean full-GET restart), and streams per-chunk progress through a `ProgressSink` trait. Also exposes a `CancelToken` type (used by `TaskManager`) — an `Arc<AtomicBool>` wrapper checked at per-item boundaries to abort plan execution early. No Minecraft-specific logic; the engine is resolver-agnostic.
+Concurrent, hash-verified download engine that executes a `DownloadPlan` (list of `(url, dest, expected_hash, size)` items), verifies each file's SHA-1, SHA-256, SHA-512, or MD5 hash on completion, skips files already present with a matching hash, resumes `.part` files via HTTP `Range` requests with a TOCTOU guard (detects `.part` file growth between metadata read and append-open; triggers a clean full-GET restart), and streams per-chunk progress through a `ProgressSink` trait. Also exposes a `CancelToken` type (used by `TaskManager`) — an `Arc<AtomicBool>` wrapper checked at per-item boundaries to abort plan execution early. No Minecraft-specific logic; the engine is resolver-agnostic. MD5 was added for ATLauncher — ATL mod jars carry only an md5 hash (no sha1/sha256).
 
 ## CLI code
 
-- `src-tauri/src/core/download.rs` (761 lines) — entire engine: `ExpectedHash` (Sha1/Sha256/Sha512 variants), `DownloadItem`, `DownloadPlan`, `DownloadError` (Network/HashMismatch/Io), `ProgressUpdate`, `ProgressSink` trait, `NoOpSink`, `IncrementalHasher`, `verify`, `needs_download`, `download_item`, `seed_hasher_from_file` (seeds hasher from partial `.part` bytes on resume), `execute_plan`, `execute_plan_cancellable` (same as `execute_plan` + checks `CancelToken` before each item), `build_client`; `CancelToken` (`Arc<AtomicBool>`, `cancel()`, `is_cancelled()`, `Default` = uncancelled); `CapturingSink` (test-only mock, stays module-scope); ends with a `#[cfg(test)] #[path = "download_tests.rs"] mod tests;` stub
-- `src-tauri/src/core/download_tests.rs` — 41 unit tests (`#[test]`/`#[tokio::test]`) via hand-rolled `tokio::net::TcpListener` mock, wired back into `download.rs` via the `#[path]` stub
+- `src-tauri/src/core/download.rs` — entire engine: `ExpectedHash` (Sha1/Sha256/Sha512/Md5 variants), `DownloadItem`, `DownloadPlan`, `DownloadError` (Network/HashMismatch/Io), `ProgressUpdate`, `ProgressSink` trait, `NoOpSink`, `IncrementalHasher` (Sha1/Sha256/Sha512/Md5 variants via `md5::Md5`), `verify`, `needs_download`, `download_item`, `seed_hasher_from_file` (seeds hasher from partial `.part` bytes on resume), `execute_plan`, `execute_plan_cancellable` (same as `execute_plan` + checks `CancelToken` before each item), `build_client`; `CancelToken` (`Arc<AtomicBool>`, `cancel()`, `is_cancelled()`, `Default` = uncancelled); `CapturingSink` (test-only mock, stays module-scope); ends with a `#[cfg(test)] #[path = "download_tests.rs"] mod tests;` stub
+- `src-tauri/src/core/download_tests.rs` — 44 unit tests (`#[test]`/`#[tokio::test]`) via hand-rolled `tokio::net::TcpListener` mock, wired back into `download.rs` via the `#[path]` stub (was 41, +3 for Md5 hash variant coverage)
 - `src-tauri/src/lib.rs` — `TauriEventSink` (emits `download://progress` Tauri event); `execute_download_plan` async Tauri command (takes `DownloadPlan` + optional `concurrency: usize`, clamps 1–32, default 8)
 
 ## Artifacts
 
-- `src/lib/ipc.ts` — `DownloadItem` (expectedHash union includes sha1/sha256/sha512), `DownloadPlan`, `ItemStatus`, `ItemOutcome`, `PlanResult`, `DownloadProgressPayload` interfaces; `executeDownloadPlan` wrapper
+- `src/lib/ipc.ts` — `DownloadItem` (expectedHash union includes sha1/sha256/sha512/md5), `DownloadPlan`, `ItemStatus`, `ItemOutcome`, `PlanResult`, `DownloadProgressPayload` interfaces; `executeDownloadPlan` wrapper
 
 ## Docs
 
@@ -27,6 +27,7 @@ Concurrent, hash-verified download engine that executes a `DownloadPlan` (list o
 - `CancelToken` is imported by `task_manager.rs` (download-runner domain): `TaskManager` stores one `CancelToken` per enqueued task; `execute_plan_cancellable` is called from `ImportMrpackJob`, `ImportCfZipJob`, `UpdateModpackJob`, `ModAddJob`, `ModUpdateJob` in `lib.rs`.
 - Slice B (vanilla resolver, `core/resolver.rs`) produces `DownloadPlan` inputs for this engine. Changes to `DownloadItem` or `ExpectedHash` require updates in `resolver.rs`.
 - Slice C (java domain, `core/java.rs`) uses `DownloadItem`, `ExpectedHash::Sha256`, `DownloadPlan`, `execute_plan`, and `NoOpSink` directly. Breaking changes cascade to `java.rs`.
+- ATL modpack install (`ImportAtlJob` in `lib.rs`) uses `ExpectedHash::Md5` for all ATL mod jar `DownloadItem`s; `build_atl_pack_plan` in `core/modpack.rs` constructs these items. The `md-5` crate was added as a dep alongside the existing `sha1`/`sha2`/`hex` deps.
 - `execute_download_plan` command registered in `lib.rs` alongside all other domain commands — adding new IPC commands requires editing `lib.rs` across domains.
 
 ## Conventions worth knowing
@@ -38,5 +39,5 @@ Concurrent, hash-verified download engine that executes a `DownloadPlan` (list o
 - `execute_plan_cancellable` checks `cancel.is_cancelled()` before starting each item; returns early (partial plan) when tripped. The completed items' outcomes are still returned.
 - `CancelToken::default()` returns an uncancelled token; `CancelToken::new()` is an alias. `is_cancelled()` is an atomic load; `cancel()` is an atomic store.
 - `CapturingSink` is `#[cfg(test)]` only — not available in production builds.
-- Deps added for this module: `sha1 = "0.10"`, `sha2 = "0.10"`, `hex = "0.4"`, `futures-util = "0.3"`, `tokio = { features = ["sync"] }`; dev: `tokio = { features = ["rt", "macros", "net", "io-util"] }`.
-- CurseForge fingerprint hashing is out of scope until Phase 5; SHA-1 (Mojang assets), SHA-256 (Adoptium Temurin JREs), and SHA-512 (Modrinth) are the three hash variants now supported.
+- Deps added for this module: `sha1 = "0.10"`, `sha2 = "0.10"`, `hex = "0.4"`, `md-5 = "0.10"` (added for ATLauncher), `futures-util = "0.3"`, `tokio = { features = ["sync"] }`; dev: `tokio = { features = ["rt", "macros", "net", "io-util"] }`.
+- CurseForge fingerprint hashing is out of scope until Phase 5; SHA-1 (Mojang assets), SHA-256 (Adoptium Temurin JREs), SHA-512 (Modrinth), and MD5 (ATLauncher mod jars) are the four hash variants now supported.

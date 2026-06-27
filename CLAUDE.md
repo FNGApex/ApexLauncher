@@ -45,7 +45,7 @@ new conventions) so the signals stay accurate.
 ## Project overview
 
 ApexLauncher is a lightweight, cross-platform **Minecraft** mod launcher (PrismLauncher-like)
-that imports modpacks from **both CurseForge and Modrinth**.
+that imports modpacks from **CurseForge, Modrinth, FTB, and ATLauncher**.
 
 - **Frontend:** React 19 + TypeScript + Vite 7 + Tailwind v4 + React Router + TanStack Query (+ Zustand for UI state)
 - **Backend:** Rust via **Tauri 2** (downloads, instance mgmt, Java mgmt, launch, auth)
