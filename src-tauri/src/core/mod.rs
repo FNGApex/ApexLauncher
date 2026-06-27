@@ -19,7 +19,9 @@
 //! - `curseforge` — CurseForge `ModProvider` implementation (Phase 5 slice A, CP3).
 //! - `materialize` — hardlink-with-copy-fallback instance file-tree builder (storage-auth-reorg C1).
 //! - `modpack`     — Modrinth `.mrpack` parse + plan + overrides extraction (Phase 6 slice A).
+//! - `atl`       — ATLauncher `ModProvider` implementation (Phase 7 / ATL CP-1).
 
+pub mod atl;
 pub mod auth;
 pub mod curseforge;
 pub mod download;

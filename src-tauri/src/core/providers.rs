@@ -210,6 +210,7 @@ pub enum ProviderKind {
     Modrinth,
     CurseForge,
     Ftb,
+    Atlauncher,
 }
 
 // ── HTTP seam ─────────────────────────────────────────────────────────────────

@@ -128,9 +128,10 @@ pub fn page_url_for(provider: ProviderKind, slug_or_id: &str) -> String {
         ProviderKind::CurseForge => {
             format!("https://www.curseforge.com/minecraft/mc-mods/{slug_or_id}")
         }
-        // FTB is a pack-only source (no per-mod add), so this is never hit for an
-        // FTB mod in practice; link to the FTB pack page as a sane fallback.
+        // FTB and ATL are pack-only sources (no per-mod add); link to pack pages as
+        // a sane fallback in the rare case these appear in a mod context.
         ProviderKind::Ftb => format!("https://www.feed-the-beast.com/modpacks/{slug_or_id}"),
+        ProviderKind::Atlauncher => format!("https://atlauncher.com/pack/{slug_or_id}"),
     }
 }
 
@@ -506,6 +507,7 @@ fn provider_kind_str(kind: ProviderKind) -> String {
         ProviderKind::Modrinth => "modrinth".to_string(),
         ProviderKind::CurseForge => "curseforge".to_string(),
         ProviderKind::Ftb => "ftb".to_string(),
+        ProviderKind::Atlauncher => "atlauncher".to_string(),
     }
 }
 

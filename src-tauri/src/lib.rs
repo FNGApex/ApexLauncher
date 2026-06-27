@@ -1324,7 +1324,7 @@ fn unknown_provider_err(other: &str) -> ProviderCommandError {
 
 /// Search mods across a single provider.
 ///
-/// `provider` must be `"modrinth"` or `"curseforge"` (case-sensitive).
+/// `provider` must be `"modrinth"`, `"curseforge"`, `"ftb"`, or `"atlauncher"` (case-sensitive).
 /// Unknown provider strings return a typed `unknown_provider` error rather than panicking.
 /// The CF key is resolved from `MODLOADER_CF_API_KEY` env or `settings.curseforge_api_key`.
 /// `project_type` selects the content class: `"mod"` (default) or `"modpack"`.
@@ -3618,9 +3618,10 @@ async fn install_modpack(
     let provider_str = match resolved.provider {
         ProviderKind::Modrinth => "modrinth".to_string(),
         ProviderKind::CurseForge => "curseForge".to_string(),
-        // FTB never reaches the single-archive path — `install_modpack` routes it
-        // to `ImportFtbJob` before `resolve_pack_file` is called.
+        // FTB and ATL never reach the single-archive path — `install_modpack` routes
+        // them to their dedicated jobs before `resolve_pack_file` is called.
         ProviderKind::Ftb => unreachable!("FTB installs via the dedicated ftb arm"),
+        ProviderKind::Atlauncher => unreachable!("ATL installs via the dedicated atl arm"),
     };
     let source = instances::Source {
         provider: provider_str,
@@ -3654,6 +3655,7 @@ async fn install_modpack(
             enqueue_import_cf_zip(&app, &manager, bytes, name_override, Some(source)).await
         }
         ProviderKind::Ftb => unreachable!("FTB installs via the dedicated ftb arm"),
+        ProviderKind::Atlauncher => unreachable!("ATL installs via the dedicated atl arm"),
     }
 }
 
@@ -3767,9 +3769,10 @@ impl TaskJob for UpdateModpackJob {
                         Err(e) => { ctx.finish_failed(e.to_string()).await; return; }
                     }
                 }
-                // FTB update-apply is out of v1 scope (check-only); FTB packs never
-                // enqueue an UpdateModpackJob.
+                // FTB and ATL update-apply are out of v1 scope (check-only); their
+                // packs never enqueue an UpdateModpackJob.
                 ProviderKind::Ftb => unreachable!("FTB update-apply is not wired in v1"),
+                ProviderKind::Atlauncher => unreachable!("ATL update-apply is not wired in v1"),
             };
 
         // Reconcile mods.
