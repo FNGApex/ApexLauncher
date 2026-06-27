@@ -19,12 +19,14 @@ export function formatDownloads(n: number): string {
   return String(n);
 }
 
-function providerRoute(pack: ProjectSummary): "modrinth" | "curseforge" | "ftb" {
+function providerRoute(pack: ProjectSummary): "modrinth" | "curseforge" | "ftb" | "atlauncher" {
   return pack.provider === "modrinth"
     ? "modrinth"
     : pack.provider === "curseForge"
       ? "curseforge"
-      : "ftb";
+      : pack.provider === "atlauncher"
+        ? "atlauncher"
+        : "ftb";
 }
 
 // ---------------------------------------------------------------------------

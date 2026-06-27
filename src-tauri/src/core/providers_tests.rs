@@ -243,11 +243,35 @@ fn cf_fixture_second_mod_no_distribution_has_logo() {
     assert!(summary[1].icon_url.is_some());
 }
 
+// ── ProviderKind::Atlauncher serde ────────────────────────────────────────
+
+#[test]
+fn provider_kind_atlauncher_serializes_to_atlauncher() {
+    // Under #[serde(rename_all="camelCase")], single-word "Atlauncher" → "atlauncher".
+    let s = serde_json::to_string(&ProviderKind::Atlauncher).unwrap();
+    assert_eq!(s, "\"atlauncher\"");
+}
+
+#[test]
+fn provider_kind_atlauncher_deserializes_from_atlauncher() {
+    let pk: ProviderKind = serde_json::from_str("\"atlauncher\"").unwrap();
+    assert_eq!(pk, ProviderKind::Atlauncher);
+}
+
 // ── Object safety: Box<dyn ModProvider> must compile ─────────────────────
 
 // This test is a compile-time assertion: if `ModProvider` is not object-safe,
 // the function below will fail to compile.
 fn _assert_mod_provider_object_safe(_: Box<dyn ModProvider>) {}
+
+// Verify AtlProvider can be boxed as dyn ModProvider (object safety).
+#[test]
+fn atl_provider_is_object_safe_as_dyn_mod_provider() {
+    use crate::core::atl::AtlProvider;
+    let _boxed: Box<dyn ModProvider> = Box::new(AtlProvider::new());
+    // If AtlProvider doesn't implement ModProvider or the trait is not object-safe,
+    // this test fails to compile.
+}
 
 // ── ProviderHttpClient seam: mock impl compiles and delivers responses ─────
 

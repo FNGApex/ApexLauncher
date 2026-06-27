@@ -17,6 +17,7 @@ use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::atl::{AtlConfigsManifest, AtlMod};
 use crate::core::download::{DownloadItem, ExpectedHash};
 use crate::core::instances::{ModEntry, PendingManual};
 
@@ -876,6 +877,249 @@ pub async fn resolve_and_build_ftb_plan(
     let mut plan = build_ftb_pack_plan(manifest, &resolved_cf, mc_dir)?;
     plan.failed = failed;
     Ok(plan)
+}
+
+// ── ATL pack planner ──────────────────────────────────────────────────────────
+
+/// The result of [`build_atl_pack_plan`].
+///
+/// Mirrors the [`FtbPackPlan`]/[`CfPackPlan`] family so it feeds the same
+/// `remap_to_staging`/`promote_staging`/`execute_plan_cancellable` pipeline.
+#[derive(Debug, Clone)]
+pub struct AtlPackPlan {
+    /// Download items ready for the engine (ATL CDN + direct-URL files).
+    pub items: Vec<DownloadItem>,
+    /// Mod entries for files that auto-resolved to a download (mods-family types).
+    pub mods: Vec<ModEntry>,
+    /// Files requiring manual download (`download == "browser"`; rare — O-2).
+    pub manual: Vec<CfManualFile>,
+    /// Files skipped: legacy/exotic types (`decomp`, `extract`, …) or unknown
+    /// `download` values.
+    pub skipped: Vec<String>,
+}
+
+/// ATL mod types that map to the `mods/` folder (and receive a `ModEntry`).
+const ATL_MODS_FAMILY: &[&str] = &[
+    "mods",
+    "dependency",
+    "depandency", // real ATL typo seen in the wild
+    "coremods",
+    "ic2lib",
+    "denlib",
+    "flan",
+    "plugins",
+];
+
+/// ATL mod types that cannot be installed automatically.
+/// The planner silently records them in [`AtlPackPlan::skipped`].
+const ATL_LEGACY_TYPES: &[&str] = &[
+    "extract",
+    "decomp",
+    "texturepackextract",
+    "resourcepackextract",
+    "millenaire",
+];
+
+/// Returns `true` when `mod_type` (compared case-insensitively) belongs to the
+/// mods-family set that maps to `mods/` and gets a `ModEntry`.
+fn is_atl_mods_family(mod_type: &str) -> bool {
+    let t = mod_type.to_ascii_lowercase();
+    ATL_MODS_FAMILY.iter().any(|&s| s == t.as_str())
+}
+
+/// Compute the relative dest path for an ATLauncher mod entry.
+///
+/// - If `m.path` is non-empty the path override is normalised (strips leading
+///   `./`, `/` and trailing `/`) and joined with `m.file`.
+/// - Otherwise `m.mod_type` is mapped to its standard folder.
+/// - Legacy/exotic types (`decomp`, `extract`, …) return `Ok(None)` — the caller
+///   records them in [`AtlPackPlan::skipped`] and continues.
+/// - Unknown types also return `Ok(None)`.
+/// - A leading `/` on a `path` override is stripped (normalised to a relative
+///   path, mirroring `ftb_dest_path`), so a unix-absolute override resolves
+///   inside the instance dir rather than escaping it.
+/// - `..` components and Windows drive-letter prefixes (`C:\…`) are rejected
+///   with `Err(ModpackError::UnsafePath)` (via `validate_relative_path`).
+pub fn atl_dest_path(m: &AtlMod) -> Result<Option<String>, ModpackError> {
+    let rel: String = if !m.path.is_empty() {
+        // Normalise path override: strip leading "./" / "/" and trailing "/",
+        // then join with the filename (mirrors ftb_dest_path normalisation).
+        let base = m
+            .path
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .trim_end_matches('/');
+        if base.is_empty() {
+            m.file.clone()
+        } else {
+            format!("{base}/{}", m.file)
+        }
+    } else {
+        let t = m.mod_type.to_ascii_lowercase();
+        let ts = t.as_str();
+        let folder: &str = if ATL_MODS_FAMILY.iter().any(|&s| s == ts) {
+            "mods"
+        } else if ts == "resourcepack" || ts == "texturepack" {
+            "resourcepacks"
+        } else if ts == "shaderpack" {
+            "shaderpacks"
+        } else if ts == "datapack" {
+            "datapacks"
+        } else if ts == "jar" || ts == "forge" || ts == "mcpc" {
+            "jarmods"
+        } else if ATL_LEGACY_TYPES.iter().any(|&s| s == ts) {
+            return Ok(None); // legacy type → skip
+        } else {
+            return Ok(None); // unknown type → skip
+        };
+        format!("{folder}/{}", m.file)
+    };
+
+    validate_relative_path(&rel)?;
+    Ok(Some(rel))
+}
+
+/// Build an [`AtlPackPlan`] from a parsed [`AtlConfigsManifest`].
+///
+/// `cdn_base` is the ATL CDN root (e.g.
+/// `"https://download.nodecdn.net/containers/atl"`). `server` mod URLs are
+/// expanded as `{cdn_base}/{m.url}`. `direct` mod URLs are used verbatim.
+/// `browser` mods go to the pending-manual pipeline (O-2). `optional` mods are
+/// included by default (O-4). `client == false` mods are silently dropped.
+///
+/// # Errors
+/// - [`ModpackError::UnsafePath`] — a computed dest path contains `..`, is
+///   absolute, or has a Windows drive-letter prefix.
+pub fn build_atl_pack_plan(
+    manifest: &AtlConfigsManifest,
+    cdn_base: &str,
+    mc_dir: &Path,
+) -> Result<AtlPackPlan, ModpackError> {
+    let mut items: Vec<DownloadItem> = Vec::new();
+    let mut mods: Vec<ModEntry> = Vec::new();
+    let mut manual: Vec<CfManualFile> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    let cdn = cdn_base.trim_end_matches('/');
+
+    for m in &manifest.mods {
+        // Skip server-only mods silently (mirrors FTB serveronly behaviour).
+        if !m.client {
+            continue;
+        }
+
+        // Compute dest; legacy/unknown types → push to skipped and continue.
+        let rel = match atl_dest_path(m)? {
+            Some(r) => r,
+            None => {
+                skipped.push(m.file.clone());
+                continue;
+            }
+        };
+        let dest = mc_dir.join(&rel);
+        let is_mods_fam = is_atl_mods_family(&m.mod_type);
+
+        match m.download.as_str() {
+            "server" => {
+                let url = format!("{cdn}/{}", m.url);
+                let expected_hash =
+                    (!m.md5.is_empty()).then(|| ExpectedHash::Md5(m.md5.clone()));
+                let size = (m.filesize > 0).then_some(m.filesize);
+                items.push(DownloadItem { url, dest, expected_hash, size });
+                if is_mods_fam {
+                    mods.push(make_atl_mod_entry(m));
+                }
+            }
+            "direct" => {
+                let expected_hash =
+                    (!m.md5.is_empty()).then(|| ExpectedHash::Md5(m.md5.clone()));
+                let size = (m.filesize > 0).then_some(m.filesize);
+                items.push(DownloadItem {
+                    url: m.url.clone(),
+                    dest,
+                    expected_hash,
+                    size,
+                });
+                if is_mods_fam {
+                    mods.push(make_atl_mod_entry(m));
+                }
+            }
+            "browser" => {
+                // Rare — map to the pending-manual pipeline (O-2). No ModEntry:
+                // mirrors the CF manual-file pipeline (mod not yet downloaded).
+                let size = (m.filesize > 0).then_some(m.filesize);
+                manual.push(CfManualFile {
+                    project_id: 0,
+                    file_id: 0,
+                    file_name: m.file.clone(),
+                    page_url: m.url.clone(),
+                    expected_sha1: None,
+                    size,
+                });
+            }
+            other => {
+                log::warn!(
+                    "modpack: ATL mod '{}' has unknown download type '{}' — skipped",
+                    m.file,
+                    other
+                );
+                skipped.push(m.file.clone());
+            }
+        }
+    }
+
+    Ok(AtlPackPlan { items, mods, manual, skipped })
+}
+
+/// Build a [`ModEntry`] for an ATLauncher mod jar.
+fn make_atl_mod_entry(m: &AtlMod) -> ModEntry {
+    let mut hashes = BTreeMap::new();
+    if !m.md5.is_empty() {
+        hashes.insert("md5".to_string(), m.md5.clone());
+    }
+    ModEntry {
+        provider: "atlauncher".to_string(),
+        project_id: m.curse_id.map(|id| id.to_string()).unwrap_or_default(),
+        version_id: String::new(),
+        file_name: m.file.clone(),
+        hashes,
+        enabled: true,
+        side: "both".to_string(),
+        from_pack: true,
+        name: (!m.name.is_empty()).then(|| m.name.clone()),
+        icon_url: None,
+        summary: None,
+    }
+}
+
+/// Extract a `Configs.zip` archive **root-relative** into `mc_dir`.
+///
+/// Every entry is taken as a path relative to `mc_dir` — no prefix is stripped
+/// (the archive itself is already root-relative, unlike `.mrpack` overrides which
+/// have an `overrides/` wrapper).
+///
+/// Extraction is zip-slip-safe: every entry path must pass
+/// [`validate_relative_path`] and the structural containment check inside
+/// [`extract_prefix`].
+///
+/// Returns the total number of files extracted (directory entries not counted).
+///
+/// The caller is responsible for skipping this call when
+/// `manifest.configs.is_none()` (no archive exists for vanilla packs or packs
+/// with `noConfigs`).
+///
+/// # Errors
+/// - [`ModpackError::UnsafePath`] — an entry path is structurally unsafe.
+/// - [`ModpackError::ZipSlip`] — an entry resolves outside `mc_dir`.
+/// - [`ModpackError::Io`] — an I/O error during extraction.
+/// - [`ModpackError::Zip`] — a zip-crate error reading the archive.
+pub fn extract_atl_configs<R: Read + io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    mc_dir: &Path,
+) -> Result<u32, ModpackError> {
+    // An empty prefix causes every entry to be taken as root-relative —
+    // exactly the layout expected from a Configs.zip.
+    extract_prefix(archive, mc_dir, "")
 }
 
 /// Open a CurseForge pack `.zip` from raw bytes and parse its `manifest.json`.

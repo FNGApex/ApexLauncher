@@ -1,0 +1,38 @@
+{
+  "error": false,
+  "code": 200,
+  "message": "Loaded all public packs.",
+  "data": [
+    {
+      "id": 3,
+      "name": "Sky Factory 4",
+      "safeName": "SkyFactory4",
+      "type": "private",
+      "description": "The sky is the limit!\nBuild your way up.",
+      "versions": [
+        { "version": "4.2.4", "minecraft": "1.12.2", "published": 1600000000 }
+      ]
+    },
+    {
+      "id": 1,
+      "name": "All The Forge 10",
+      "safeName": "AllTheForge10",
+      "type": "private",
+      "description": "A Forge kitchen-sink modpack.\nLots of mods included.",
+      "versions": [
+        { "version": "1.2.3", "minecraft": "1.20.1", "published": 1700000000 },
+        { "version": "1.2.0", "minecraft": "1.20.1", "published": 1699000000 }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Direwolf20 1.20",
+      "safeName": "Direwolf201_20",
+      "type": "private",
+      "description": "Direwolf20 plays, you follow.",
+      "versions": [
+        { "version": "1.0.0", "minecraft": "1.20.1", "published": 1700000001 }
+      ]
+    }
+  ]
+}

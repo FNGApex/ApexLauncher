@@ -2136,3 +2136,426 @@ async fn resolve_and_build_ftb_plan_key_missing_aborts() {
     let result = resolve_and_build_ftb_plan(&provider, &client, &manifest, tmp.path()).await;
     assert!(matches!(result, Err(ModpackError::ResolverKeyMissing)), "got {result:?}");
 }
+
+// ── ATL install planner (CP-3) ────────────────────────────────────────────────
+
+use crate::core::atl::{AtlConfigsManifest, AtlMod};
+
+/// Build a minimal `AtlMod` for test use.
+fn atl_mod_entry(
+    name: &str,
+    file: &str,
+    url: &str,
+    md5: &str,
+    mod_type: &str,
+    download: &str,
+    filesize: u64,
+    path: &str,
+    client: bool,
+    optional: bool,
+) -> AtlMod {
+    AtlMod {
+        name: name.to_string(),
+        version: String::new(),
+        url: url.to_string(),
+        file: file.to_string(),
+        md5: md5.to_string(),
+        mod_type: mod_type.to_string(),
+        download: download.to_string(),
+        filesize,
+        path: path.to_string(),
+        client,
+        optional,
+        curse_id: None,
+        curse_file_id: None,
+    }
+}
+
+/// Build a minimal `AtlConfigsManifest` with one or more mods.
+fn atl_manifest(mods: Vec<AtlMod>) -> AtlConfigsManifest {
+    AtlConfigsManifest {
+        version: "1.0".to_string(),
+        minecraft: "1.20.1".to_string(),
+        loader: None,
+        mods,
+        configs: None,
+        memory: None,
+    }
+}
+
+const ATL_CDN: &str = "https://cdn.example.com";
+
+#[test]
+fn atl_server_mod_creates_download_item_with_md5() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "JEI", "jei.jar", "packs/jei.jar", "abc123", "mods", "server", 1024, "", true, false,
+    )]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert_eq!(plan.items.len(), 1);
+    let item = &plan.items[0];
+    assert_eq!(item.url, "https://cdn.example.com/packs/jei.jar");
+    assert_eq!(item.dest, tmp.path().join("mods/jei.jar"));
+    assert!(
+        matches!(&item.expected_hash, Some(ExpectedHash::Md5(h)) if h == "abc123"),
+        "expected Md5(abc123), got {:?}",
+        item.expected_hash
+    );
+    assert_eq!(item.size, Some(1024));
+}
+
+#[test]
+fn atl_direct_mod_uses_absolute_url() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "DirectMod",
+        "direct.jar",
+        "https://external.cdn/direct.jar",
+        "def456",
+        "mods",
+        "direct",
+        2048,
+        "",
+        true,
+        false,
+    )]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].url, "https://external.cdn/direct.jar");
+    assert_eq!(plan.items[0].dest, tmp.path().join("mods/direct.jar"));
+    assert!(matches!(plan.items[0].expected_hash, Some(ExpectedHash::Md5(_))));
+}
+
+#[test]
+fn atl_browser_mod_routes_to_manual() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "BrowserMod",
+        "browser.jar",
+        "https://somesite.com/browser.jar",
+        "",
+        "mods",
+        "browser",
+        3000,
+        "",
+        true,
+        false,
+    )]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert!(plan.items.is_empty(), "browser mod must not produce a DownloadItem");
+    assert!(plan.mods.is_empty(), "browser mod must not produce a ModEntry (not downloaded yet)");
+    assert_eq!(plan.manual.len(), 1);
+    let m = &plan.manual[0];
+    assert_eq!(m.project_id, 0);
+    assert_eq!(m.file_id, 0);
+    assert_eq!(m.file_name, "browser.jar");
+    assert_eq!(m.page_url, "https://somesite.com/browser.jar");
+    assert_eq!(m.size, Some(3000));
+}
+
+#[test]
+fn atl_resourcepack_lands_in_resourcepacks_folder() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "MyRP",
+        "my-rp.zip",
+        "packs/my-rp.zip",
+        "rphash",
+        "resourcepack",
+        "server",
+        5000,
+        "",
+        true,
+        false,
+    )]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].dest, tmp.path().join("resourcepacks/my-rp.zip"));
+    assert!(plan.mods.is_empty(), "resourcepack must NOT create a ModEntry");
+}
+
+#[test]
+fn atl_shaderpack_lands_in_shaderpacks_folder() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "MyShader",
+        "my-shader.zip",
+        "packs/my-shader.zip",
+        "shaderhash",
+        "shaderpack",
+        "server",
+        8000,
+        "",
+        true,
+        false,
+    )]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].dest, tmp.path().join("shaderpacks/my-shader.zip"));
+    assert!(plan.mods.is_empty(), "shaderpack must NOT create a ModEntry");
+}
+
+#[test]
+fn atl_path_override_honored() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "CustomPath",
+        "custom.jar",
+        "packs/custom.jar",
+        "ccc",
+        "mods",
+        "server",
+        1000,
+        "custom/subdir",
+        true,
+        false,
+    )]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(
+        plan.items[0].dest,
+        tmp.path().join("custom/subdir/custom.jar"),
+        "path override must control dest folder"
+    );
+}
+
+#[test]
+fn atl_client_false_not_downloaded() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "ServerOnly",
+        "server.jar",
+        "packs/server.jar",
+        "sss",
+        "mods",
+        "server",
+        1000,
+        "",
+        false, // client == false
+        false,
+    )]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert!(plan.items.is_empty(), "server-only mod must not appear in items");
+    assert!(plan.mods.is_empty());
+    assert!(plan.manual.is_empty());
+    // server-only mods are silently dropped — NOT recorded in `skipped` (which is
+    // reserved for legacy/unknown types). Mirrors FTB serveronly handling.
+    assert!(plan.skipped.is_empty(), "client:false must not populate skipped");
+}
+
+#[test]
+fn atl_datapack_lands_in_datapacks_folder() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "DataPack", "data.zip", "packs/data.zip", "ddd", "datapack", "server", 100, "", true,
+        false,
+    )]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].dest, tmp.path().join("datapacks/data.zip"));
+}
+
+#[test]
+fn atl_jar_type_lands_in_jarmods_folder() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "JarMod", "core.jar", "packs/core.jar", "jjj", "jar", "server", 100, "", true, false,
+    )]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].dest, tmp.path().join("jarmods/core.jar"));
+}
+
+#[test]
+fn atl_absolute_path_override_is_normalised_not_rejected() {
+    // A leading-`/` path override is normalised to a relative path (resolves
+    // inside the instance dir), mirroring ftb_dest_path — not an error.
+    let m = atl_mod_entry(
+        "Abs", "x.jar", "packs/x.jar", "aaa", "mods", "server", 1, "/abs/dir", true, false,
+    );
+    assert_eq!(atl_dest_path(&m).unwrap(), Some("abs/dir/x.jar".to_string()));
+}
+
+#[test]
+fn atl_drive_letter_path_override_rejected() {
+    // A Windows drive-letter override IS rejected (validate_relative_path).
+    let m = atl_mod_entry(
+        "Drive", "x.jar", "packs/x.jar", "aaa", "mods", "server", 1, "C:\\evil", true, false,
+    );
+    assert!(matches!(atl_dest_path(&m), Err(ModpackError::UnsafePath(_))));
+}
+
+#[test]
+fn atl_optional_mod_included() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "OptionalMod",
+        "optional.jar",
+        "packs/optional.jar",
+        "ooo",
+        "mods",
+        "server",
+        500,
+        "",
+        true,
+        true, // optional == true → still included (O-4)
+    )]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert_eq!(plan.items.len(), 1, "optional mod must be included by default (O-4)");
+    assert_eq!(plan.mods.len(), 1);
+}
+
+#[test]
+fn atl_legacy_type_goes_to_skipped() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "LegacyMod",
+        "legacy.jar",
+        "packs/legacy.jar",
+        "",
+        "decomp", // legacy type
+        "server",
+        1000,
+        "",
+        true,
+        false,
+    )]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert!(plan.items.is_empty(), "legacy type must not produce a DownloadItem");
+    assert!(plan.mods.is_empty());
+    assert!(plan.manual.is_empty());
+    assert_eq!(plan.skipped, vec!["legacy.jar"]);
+}
+
+#[test]
+fn atl_traversal_in_path_override_rejected() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "Evil",
+        "evil.jar",
+        "packs/evil.jar",
+        "",
+        "mods",
+        "server",
+        1000,
+        "../../etc", // traversal attempt
+        true,
+        false,
+    )]);
+    let result = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path());
+    assert!(matches!(result, Err(ModpackError::UnsafePath(_))), "got {result:?}");
+}
+
+#[test]
+fn atl_traversal_in_file_name_rejected() {
+    let tmp = mc_dir();
+    let manifest = atl_manifest(vec![atl_mod_entry(
+        "Evil",
+        "../evil.jar", // traversal in filename itself
+        "packs/evil.jar",
+        "",
+        "mods",
+        "server",
+        1000,
+        "",
+        true,
+        false,
+    )]);
+    let result = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path());
+    assert!(matches!(result, Err(ModpackError::UnsafePath(_))), "got {result:?}");
+}
+
+#[test]
+fn atl_mod_entry_created_for_mods_family() {
+    let tmp = mc_dir();
+    let mut m = atl_mod_entry(
+        "JEI", "jei.jar", "packs/jei.jar", "abc123", "mods", "server", 1024, "", true, false,
+    );
+    m.curse_id = Some(238222);
+    let manifest = atl_manifest(vec![m]);
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    assert_eq!(plan.mods.len(), 1);
+    let entry = &plan.mods[0];
+    assert_eq!(entry.provider, "atlauncher");
+    assert_eq!(entry.file_name, "jei.jar");
+    assert_eq!(entry.project_id, "238222");
+    assert_eq!(entry.version_id, "");
+    assert!(entry.from_pack, "ATL pack mod must have from_pack=true");
+    assert!(entry.enabled);
+    assert_eq!(entry.hashes.get("md5").map(|s| s.as_str()), Some("abc123"));
+    assert_eq!(entry.name.as_deref(), Some("JEI"), "mod name captured from AtlMod.name");
+}
+
+#[test]
+fn atl_fixture_parses_correctly() {
+    // Smoke-test the atl_configs.json fixture used by CP-4 and later tests.
+    let json = include_str!("fixtures/atl_configs.json");
+    let manifest: AtlConfigsManifest =
+        serde_json::from_str(json).expect("atl_configs.json must parse");
+    assert_eq!(manifest.minecraft, "1.20.1");
+    assert_eq!(manifest.mods.len(), 7, "fixture has 7 mod entries");
+    let loader = manifest.loader.as_ref().expect("loader block present");
+    assert_eq!(loader.loader_type, "neoforge");
+    assert_eq!(loader.metadata.version, "47.1.84");
+    let configs = manifest.configs.as_ref().expect("configs block present");
+    assert_eq!(configs.sha1, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+    assert_eq!(manifest.memory, Some(4096));
+}
+
+#[test]
+fn atl_fixture_plan_counts() {
+    // Build a plan from the fixture and verify routing counts.
+    let json = include_str!("fixtures/atl_configs.json");
+    let manifest: AtlConfigsManifest = serde_json::from_str(json).unwrap();
+    let tmp = mc_dir();
+    let plan = build_atl_pack_plan(&manifest, ATL_CDN, tmp.path()).unwrap();
+    // Fixture: 1 server-mod + 1 direct-mod + 1 browser-mod + 1 resourcepack + 1 optional-mod
+    //          + 1 server-only (client=false, silently dropped) + 1 decomp (legacy, skipped)
+    // → items: server + direct + resourcepack + optional = 4
+    // → manual: browser = 1
+    // → mods: server + direct + optional = 3 (mods-family types that auto-downloaded)
+    // → skipped: decomp = 1
+    assert_eq!(plan.items.len(), 4, "4 auto-download items");
+    assert_eq!(plan.manual.len(), 1, "1 browser-type manual entry");
+    assert_eq!(plan.mods.len(), 3, "3 mods-family ModEntry rows");
+    assert_eq!(plan.skipped, vec!["old-legacy-1.0.jar"], "1 legacy type skipped");
+}
+
+#[test]
+fn extract_atl_configs_extracts_root_relative() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mc_dir_path = tmp.path();
+
+    // Build a zip with root-relative entries (the Configs.zip layout).
+    let zip_bytes = build_test_zip(&[
+        ("config/settings.cfg", b"[settings]"),
+        ("options.txt", b"renderDistance:12"),
+    ]);
+    let cursor = std::io::Cursor::new(zip_bytes);
+    let mut archive = zip::ZipArchive::new(cursor).unwrap();
+
+    let count = extract_atl_configs(&mut archive, mc_dir_path).unwrap();
+    assert_eq!(count, 2);
+    assert!(mc_dir_path.join("config/settings.cfg").exists());
+    assert!(mc_dir_path.join("options.txt").exists());
+}
+
+#[test]
+fn extract_atl_configs_rejects_zipslip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mc_dir_path = tmp.path();
+
+    let zip_bytes = build_test_zip(&[("../../escape.txt", b"pwned")]);
+    let cursor = std::io::Cursor::new(zip_bytes);
+    let mut archive = zip::ZipArchive::new(cursor).unwrap();
+
+    let result = extract_atl_configs(&mut archive, mc_dir_path);
+    assert!(
+        matches!(
+            result,
+            Err(ModpackError::ZipSlip(_)) | Err(ModpackError::UnsafePath(_))
+        ),
+        "expected ZipSlip or UnsafePath, got: {:?}",
+        result
+    );
+}

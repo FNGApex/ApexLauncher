@@ -199,6 +199,7 @@ fn d1_source_built_from_resolved_pack_file_fields() {
         crate::core::providers::ProviderKind::Modrinth => "modrinth".to_string(),
         crate::core::providers::ProviderKind::CurseForge => "curseForge".to_string(),
         crate::core::providers::ProviderKind::Ftb => "ftb".to_string(),
+        crate::core::providers::ProviderKind::Atlauncher => "atlauncher".to_string(),
     };
 
     let source = instances::Source {
@@ -1016,5 +1017,138 @@ fn lb1_plain_create_stays_pack_locked_false() {
     assert!(
         !instance.pack_locked,
         "blank/manual instance creation must NOT set pack_locked (stays false)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ATL CP-4: atl_loader_kind_version + Source provenance
+// ---------------------------------------------------------------------------
+
+/// Helper: construct a minimal `AtlLoader` for loader-mapping tests.
+fn make_atl_loader(
+    loader_type: &str,
+    version: &str,
+    loader: &str,
+) -> core::atl::AtlLoader {
+    core::atl::AtlLoader {
+        loader_type: loader_type.to_string(),
+        metadata: core::atl::AtlLoaderMeta {
+            version: version.to_string(),
+            loader: loader.to_string(),
+        },
+    }
+}
+
+/// `None` loader → vanilla, no version.
+#[test]
+fn atl_loader_kind_version_none_is_vanilla() {
+    let (kind, ver) = super::atl_loader_kind_version(None);
+    assert_eq!(kind, "vanilla", "no loader block → kind must be 'vanilla'");
+    assert!(ver.is_none(), "no loader block → version must be None");
+}
+
+/// Fabric loader uses `metadata.loader` (the fabric-loader version string).
+#[test]
+fn atl_loader_kind_version_fabric_uses_metadata_loader() {
+    let l = make_atl_loader("fabric", "ignored-version", "0.15.11");
+    let (kind, ver) = super::atl_loader_kind_version(Some(&l));
+    assert_eq!(kind, "fabric");
+    assert_eq!(
+        ver.as_deref(),
+        Some("0.15.11"),
+        "fabric loader version must come from metadata.loader"
+    );
+}
+
+/// NeoForge loader uses `metadata.version` (the neoforge version string).
+#[test]
+fn atl_loader_kind_version_neoforge_uses_metadata_version() {
+    let l = make_atl_loader("neoforge", "21.1.73", "ignored-loader");
+    let (kind, ver) = super::atl_loader_kind_version(Some(&l));
+    assert_eq!(kind, "neoforge");
+    assert_eq!(
+        ver.as_deref(),
+        Some("21.1.73"),
+        "neoforge loader version must come from metadata.version"
+    );
+}
+
+/// Forge loader uses `metadata.version` (same as neoforge).
+#[test]
+fn atl_loader_kind_version_forge_uses_metadata_version() {
+    let l = make_atl_loader("forge", "47.2.32", "ignored-loader");
+    let (kind, ver) = super::atl_loader_kind_version(Some(&l));
+    assert_eq!(kind, "forge");
+    assert_eq!(ver.as_deref(), Some("47.2.32"));
+}
+
+/// Quilt loader uses `metadata.loader` (same field as fabric).
+#[test]
+fn atl_loader_kind_version_quilt_uses_metadata_loader() {
+    let l = make_atl_loader("quilt", "ignored-version", "0.20.1");
+    let (kind, ver) = super::atl_loader_kind_version(Some(&l));
+    assert_eq!(kind, "quilt");
+    assert_eq!(ver.as_deref(), Some("0.20.1"));
+}
+
+/// Kind string is lowercased from whatever ATL sends.
+#[test]
+fn atl_loader_kind_version_lowercases_kind() {
+    let l = make_atl_loader("Fabric", "v", "0.15.11");
+    let (kind, _) = super::atl_loader_kind_version(Some(&l));
+    assert_eq!(kind, "fabric", "loader type must be lowercased");
+}
+
+/// Unknown loader type: kind is lowercased, version is None.
+#[test]
+fn atl_loader_kind_version_unknown_type_no_version() {
+    let l = make_atl_loader("risugamis", "1.0", "1.0");
+    let (kind, ver) = super::atl_loader_kind_version(Some(&l));
+    assert_eq!(kind, "risugamis");
+    assert!(ver.is_none(), "unknown loader type must produce None version");
+}
+
+/// Version resolution: an explicit `version_id` is used verbatim (newest ignored).
+#[test]
+fn atl_resolve_version_uses_explicit_when_given() {
+    let v = super::resolve_atl_version(Some("1.5.0"), Some("9.9.9".to_string())).unwrap();
+    assert_eq!(v, "1.5.0", "explicit version_id must win over newest");
+}
+
+/// Version resolution: falls back to the newest version when none requested (O: latest).
+#[test]
+fn atl_resolve_version_falls_back_to_newest() {
+    let v = super::resolve_atl_version(None, Some("9.9.9".to_string())).unwrap();
+    assert_eq!(v, "9.9.9", "no version_id must select newest");
+}
+
+/// Version resolution: errors when neither an explicit nor a newest version exists.
+#[test]
+fn atl_resolve_version_errors_when_no_versions() {
+    assert!(
+        super::resolve_atl_version(None, None).is_err(),
+        "a pack with no versions must error, not panic"
+    );
+}
+
+/// `Source.recommended` is populated from `manifest.memory > 0` (O-5).
+#[test]
+fn atl_recommended_from_memory_populated_when_positive() {
+    let rec = super::atl_recommended_from_memory(Some(4096))
+        .expect("memory=4096 must produce Some(RecommendedJava)");
+    assert_eq!(rec.memory_mb, Some(4096));
+    assert!(rec.java_args.is_none());
+}
+
+/// `Source.recommended` is `None` when `manifest.memory == 0` or absent (O-5).
+#[test]
+fn atl_recommended_from_memory_none_when_zero_or_absent() {
+    assert!(
+        super::atl_recommended_from_memory(Some(0)).is_none(),
+        "memory=0 must produce None recommended"
+    );
+    assert!(
+        super::atl_recommended_from_memory(None).is_none(),
+        "absent memory must produce None recommended"
     );
 }

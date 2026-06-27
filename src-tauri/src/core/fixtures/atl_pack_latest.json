@@ -1,0 +1,10 @@
+{
+  "error": false,
+  "code": 200,
+  "message": "Loaded latest pack version.",
+  "data": {
+    "version": "1.2.3",
+    "minecraftVersion": "1.20.1",
+    "recommended": true
+  }
+}
