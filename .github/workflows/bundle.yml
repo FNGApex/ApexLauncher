@@ -1,0 +1,75 @@
+name: Bundle
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same ref (a re-tagged push or a re-dispatched run).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Distinct prefix-key from test.yml so the release cache never collides with
+      # the debug-build cache produced by the rust-test job.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          prefix-key: bundle
+
+      # BUNDLE variant (spec §Linux deps): libfuse2 + file are required for AppImage
+      # tooling and are intentionally absent from test.yml's linux dep install.
+      # ubuntu-22.04 ships libwebkit2gtk-4.1-dev (Tauri v2 requirement; 4.0 is Tauri v1).
+      # libappindicator3-dev is correct for 22.04; on 24.04 use libayatana-appindicator3-dev.
+      # No libssl-dev — reqwest uses rustls (feat/rustls-tls-switch merged).
+      - name: Install Linux WebKit/GTK + AppImage deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2 file
+
+      # Invokes the npm "tauri" script (package.json: "tauri": "tauri") which delegates
+      # to the locally-installed @tauri-apps/cli.  --bundles appimage limits output to
+      # the AppImage format only (avoids tauri trying to build deb/rpm on this runner).
+      - name: Build AppImage
+        run: npm run tauri build -- --bundles appimage
+
+      # Linux tarball (phase7 IP-6): raw release binary + .desktop + README.
+      # The Cargo package name is "modloader" (no [[bin]] override in Cargo.toml),
+      # so the release binary is at src-tauri/target/release/modloader.
+      # The binary is renamed to ApexLauncher inside the tarball to match the
+      # productName ("ApexLauncher" in tauri.conf.json) for user-facing distribution.
+      - name: Package tarball
+        run: |
+          mkdir -p dist-tar/ApexLauncher
+          cp src-tauri/target/release/modloader dist-tar/ApexLauncher/ApexLauncher
+          cp README.md dist-tar/ApexLauncher/
+          printf '[Desktop Entry]\nName=ApexLauncher\nExec=ApexLauncher\nType=Application\nCategories=Game;\n' \
+            > dist-tar/ApexLauncher/ApexLauncher.desktop
+          tar -C dist-tar -czf ApexLauncher_0.1.0_amd64.tar.gz ApexLauncher
+
+      # Upload both the AppImage (tauri-generated, name includes version+arch) and the
+      # manually-wrapped tarball.  The glob on *.AppImage tolerates the exact filename
+      # without hard-coding the version string a second time.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundles
+          path: |
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            ApexLauncher_0.1.0_amd64.tar.gz
+          retention-days: 14
