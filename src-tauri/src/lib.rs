@@ -1593,6 +1593,28 @@ async fn refresh_pack_meta(
             };
             (s, v)
         }
+        "atlauncher" => {
+            // ATL is keyless. Target the newest release version for the update
+            // banner: return a single synthetic version so the generic [0]=latest
+            // check below resolves correctly. For ATL, version string IS the id.
+            let p = core::atl::AtlProvider::new();
+            let s = p.get_pack_summary(&http, &project_id).await;
+            let v = match p.newest_version(&http, &project_id).await {
+                Ok(Some(ver)) => Ok(vec![core::providers::ProjectVersion {
+                    provider: core::providers::ProviderKind::Atlauncher,
+                    id: ver.clone(),
+                    name: ver.clone(),
+                    version_number: ver,
+                    game_versions: vec![],
+                    loaders: vec![],
+                    files: vec![],
+                    dependencies: vec![],
+                }]),
+                Ok(None) => Ok(vec![]),
+                Err(e) => Err(e),
+            };
+            (s, v)
+        }
         other => {
             return Err(format!("Unknown provider: '{other}'"));
         }
