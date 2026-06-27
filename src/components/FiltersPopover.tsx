@@ -38,7 +38,7 @@ export interface FiltersPopoverProps {
   filters: FiltersState;
   onFiltersChange: (next: FiltersState) => void;
   /** Active provider — determines which categories are shown. */
-  provider: "curseforge" | "modrinth" | "ftb";
+  provider: "curseforge" | "modrinth" | "ftb" | "atlauncher";
 }
 
 const LOADER_OPTIONS = [

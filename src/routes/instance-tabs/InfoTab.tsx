@@ -110,14 +110,16 @@ export function InfoTab() {
   }, [slug, pendingCount]);
 
   // Provider routing: wire value → lowercase routing string.
-  const providerRoute: "modrinth" | "curseforge" | "ftb" | null = instance.source
+  const providerRoute: "modrinth" | "curseforge" | "ftb" | "atlauncher" | null = instance.source
     ? instance.source.provider === "modrinth"
       ? "modrinth"
       : instance.source.provider === "curseForge"
         ? "curseforge"
         : instance.source.provider === "ftb"
           ? "ftb"
-          : null
+          : instance.source.provider === "atlauncher"
+            ? "atlauncher"
+            : null
     : null;
 
   const infoQuery = useQuery({

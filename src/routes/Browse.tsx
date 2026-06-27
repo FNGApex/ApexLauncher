@@ -52,13 +52,13 @@ export function BrowseProvider() {
 
   // Remember last-used provider for the real providers.
   useEffect(() => {
-    if (provider === "curseforge" || provider === "modrinth" || provider === "ftb") {
+    if (provider === "curseforge" || provider === "modrinth" || provider === "ftb" || provider === "atlauncher") {
       setBrowseProvider(provider);
     }
   }, [provider, setBrowseProvider]);
 
-  // FTB has no server-side loader/category facets — hide the filters UI for it.
-  const supportsFilters = provider !== "ftb";
+  // FTB and ATLauncher have no server-side loader/category facets — hide the filters UI for them.
+  const supportsFilters = provider !== "ftb" && provider !== "atlauncher";
 
   // Reset filters when provider changes so stale cross-provider categories are cleared.
   useEffect(() => {
@@ -104,19 +104,14 @@ export function BrowseProvider() {
   }
 
   // Coming-soon placeholder for unimplemented providers.
-  if (provider !== "curseforge" && provider !== "modrinth" && provider !== "ftb") {
+  if (provider !== "curseforge" && provider !== "modrinth" && provider !== "ftb" && provider !== "atlauncher") {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4 px-8 py-7">
         <Package className="size-12 text-muted" />
         <div className="text-center">
           <p className="text-lg font-semibold text-foreground">Coming soon</p>
           <p className="mt-1 text-sm text-muted">
-            {provider === "ftb"
-              ? "FTB"
-              : provider === "atlauncher"
-                ? "ATLauncher"
-                : "This provider"}{" "}
-            support is not yet available.
+            This provider support is not yet available.
           </p>
         </div>
       </div>
@@ -241,7 +236,7 @@ function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }
 // ---------------------------------------------------------------------------
 
 interface SingleProviderFeedProps {
-  provider: "curseforge" | "modrinth" | "ftb";
+  provider: "curseforge" | "modrinth" | "ftb" | "atlauncher";
   query: string;
   filters: FiltersState;
   installedIndex: Map<string, string>;

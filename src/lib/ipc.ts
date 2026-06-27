@@ -231,7 +231,7 @@ export async function logout(): Promise<void> {
  * casing (`"curseForge"`). `projectType` selects content class.
  */
 export function searchMods(
-  provider: "modrinth" | "curseforge" | "ftb",
+  provider: "modrinth" | "curseforge" | "ftb" | "atlauncher",
   query: string,
   mcVersion: string | null,
   loader: string | null,
@@ -260,7 +260,7 @@ export function searchMods(
 
 /** Fetch all versions of a mod project compatible with the given MC version + loader. */
 export function getModVersions(
-  provider: "modrinth" | "curseforge" | "ftb",
+  provider: "modrinth" | "curseforge" | "ftb" | "atlauncher",
   projectId: string,
   mcVersion: string | null,
   loader: string | null,
@@ -269,7 +269,7 @@ export function getModVersions(
 }
 
 /** Fetch the title, icon, and long description for a pack project. */
-export function getPackInfo(provider: "modrinth" | "curseforge" | "ftb", projectId: string) {
+export function getPackInfo(provider: "modrinth" | "curseforge" | "ftb" | "atlauncher", projectId: string) {
   return unwrap(commands.getPackInfo(provider, projectId));
 }
 
@@ -281,7 +281,7 @@ export function getPackInfo(provider: "modrinth" | "curseforge" | "ftb", project
  * `slug` is the target instance slug. `provider` is a lowercase routing string.
  */
 export function addMod(
-  provider: "modrinth" | "curseforge" | "ftb",
+  provider: "modrinth" | "curseforge" | "ftb" | "atlauncher",
   projectId: string,
   versionId: string,
   slug: string,

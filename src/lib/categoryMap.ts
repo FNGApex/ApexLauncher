@@ -67,7 +67,7 @@ export function isSingleProvider(row: CategoryRow): boolean {
  * `provider` is the lowercase routing string ("modrinth" / "curseforge").
  */
 export function resolveCategoriesFor(
-  provider: "modrinth" | "curseforge" | "ftb",
+  provider: "modrinth" | "curseforge" | "ftb" | "atlauncher",
   selectedLabels: Iterable<string>,
 ): string[] {
   const selected = new Set(selectedLabels);

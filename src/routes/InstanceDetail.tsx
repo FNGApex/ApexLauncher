@@ -384,12 +384,14 @@ export function InstanceDetail() {
                   {/* Pack source link (PB-F1) */}
                   {data.instance.source && (() => {
                     const src = data.instance.source;
-                    const providerRoute: "modrinth" | "curseforge" | "ftb" =
+                    const providerRoute: "modrinth" | "curseforge" | "ftb" | "atlauncher" =
                       src.provider === "modrinth"
                         ? "modrinth"
                         : src.provider === "ftb"
                           ? "ftb"
-                          : "curseforge";
+                          : src.provider === "atlauncher"
+                            ? "atlauncher"
+                            : "curseforge";
                     const pageUrl: string | null =
                       src.pageUrl ?? (providerRoute === "modrinth"
                         ? `https://modrinth.com/modpack/${src.projectId}`
@@ -613,12 +615,14 @@ function VersionUpdateModal({
   const [updateError, setUpdateError] = useState<string | null>(null);
 
   // Resolve the provider routing string (InstanceSource stores the wire value).
-  const providerRoute: "modrinth" | "curseforge" | "ftb" =
+  const providerRoute: "modrinth" | "curseforge" | "ftb" | "atlauncher" =
     source.provider === "modrinth"
       ? "modrinth"
       : source.provider === "ftb"
         ? "ftb"
-        : "curseforge";
+        : source.provider === "atlauncher"
+          ? "atlauncher"
+          : "curseforge";
 
   // Lazy: versions fetched only when modal is open (it's mounted only when open).
   const versionsQuery = useQuery({
@@ -1184,9 +1188,9 @@ function ModSearchCard({
   const qc = useQueryClient();
 
   // Resolve the provider routing string from the ProviderKind response value.
-  // ProviderKind serializes as "modrinth" | "curseForge" | "ftb". This is the
-  // per-mod add path; FTB is a pack-only source and never appears here, so it
-  // falls through to the curseforge default (dead branch).
+  // ProviderKind serializes as "modrinth" | "curseForge" | "ftb" | "atlauncher".
+  // This is the per-mod add path; FTB and ATLauncher are pack-only sources and
+  // never appear here, so they fall through to the curseforge default (dead branch).
   const providerRoute: "modrinth" | "curseforge" =
     mod.provider === "modrinth" ? "modrinth" : "curseforge";
 
