@@ -1378,6 +1378,10 @@ async fn search_mods(
             let p = crate::core::ftb::FtbProvider::new();
             p.search(&http, &params).await.map_err(ProviderCommandError::from)
         }
+        "atlauncher" => {
+            let p = core::atl::AtlProvider::new();
+            p.search(&http, &params).await.map_err(ProviderCommandError::from)
+        }
         other => Err(unknown_provider_err(other)),
     }
 }
@@ -1421,6 +1425,12 @@ async fn get_mod_versions(
                 .await
                 .map_err(ProviderCommandError::from)
         }
+        "atlauncher" => {
+            let p = core::atl::AtlProvider::new();
+            p.get_versions(&http, &project_id, mc_version.as_deref(), loader.as_deref())
+                .await
+                .map_err(ProviderCommandError::from)
+        }
         other => Err(unknown_provider_err(other)),
     }
 }
@@ -1460,6 +1470,12 @@ async fn get_pack_info(
         }
         "ftb" => {
             let p = crate::core::ftb::FtbProvider::new();
+            p.get_project(&http, &project_id)
+                .await
+                .map_err(ProviderCommandError::from)
+        }
+        "atlauncher" => {
+            let p = core::atl::AtlProvider::new();
             p.get_project(&http, &project_id)
                 .await
                 .map_err(ProviderCommandError::from)
@@ -3465,6 +3481,388 @@ async fn install_ftb_modpack(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// ATL CP-4: ImportAtlJob + install_atl_modpack
+// ---------------------------------------------------------------------------
+
+/// Map an `AtlLoader` (or `None`) to the normalised `(loader_kind, loader_version)` pair.
+///
+/// - `forge` / `neoforge` → version from `metadata.version`.
+/// - `fabric` / `quilt` → version from `metadata.loader`.
+/// - Any other type or `None` → `("vanilla", None)`.
+///
+/// The returned `kind` string is lowercased so it matches the `Loader.kind`
+/// convention used everywhere else in the launcher ("forge", "neoforge", …).
+fn atl_loader_kind_version(
+    loader: Option<&core::atl::AtlLoader>,
+) -> (String, Option<String>) {
+    match loader {
+        None => ("vanilla".to_string(), None),
+        Some(l) => {
+            let kind = l.loader_type.to_ascii_lowercase();
+            let version = match kind.as_str() {
+                "forge" | "neoforge" => {
+                    let v = l.metadata.version.trim().to_string();
+                    if v.is_empty() { None } else { Some(v) }
+                }
+                "fabric" | "quilt" => {
+                    let v = l.metadata.loader.trim().to_string();
+                    if v.is_empty() { None } else { Some(v) }
+                }
+                _ => None,
+            };
+            (kind, version)
+        }
+    }
+}
+
+/// Resolve the ATL version to install: the explicit `version_id` when given,
+/// otherwise the `newest` version fetched from the API. Errors when neither is
+/// available (a pack with no published versions). Pure — the async fetch of
+/// `newest` happens in the caller so this stays unit-testable.
+fn resolve_atl_version(
+    version_id: Option<&str>,
+    newest: Option<String>,
+) -> Result<String, String> {
+    match version_id {
+        Some(v) => Ok(v.to_string()),
+        None => newest.ok_or_else(|| "ATLauncher pack has no versions".to_string()),
+    }
+}
+
+/// Seed `Source.recommended` from a pack's recommended memory (O-5): a
+/// `Some(mb)` with `mb > 0` yields a [`RecommendedJava`]; `None` or `0` yields
+/// `None` (falls through to per-instance/global RAM defaults).
+fn atl_recommended_from_memory(memory: Option<u64>) -> Option<instances::RecommendedJava> {
+    memory
+        .filter(|&mb| mb > 0)
+        .map(|mb| instances::RecommendedJava {
+            memory_mb: Some(mb as u32),
+            java_args: None,
+        })
+}
+
+/// [`TaskJob`] that installs an ATLauncher pack version into a new instance.
+///
+/// The plan comes from [`build_atl_pack_plan`] over the held
+/// [`AtlConfigsManifest`]. Unlike the FTB job there is no CF key or CF resolve
+/// step — ATL mods are fully self-hosted and keyless. The `Configs.zip` is added
+/// as an extra [`DownloadItem`], extracted root-relative into the staging dir, and
+/// the zip is removed before the staging tree is promoted into `mc/`.
+struct ImportAtlJob {
+    app: tauri::AppHandle,
+    task_id_cell: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    manifest: core::atl::AtlConfigsManifest,
+    /// ATL `safeName` — used to build the `Configs.zip` CDN URL.
+    safe_name: String,
+    /// Pack version string — used to build the `Configs.zip` CDN URL.
+    version: String,
+    instance_name: String,
+    minecraft: String,
+    loader_kind: String,
+    loader_version: Option<String>,
+    pack_source: Option<instances::Source>,
+}
+
+#[async_trait::async_trait]
+impl TaskJob for ImportAtlJob {
+    async fn run(self: Box<Self>, ctx: &core::task_manager::TaskContext) {
+        use core::atl::{CDN, cdn_configs_zip_url};
+        use core::download::{DownloadItem, ExpectedHash};
+        use core::modpack::{build_atl_pack_plan, extract_atl_configs, promote_staging, remap_to_staging};
+        use std::sync::atomic::Ordering;
+
+        let task_id = self.task_id_cell.load(Ordering::SeqCst);
+        log::info!("modpack: ImportAtlJob task_id={task_id} starting");
+
+        // --- PLAN ---
+        ctx.enter_planning().await;
+
+        let inst = match instances::create(
+            &self.app,
+            CreateInstanceReq {
+                name: self.instance_name.clone(),
+                minecraft: self.minecraft.clone(),
+                loader: instances::Loader {
+                    kind: self.loader_kind.clone(),
+                    version: self.loader_version.clone(),
+                },
+            },
+        ) {
+            Ok(i) => i,
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+
+        let inst_dir = match core::store::instances_dir(&self.app) {
+            Ok(d) => d.join(&inst.slug),
+            Err(e) => { ctx.finish_failed(e).await; return; }
+        };
+        let mc_dir = inst_dir.join("mc");
+        let staging_dir = staging_dir_for(&inst_dir, task_id);
+
+        // Build the plan — pure, no CF key (ATL is fully self-hosted + keyless).
+        let plan = match build_atl_pack_plan(&self.manifest, CDN, &mc_dir) {
+            Ok(p) => p,
+            Err(e) => { ctx.finish_failed(e.to_string()).await; return; }
+        };
+
+        let manual = plan.manual.clone();
+        let mod_entries = plan.mods.clone();
+
+        // Collect all download items: mods/resources + Configs.zip (if present).
+        let mut all_items = plan.items;
+        let has_configs = self.manifest.configs.is_some();
+        if let Some(ref configs) = self.manifest.configs {
+            let expected_hash = if configs.sha1.is_empty() {
+                None
+            } else {
+                Some(ExpectedHash::Sha1(configs.sha1.clone()))
+            };
+            let size = (configs.filesize > 0).then_some(configs.filesize);
+            all_items.push(DownloadItem {
+                url: cdn_configs_zip_url(&self.safe_name, &self.version),
+                // Staged under mc_dir root; remap_to_staging remaps to staging_dir.
+                dest: mc_dir.join("Configs.zip"),
+                expected_hash,
+                size,
+            });
+        }
+
+        let staged_items = remap_to_staging(all_items, &mc_dir, &staging_dir);
+        let children = children_from_items(&staged_items);
+
+        // --- DOWNLOAD ---
+        let staged_plan = DownloadPlan::new(staged_items);
+        ctx.enter_downloading(children).await;
+
+        let http_client = match download::build_client() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                ctx.finish_failed(e.to_string()).await;
+                return;
+            }
+        };
+
+        let dl_result = drive_with_progress(ctx, |sink| async move {
+            execute_plan_cancellable(&http_client, &staged_plan, &sink, 8, ctx.cancel_token()).await
+        }).await;
+
+        if dl_result.cancelled || ctx.is_cancelled() {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_cancelled().await;
+            return;
+        }
+
+        let (installed, dl_failed, _) = tally_cancellable(&dl_result.outcomes);
+
+        // --- APPLY ---
+        ctx.enter_applying().await;
+
+        // Extract Configs.zip root-relative into staging (plays the role of mc_dir
+        // before promotion). Remove the zip so it isn't promoted into mc/.
+        if has_configs {
+            let staged_zip = staging_dir.join("Configs.zip");
+            if staged_zip.exists() {
+                let extract_result = std::fs::File::open(&staged_zip)
+                    .map_err(|e| format!("open Configs.zip: {e}"))
+                    .and_then(|f| {
+                        zip::ZipArchive::new(f)
+                            .map_err(|e| format!("parse Configs.zip: {e}"))
+                    })
+                    .and_then(|mut archive| {
+                        extract_atl_configs(&mut archive, &staging_dir)
+                            .map_err(|e| format!("extract Configs.zip: {e}"))
+                    });
+
+                match extract_result {
+                    Ok(n) => {
+                        log::debug!("modpack: ImportAtlJob extracted {n} config files from Configs.zip");
+                        let _ = std::fs::remove_file(&staged_zip);
+                    }
+                    Err(msg) => {
+                        let _ = std::fs::remove_dir_all(&staging_dir);
+                        ctx.finish_failed(msg).await;
+                        return;
+                    }
+                }
+            }
+        }
+
+        if let Err(e) = promote_staging(&staging_dir, &mc_dir) {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_failed(format!("promote failed: {e}")).await;
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&staging_dir);
+
+        let result = match instances::load_manifest(&self.app, &inst.slug) {
+            Ok(mut instance) => {
+                instance.mods = mod_entries;
+                if let Some(src) = self.pack_source {
+                    instance.source = Some(src);
+                }
+                instance.pack_locked = true;
+                instance.pending_manual =
+                    manual.iter().map(instances::PendingManual::from).collect();
+                match instances::save_manifest(&self.app, &inst.slug, &instance) {
+                    Ok(_) => Ok(CfImportResult {
+                        slug: inst.slug,
+                        name: inst.name,
+                        installed,
+                        failed: dl_failed,
+                        manual,
+                    }),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        };
+
+        match result {
+            Ok(r) => {
+                log::info!(
+                    "modpack: ImportAtlJob done — slug='{}' installed={} failed={}",
+                    r.slug, r.installed, r.failed
+                );
+                match mod_install_outcome(r.installed as usize, r.failed as usize, r.manual.len()) {
+                    ModInstallOutcome::Failed(_) => {
+                        let msg = if r.failed == 1 {
+                            "1 file failed to download; pack may be incomplete".to_string()
+                        } else {
+                            format!("{} files failed to download; pack may be incomplete", r.failed)
+                        };
+                        ctx.finish_failed(msg).await;
+                    }
+                    ModInstallOutcome::Done => match serde_json::to_value(&r) {
+                        Ok(v) => ctx.finish_done_with_result(v).await,
+                        Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                    },
+                }
+            }
+            Err(e) => ctx.finish_failed(e).await,
+        }
+    }
+}
+
+/// Enqueue an ATLauncher install task (shared by `install_modpack`'s atlauncher arm).
+async fn enqueue_import_atl(
+    app: &tauri::AppHandle,
+    manager: &tauri::State<'_, TaskManager>,
+    manifest: core::atl::AtlConfigsManifest,
+    safe_name: String,
+    version: String,
+    instance_name: String,
+    minecraft: String,
+    loader_kind: String,
+    loader_version: Option<String>,
+    pack_source: Option<instances::Source>,
+) -> Result<u64, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let task_id_cell: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let task_id_cell_job = Arc::clone(&task_id_cell);
+    let label = format!("Install {instance_name}");
+
+    let id = manager
+        .enqueue(TaskSpec {
+            kind: TaskKind::PackInstall,
+            parent_label: label,
+            job: Box::new(ImportAtlJob {
+                app: app.clone(),
+                task_id_cell: task_id_cell_job,
+                manifest,
+                safe_name,
+                version,
+                instance_name,
+                minecraft,
+                loader_kind,
+                loader_version,
+                pack_source,
+            }),
+        })
+        .await;
+
+    task_id_cell.store(id, Ordering::SeqCst);
+    Ok(id)
+}
+
+/// `install_modpack`'s ATLauncher arm: resolve the version + Configs.json manifest,
+/// build `Source`, enqueue `ImportAtlJob`. Fully keyless — ATL mods are self-hosted.
+async fn install_atl_modpack(
+    app: &tauri::AppHandle,
+    manager: &tauri::State<'_, TaskManager>,
+    project_id: &str,
+    version_id: Option<&str>,
+    page_url: Option<String>,
+) -> Result<u64, String> {
+    let provider = core::atl::AtlProvider::new();
+    let http = ReqwestProviderClient(reqwest::Client::new());
+
+    // Pack summary (name / icon / author / synopsis) for the Source provenance.
+    let summary = provider
+        .get_pack_summary(&http, project_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Resolve the version string (explicit or newest).
+    let newest = match version_id {
+        Some(_) => None,
+        None => provider
+            .newest_version(&http, project_id)
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+    let version = resolve_atl_version(version_id, newest)?;
+
+    // Configs.json manifest — drives the download plan + loader/mc info.
+    let manifest = provider
+        .get_configs_manifest(&http, project_id, &version)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let minecraft = manifest.minecraft.clone();
+    if minecraft.is_empty() {
+        return Err("ATLauncher pack version has no Minecraft target".to_string());
+    }
+
+    let (loader_kind, loader_version) = atl_loader_kind_version(manifest.loader.as_ref());
+
+    // Source.recommended: memory > 0 → seed RecommendedJava (O-5).
+    let recommended = atl_recommended_from_memory(manifest.memory);
+
+    let source = instances::Source {
+        provider: "atlauncher".to_string(),
+        project_id: project_id.to_string(),
+        file_id: version.clone(),
+        pack_version: version.clone(),
+        recommended,
+        page_url,
+        icon_url: summary.icon_url,
+        author: summary.author,
+        last_update_check: None,
+        latest_version: None,
+        latest_version_id: None,
+        summary: summary.summary,
+        categories: summary.categories,
+    };
+
+    enqueue_import_atl(
+        app,
+        manager,
+        manifest,
+        project_id.to_string(),
+        version,
+        summary.name,
+        minecraft,
+        loader_kind,
+        loader_version,
+        Some(source),
+    )
+    .await
+}
+
 /// Enqueue a CurseForge `.zip` import task and return its id synchronously.
 #[tauri::command]
 #[specta::specta]
@@ -3542,6 +3940,12 @@ async fn install_modpack(
     // enqueue ImportFtbJob.
     if provider == "ftb" {
         return install_ftb_modpack(&app, &manager, &project_id, version_id.as_deref(), page_url)
+            .await;
+    }
+
+    // ATLauncher likewise bypasses the archive path: it installs from Configs.json.
+    if provider == "atlauncher" {
+        return install_atl_modpack(&app, &manager, &project_id, version_id.as_deref(), page_url)
             .await;
     }
 
@@ -3962,6 +4366,13 @@ async fn update_modpack(
         "ftb" => {
             return Err(
                 "FTB pack updates aren't supported yet — reinstall the pack to update.".to_string(),
+            );
+        }
+        // ATLauncher update-apply is out of v1 scope (check-only, O-3).
+        "atlauncher" => {
+            return Err(
+                "ATLauncher pack updates are not supported yet — reinstall the pack to update."
+                    .to_string(),
             );
         }
         other => {
