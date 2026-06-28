@@ -377,3 +377,451 @@ fn cp2_malformed_json_returns_error() {
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), LauncherImportError::MalformedMmcPack(_)));
 }
+
+// ── CP-3 + CP-4 tests ─────────────────────────────────────────────────────────
+
+use std::path::Path;
+use tempfile::TempDir;
+
+// ── CP-3: resolve_game_dir ────────────────────────────────────────────────────
+
+#[test]
+fn cp3_resolve_game_dir_prefers_dot_minecraft() {
+    let tmp = TempDir::new().unwrap();
+    let inst = tmp.path().join("inst");
+    std::fs::create_dir_all(inst.join(".minecraft")).unwrap();
+    std::fs::create_dir_all(inst.join("minecraft")).unwrap();
+    let result = resolve_game_dir(&inst).unwrap();
+    assert_eq!(result, inst.join(".minecraft"));
+}
+
+#[test]
+fn cp3_resolve_game_dir_falls_back_to_minecraft() {
+    let tmp = TempDir::new().unwrap();
+    let inst = tmp.path().join("inst");
+    std::fs::create_dir_all(inst.join("minecraft")).unwrap();
+    let result = resolve_game_dir(&inst).unwrap();
+    assert_eq!(result, inst.join("minecraft"));
+}
+
+#[test]
+fn cp3_resolve_game_dir_missing_returns_error() {
+    let tmp = TempDir::new().unwrap();
+    let inst = tmp.path().join("inst");
+    std::fs::create_dir_all(&inst).unwrap();
+    let result = resolve_game_dir(&inst);
+    assert!(result.is_err(), "no game dir must return an error");
+    assert!(
+        matches!(result.unwrap_err(), LauncherImportError::NoGameDir { .. }),
+        "must be NoGameDir error"
+    );
+}
+
+// ── CP-3: copy_game_dir ───────────────────────────────────────────────────────
+
+/// Build a standard game-dir source tree for copy tests.
+///
+/// Creates: mods/x.jar, mods/x.jar.disabled, config/sub/y.toml, .options,
+/// logs/latest.log, crash-reports/crash.txt (6 files total).
+fn make_src_tree(root: &Path) {
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    std::fs::write(mods.join("x.jar"), b"jar").unwrap();
+    std::fs::write(mods.join("x.jar.disabled"), b"disabled").unwrap();
+
+    let config_sub = root.join("config").join("sub");
+    std::fs::create_dir_all(&config_sub).unwrap();
+    std::fs::write(config_sub.join("y.toml"), b"toml").unwrap();
+
+    std::fs::write(root.join(".options"), b"opts").unwrap();
+
+    let logs = root.join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(logs.join("latest.log"), b"log").unwrap();
+
+    let crash = root.join("crash-reports");
+    std::fs::create_dir_all(&crash).unwrap();
+    std::fs::write(crash.join("crash.txt"), b"crash").unwrap();
+}
+
+#[test]
+fn cp3_copy_game_dir_preserves_tree_structure() {
+    let src_tmp = TempDir::new().unwrap();
+    let src = src_tmp.path();
+    make_src_tree(src);
+
+    let dest_tmp = TempDir::new().unwrap();
+    let dest = dest_tmp.path().join("out");
+    let count = copy_game_dir(src, &dest, false).unwrap();
+
+    assert!(dest.join("mods").join("x.jar").exists(), "mods/x.jar must be copied");
+    assert!(
+        dest.join("mods").join("x.jar.disabled").exists(),
+        ".disabled file must be copied"
+    );
+    assert!(
+        dest.join("config").join("sub").join("y.toml").exists(),
+        "config/sub/y.toml must be copied"
+    );
+    assert!(dest.join(".options").exists(), "dotfile must be copied");
+    assert!(
+        dest.join("logs").join("latest.log").exists(),
+        "logs must be present when skip_logs=false"
+    );
+    assert!(
+        dest.join("crash-reports").join("crash.txt").exists(),
+        "crash-reports must be present when skip_logs=false"
+    );
+    // 6 files: x.jar, x.jar.disabled, y.toml, .options, latest.log, crash.txt
+    assert_eq!(count, 6, "must count all 6 files");
+}
+
+#[test]
+fn cp3_copy_game_dir_skip_logs_omits_logs_and_crash_reports() {
+    let src_tmp = TempDir::new().unwrap();
+    let src = src_tmp.path();
+    make_src_tree(src);
+
+    let dest_tmp = TempDir::new().unwrap();
+    let dest = dest_tmp.path().join("out");
+    let count = copy_game_dir(src, &dest, true).unwrap();
+
+    assert!(!dest.join("logs").exists(), "logs/ must be skipped when skip_logs=true");
+    assert!(
+        !dest.join("crash-reports").exists(),
+        "crash-reports/ must be skipped when skip_logs=true"
+    );
+    // 4 files remain: x.jar, x.jar.disabled, y.toml, .options
+    assert_eq!(count, 4, "4 files after skipping logs and crash-reports");
+}
+
+#[test]
+fn cp3_copy_game_dir_skip_logs_false_keeps_all() {
+    let src_tmp = TempDir::new().unwrap();
+    let src = src_tmp.path();
+    make_src_tree(src);
+
+    let dest_tmp = TempDir::new().unwrap();
+    let dest = dest_tmp.path().join("out");
+    let count = copy_game_dir(src, &dest, false).unwrap();
+
+    assert!(dest.join("logs").join("latest.log").exists());
+    assert!(dest.join("crash-reports").join("crash.txt").exists());
+    assert_eq!(count, 6);
+}
+
+#[test]
+fn cp3_copy_game_dir_returns_correct_file_count() {
+    let src_tmp = TempDir::new().unwrap();
+    let src = src_tmp.path();
+    std::fs::write(src.join("a.txt"), b"a").unwrap();
+    std::fs::write(src.join("b.txt"), b"b").unwrap();
+    let sub = src.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("c.txt"), b"c").unwrap();
+
+    let dest_tmp = TempDir::new().unwrap();
+    let dest = dest_tmp.path().join("out");
+    let count = copy_game_dir(src, &dest, false).unwrap();
+    assert_eq!(count, 3, "must count all files recursively");
+}
+
+#[test]
+fn cp3_copy_game_dir_disabled_jars_are_copied() {
+    let src_tmp = TempDir::new().unwrap();
+    let src = src_tmp.path();
+    let mods = src.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    std::fs::write(mods.join("mod.jar"), b"active").unwrap();
+    std::fs::write(mods.join("mod.jar.disabled"), b"disabled").unwrap();
+
+    let dest_tmp = TempDir::new().unwrap();
+    let dest = dest_tmp.path().join("out");
+    let count = copy_game_dir(src, &dest, false).unwrap();
+    assert!(dest.join("mods").join("mod.jar").exists());
+    assert!(dest.join("mods").join("mod.jar.disabled").exists());
+    assert_eq!(count, 2);
+}
+
+/// On Unix, symlinks pointing outside the source tree must be silently skipped —
+/// not followed, and not materialized in the dest.
+#[cfg(unix)]
+#[test]
+fn cp3_symlinks_outside_tree_are_skipped() {
+    use std::os::unix::fs::symlink;
+
+    let outer_tmp = TempDir::new().unwrap();
+    let src_tmp = TempDir::new().unwrap();
+    let src = src_tmp.path();
+
+    std::fs::write(src.join("real.txt"), b"real").unwrap();
+    // Symlink to a directory outside the source tree.
+    symlink(outer_tmp.path(), src.join("escape")).unwrap();
+
+    let dest_tmp = TempDir::new().unwrap();
+    let dest = dest_tmp.path().join("out");
+    let count = copy_game_dir(src, &dest, false).unwrap();
+
+    assert!(dest.join("real.txt").exists(), "real file must be copied");
+    assert!(!dest.join("escape").exists(), "symlink must not appear in dest");
+    assert_eq!(count, 1, "only the real file counts");
+}
+
+// ── CP-4: resolve_icon_path ───────────────────────────────────────────────────
+
+/// Build `<root>/instances/Inst/` and return `(root_path, inst_dir)`.
+fn make_prism_layout(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let root = tmp.path().to_path_buf();
+    let inst_dir = root.join("instances").join("Inst");
+    std::fs::create_dir_all(&inst_dir).unwrap();
+    (root, inst_dir)
+}
+
+#[test]
+fn cp4_resolve_icon_path_finds_png() {
+    let tmp = TempDir::new().unwrap();
+    let (root, inst_dir) = make_prism_layout(&tmp);
+    let icons_dir = root.join("icons");
+    std::fs::create_dir_all(&icons_dir).unwrap();
+    let png = icons_dir.join("myicon.png");
+    std::fs::write(&png, b"png").unwrap();
+
+    let result = resolve_icon_path(&inst_dir, "myicon");
+    assert_eq!(result, Some(png));
+}
+
+#[test]
+fn cp4_resolve_icon_path_prefers_first_ext_in_allowlist() {
+    // Both .png and .jpg exist; .png must win (comes first in ICON_EXTS order).
+    let tmp = TempDir::new().unwrap();
+    let (root, inst_dir) = make_prism_layout(&tmp);
+    let icons_dir = root.join("icons");
+    std::fs::create_dir_all(&icons_dir).unwrap();
+    std::fs::write(icons_dir.join("icon.png"), b"png").unwrap();
+    std::fs::write(icons_dir.join("icon.jpg"), b"jpg").unwrap();
+
+    let result = resolve_icon_path(&inst_dir, "icon");
+    assert_eq!(result, Some(icons_dir.join("icon.png")));
+}
+
+#[test]
+fn cp4_resolve_icon_path_returns_none_for_missing_file() {
+    let tmp = TempDir::new().unwrap();
+    let (_root, inst_dir) = make_prism_layout(&tmp);
+    // No icons/ dir, no file.
+    let result = resolve_icon_path(&inst_dir, "builtin_grass");
+    assert_eq!(result, None);
+}
+
+#[test]
+fn cp4_resolve_icon_path_returns_none_for_unsupported_ext() {
+    let tmp = TempDir::new().unwrap();
+    let (root, inst_dir) = make_prism_layout(&tmp);
+    let icons_dir = root.join("icons");
+    std::fs::create_dir_all(&icons_dir).unwrap();
+    // Only a .bmp — not in the allowlist.
+    std::fs::write(icons_dir.join("myicon.bmp"), b"bmp").unwrap();
+
+    let result = resolve_icon_path(&inst_dir, "myicon");
+    assert_eq!(result, None);
+}
+
+#[test]
+fn cp4_resolve_icon_path_returns_none_for_missing_icons_dir() {
+    let tmp = TempDir::new().unwrap();
+    let (_root, inst_dir) = make_prism_layout(&tmp);
+    // icons/ dir is NOT created.
+    let result = resolve_icon_path(&inst_dir, "anyicon");
+    assert_eq!(result, None);
+}
+
+#[test]
+fn cp4_resolve_icon_path_all_allowed_exts_are_found() {
+    // Verify each remaining allowed extension (.jpg, .jpeg, .webp, .gif) is found.
+    for ext in &["jpg", "jpeg", "webp", "gif"] {
+        let tmp = TempDir::new().unwrap();
+        let (root, inst_dir) = make_prism_layout(&tmp);
+        let icons_dir = root.join("icons");
+        std::fs::create_dir_all(&icons_dir).unwrap();
+        let icon_file = icons_dir.join(format!("myicon.{}", ext));
+        std::fs::write(&icon_file, b"img").unwrap();
+
+        let result = resolve_icon_path(&inst_dir, "myicon");
+        assert_eq!(result, Some(icon_file), "ext .{} should be found", ext);
+    }
+}
+
+// ── Security: FIX 1 — icon_key_is_safe ───────────────────────────────────────
+
+/// Verify that a bare single-component stem is accepted.
+#[test]
+fn sec_icon_key_safe_accepts_bare_stem() {
+    assert!(icon_key_is_safe("myicon"));
+    assert!(icon_key_is_safe("flames"));
+    assert!(icon_key_is_safe("pack-icon_2"));
+}
+
+/// `..` alone or as first component must be rejected.
+#[test]
+fn sec_icon_key_safe_rejects_parent_dir() {
+    assert!(!icon_key_is_safe(".."));
+    assert!(!icon_key_is_safe("../evil"));
+    assert!(!icon_key_is_safe("../../../etc/passwd"));
+}
+
+/// A leading `/` (absolute Unix path) must be rejected.
+#[test]
+fn sec_icon_key_safe_rejects_absolute_unix() {
+    assert!(!icon_key_is_safe("/etc/passwd"));
+}
+
+/// A forward-slash inside the stem (path segment) must be rejected.
+#[test]
+fn sec_icon_key_safe_rejects_slash_path() {
+    assert!(!icon_key_is_safe("a/b"));
+}
+
+/// A backslash or Windows-style path must be rejected.
+#[test]
+fn sec_icon_key_safe_rejects_backslash_path() {
+    assert!(!icon_key_is_safe("a\\b"));
+    assert!(!icon_key_is_safe("C:\\Windows\\x"));
+}
+
+/// A Windows drive-letter prefix must be rejected on all platforms.
+#[test]
+fn sec_icon_key_safe_rejects_drive_letter() {
+    assert!(!icon_key_is_safe("C:foo"));
+    assert!(!icon_key_is_safe("Z:"));
+}
+
+/// An empty key must be rejected (no filename to look up).
+#[test]
+fn sec_icon_key_safe_rejects_empty() {
+    assert!(!icon_key_is_safe(""));
+}
+
+/// A legitimate icon key finds its file; a traversal key does NOT, even when a
+/// file happens to exist at the escaped path.
+///
+/// Without the sanitization guard, `icons_dir.join("../evil.png")` resolves one
+/// directory above `icons_dir` (i.e., to `data_root/evil.png`). If that file
+/// exists, the un-patched code returns `Some(...)`. This test catches the BLOCKER.
+#[test]
+fn sec_icon_key_traversal_rejected_even_if_file_exists_at_escaped_path() {
+    let tmp = TempDir::new().unwrap();
+    let (root, inst_dir) = make_prism_layout(&tmp);
+
+    // Create icons_dir so the OS can traverse into it (needed for `..` resolution).
+    let icons_dir = root.join("icons");
+    std::fs::create_dir_all(&icons_dir).unwrap();
+
+    // Place a file ONE level above icons_dir — exactly where "../evil" would land.
+    // data_root/evil.png  ==  icons_dir/../evil.png
+    let escaped_file = root.join("evil.png");
+    std::fs::write(&escaped_file, b"evil content").unwrap();
+
+    // Without the fix: icons_dir.join("../evil.png").is_file() == true → returns Some.
+    let result = resolve_icon_path(&inst_dir, "../evil");
+    assert_eq!(
+        result, None,
+        "icon_key containing '..' must be rejected even when the escaped file exists"
+    );
+
+    // Sanity: a legitimate key that points to a real icon IS found.
+    let legit_icon = icons_dir.join("myicon.png");
+    std::fs::write(&legit_icon, b"png data").unwrap();
+    assert_eq!(
+        resolve_icon_path(&inst_dir, "myicon"),
+        Some(legit_icon),
+        "a clean icon_key with a real file must still be found"
+    );
+}
+
+// ── Security: FIX 2 — is_reparse_or_symlink helper ───────────────────────────
+
+/// On Windows, a regular file must NOT be reported as a reparse point.
+///
+/// Junction creation requires `mklink /J` (elevated or developer mode) so we
+/// cannot create one in a hermetic unit test. The Windows-specific
+/// `FILE_ATTRIBUTE_REPARSE_POINT` branch is therefore covered only by this
+/// negative case and documented here.
+#[cfg(windows)]
+#[test]
+fn sec_is_reparse_or_symlink_regular_file_returns_false() {
+    let tmp = TempDir::new().unwrap();
+    let f = tmp.path().join("regular.txt");
+    std::fs::write(&f, b"data").unwrap();
+    let meta = f.symlink_metadata().unwrap();
+    assert!(
+        !is_reparse_or_symlink(&meta),
+        "a regular file must not be flagged as a reparse point"
+    );
+}
+
+/// On Windows, a regular directory must NOT be reported as a reparse point.
+#[cfg(windows)]
+#[test]
+fn sec_is_reparse_or_symlink_regular_dir_returns_false() {
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("subdir");
+    std::fs::create_dir_all(&d).unwrap();
+    let meta = d.symlink_metadata().unwrap();
+    assert!(
+        !is_reparse_or_symlink(&meta),
+        "a regular directory must not be flagged as a reparse point"
+    );
+}
+
+// ── Security: FIX 4 — relative_path_is_safe hardening ───────────────────────
+
+/// Drive-letter prefix `C:foo` must be rejected on all platforms.
+///
+/// On Linux, `Path::new("C:foo")` parses as a single `Normal("C:foo")` component,
+/// so the old component-only check let it through. The string-level check catches it.
+#[test]
+fn sec_path_safety_rejects_drive_letter() {
+    assert!(
+        !relative_path_is_safe(Path::new("C:foo")),
+        "C:foo must be rejected on all platforms"
+    );
+    assert!(
+        !relative_path_is_safe(Path::new("Z:bar")),
+        "Z:bar must be rejected on all platforms"
+    );
+}
+
+/// UNC-style prefix `\\server\share` must be rejected on all platforms.
+///
+/// On Linux, the backslashes are ordinary filename characters and the path
+/// parses as `Normal(r"\\server\share")`, slipping past the component check.
+/// The string-level `starts_with('\\')` guard catches it.
+#[test]
+fn sec_path_safety_rejects_unc_prefix() {
+    // Rust literal "\\\\server\\share" == the string \\server\share
+    assert!(
+        !relative_path_is_safe(Path::new("\\\\server\\share")),
+        "UNC-style path must be rejected"
+    );
+}
+
+/// Absolute Unix-style path must be rejected.
+#[test]
+fn sec_path_safety_rejects_absolute_unix() {
+    assert!(!relative_path_is_safe(Path::new("/abs")));
+}
+
+/// `..` component must be rejected.
+#[test]
+fn sec_path_safety_rejects_parent_dir() {
+    assert!(!relative_path_is_safe(Path::new("a/../b")));
+    assert!(!relative_path_is_safe(Path::new("..")));
+}
+
+/// A normal relative path must be accepted.
+#[test]
+fn sec_path_safety_accepts_valid_relative() {
+    assert!(relative_path_is_safe(Path::new("mods/x.jar")));
+    assert!(relative_path_is_safe(Path::new("config/foo.toml")));
+    assert!(relative_path_is_safe(Path::new("a")));
+}

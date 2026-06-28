@@ -1,17 +1,24 @@
 //! Prism / MultiMC / PolyMC launcher instance importer — pure parse/plan layer.
 //!
-//! All functions in this module are **pure** (no I/O, no Tauri, no network).
-//! Higher-level orchestration (copy, promote, Tauri job) lives in `lib.rs` (CP-5+).
+//! All functions in this module are **pure** (no I/O, no Tauri, no network) except
+//! for [`copy_game_dir`] (CP-3, performs filesystem writes into a staging dir) and
+//! [`resolve_icon_path`] (CP-4, filesystem stat only).
+//! Higher-level orchestration (stage+promote, Tauri job) lives in `lib.rs` (CP-5+).
 //!
 //! # Checkpoints implemented here
 //! - **CP-1** — `instance.cfg` parser → [`PrismInstanceCfg`].
 //! - **CP-2** — `mmc-pack.json` parser + uid→loader mapping → [`MmcPack`].
+//! - **CP-3** — Game-dir resolution ([`resolve_game_dir`]) + safe recursive copy
+//!   ([`copy_game_dir`]).
+//! - **CP-4** — Icon resolution helper ([`resolve_icon_path`]).
+
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
-/// Errors produced by the launcher-import parse pipeline.
+/// Errors produced by the launcher-import parse + copy pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum LauncherImportError {
     /// A required field is absent (e.g. `net.minecraft` component missing from `mmc-pack.json`).
@@ -25,6 +32,19 @@ pub enum LauncherImportError {
     /// A key in `instance.cfg` carries a value that cannot be parsed to the expected type.
     #[error("malformed field '{field}' in instance.cfg: {reason}")]
     MalformedField { field: String, reason: String },
+
+    /// Neither `.minecraft/` nor `minecraft/` exists under the instance directory.
+    #[error("no game directory found under {path}")]
+    NoGameDir { path: String },
+
+    /// A path in the source tree would escape the destination root (e.g. a symlink).
+    /// Symlinks are skipped silently; this variant is for other structural violations.
+    #[error("unsafe path rejected: {0}")]
+    UnsafePath(String),
+
+    /// I/O error during game-dir copy.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 // ── CP-1: instance.cfg → PrismInstanceCfg ────────────────────────────────────
@@ -280,6 +300,287 @@ pub fn parse_mmc_pack(text: &str) -> Result<MmcPack, LauncherImportError> {
         minecraft,
         loader: loader.unwrap_or(ImportedLoader::Vanilla),
     })
+}
+
+// ── CP-3: Game-dir resolution + safe recursive copy ───────────────────────────
+
+/// Resolve the Prism/MultiMC game directory inside an instance directory.
+///
+/// Checks for `.minecraft/` first (canonical Prism layout), then falls back to
+/// `minecraft/` (some older MultiMC / PolyMC exports).
+///
+/// # Errors
+/// Returns [`LauncherImportError::NoGameDir`] if neither subdirectory exists.
+pub fn resolve_game_dir(instance_dir: &Path) -> Result<PathBuf, LauncherImportError> {
+    let dot_mc = instance_dir.join(".minecraft");
+    if dot_mc.is_dir() {
+        return Ok(dot_mc);
+    }
+    let mc = instance_dir.join("minecraft");
+    if mc.is_dir() {
+        return Ok(mc);
+    }
+    Err(LauncherImportError::NoGameDir { path: instance_dir.display().to_string() })
+}
+
+/// Recursively copy a game directory tree from `src` into `dest`.
+///
+/// ## Path safety
+/// All destination paths are validated to remain within `dest`:
+/// - **Symlinks are skipped entirely** (whether to files or directories). A symlink
+///   target could point anywhere on the filesystem; skipping is the safe default.
+/// - Path component validation (local equivalent of `validate_relative_path` and
+///   `is_safe_dest` in `core/modpack.rs`) rejects any `..`, absolute, or
+///   prefix-rooted components before the write.
+///
+/// ## Skip behaviour
+/// When `skip_logs` is `true`, the top-level `logs/` and `crash-reports/`
+/// directories are omitted entirely (files inside them are not counted).
+///
+/// ## Returns
+/// The number of regular files written to `dest`.
+///
+/// # Errors
+/// Returns [`LauncherImportError::Io`] on any I/O failure, or
+/// [`LauncherImportError::UnsafePath`] if a structural path violation is detected.
+pub fn copy_game_dir(src: &Path, dest: &Path, skip_logs: bool) -> Result<u32, LauncherImportError> {
+    // Canonicalize the source root once so that strip_prefix and containment
+    // decisions are relative to the REAL directory on disk. Following the root
+    // itself through a symlink or junction is intentional (the user pointed us
+    // at it), but canonicalizing ensures all recursive paths are consistent with
+    // the real layout. Nested reparse points inside the tree are skipped by
+    // copy_dir_recursive via is_reparse_or_symlink (FIX 2).
+    let src_real = src.canonicalize()?;
+    std::fs::create_dir_all(dest)?;
+    let mut count = 0u32;
+    copy_dir_recursive(&src_real, &src_real, dest, skip_logs, &mut count)?;
+    Ok(count)
+}
+
+/// Inner recursive worker for [`copy_game_dir`].
+///
+/// `src_root` is fixed across all recursive calls (used to compute relative
+/// paths). `current` advances into each subdirectory.
+fn copy_dir_recursive(
+    src_root: &Path,
+    current: &Path,
+    dest_root: &Path,
+    skip_logs: bool,
+    count: &mut u32,
+) -> Result<(), LauncherImportError> {
+    for entry in std::fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        // Use symlink_metadata (not metadata) so we inspect the entry itself,
+        // not the target it points to. This is the prerequisite for is_reparse_or_symlink.
+        let meta = path.symlink_metadata()?;
+        let file_type = meta.file_type();
+
+        // Skip symlinks AND Windows reparse points (directory junctions).
+        // file_type.is_symlink() alone misses junctions on Windows — those carry
+        // FILE_ATTRIBUTE_REPARSE_POINT but report is_symlink() == false.
+        // is_reparse_or_symlink checks the attribute bit on Windows as well.
+        if is_reparse_or_symlink(&meta) {
+            continue;
+        }
+
+        // Compute relative path from src_root for safety checks and dest construction.
+        let rel = match path.strip_prefix(src_root) {
+            Ok(r) => r,
+            Err(_) => {
+                return Err(LauncherImportError::UnsafePath(path.display().to_string()));
+            }
+        };
+
+        // Path-safety: reject any relative path whose components could escape dest_root.
+        // Mirrors validate_relative_path + is_safe_dest in core/modpack.rs (private there).
+        if !relative_path_is_safe(rel) {
+            return Err(LauncherImportError::UnsafePath(rel.display().to_string()));
+        }
+
+        // Skip top-level logs/ and crash-reports/ when requested.
+        // `rel.components().count() == 1` → entry is directly under src_root.
+        if skip_logs && file_type.is_dir() && rel.components().count() == 1 {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "logs" || name == "crash-reports" {
+                continue;
+            }
+        }
+
+        let dest_path = dest_root.join(rel);
+
+        // Structural containment check on the final joined path.
+        if !dest_is_contained(&dest_path, dest_root) {
+            return Err(LauncherImportError::UnsafePath(rel.display().to_string()));
+        }
+
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&dest_path)?;
+            copy_dir_recursive(src_root, &path, dest_root, skip_logs, count)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = dest_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&path, &dest_path)?;
+            *count += 1;
+        }
+        // Non-file non-dir non-symlink entries (devices, sockets) are silently skipped.
+    }
+    Ok(())
+}
+
+/// Return `true` if all components of `rel` are safe (no `..`, no root, no prefix).
+///
+/// Mirrors `validate_relative_path` in `core/modpack.rs` exactly, including the
+/// string-level checks. The string checks are needed because `Path` parsing is
+/// platform-specific: `"C:foo"` is `Component::Normal` on Linux (not `Prefix`),
+/// and `"\\server\share"` is `Normal` on Linux (not `Prefix`). String guards
+/// catch these before the component walk.
+fn relative_path_is_safe(rel: &Path) -> bool {
+    // String-level guards (platform-independent, matches modpack::validate_relative_path).
+    let s = rel.to_str().unwrap_or("");
+    if s.starts_with('/') || s.starts_with('\\') {
+        return false;
+    }
+    // Windows drive-letter prefix: "C:foo" or "C:\..." — b[1] == ':' with alpha b[0].
+    if s.len() >= 2 {
+        let b = s.as_bytes();
+        if b[1] == b':' && b[0].is_ascii_alphabetic() {
+            return false;
+        }
+    }
+    // Component-level guards.
+    for component in rel.components() {
+        match component {
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+            Component::Normal(_) | Component::CurDir => {}
+        }
+    }
+    true
+}
+
+/// Return `true` if the metadata (obtained via `symlink_metadata`) indicates a
+/// symlink or Windows reparse point (e.g. a directory junction).
+///
+/// **Why not `file_type.is_symlink()` alone?**
+/// On Windows, directory junctions carry the `FILE_ATTRIBUTE_REPARSE_POINT`
+/// attribute (0x400) but `FileType::is_symlink()` returns `false` for them
+/// (only symbolic links proper set that bit in the file-type sense). Junctions
+/// can redirect a directory walk to an arbitrary location — skipping them is
+/// therefore mandatory for the same reason we skip symlinks.
+///
+/// The caller must pass metadata obtained with `symlink_metadata` (not `metadata`),
+/// which inspects the entry itself rather than following any link.
+///
+/// Junction creation requires elevated rights / Developer Mode, so we cannot
+/// exercise the Windows reparse branch in a hermetic unit test. The negative
+/// case (regular files/dirs are NOT flagged) is tested in the test suite.
+fn is_reparse_or_symlink(meta: &std::fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Return `true` if `dest` resolves strictly within `base` with no escape.
+///
+/// Local equivalent of `is_safe_dest` in `core/modpack.rs` (private there).
+fn dest_is_contained(dest: &Path, base: &Path) -> bool {
+    let rel = dest.strip_prefix(base).unwrap_or(dest);
+    let mut resolved = base.to_path_buf();
+    for component in rel.components() {
+        match component {
+            Component::ParentDir => return false,
+            Component::Normal(s) => resolved.push(s),
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    resolved.starts_with(base)
+}
+
+// ── CP-4: Icon resolution helper ──────────────────────────────────────────────
+
+/// Allowed extensions for Prism instance icon files.
+///
+/// Matches the allowlist in `core/instances::write_instance_icon`.
+/// Order determines priority when multiple files exist with the same stem.
+const ICON_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
+
+/// Return `true` if `key` is a safe icon-file stem: non-empty, single-component,
+/// no path separators (`/` or `\`), no `..`, not absolute, not a Windows
+/// drive-letter prefix (`C:…`).
+///
+/// `icon_key` comes from the untrusted `instance.cfg`. A bare stem like `"myicon"`
+/// or `"flames"` is accepted; anything that could traverse out of the `icons/`
+/// directory is rejected (return `None` from [`resolve_icon_path`]).
+fn icon_key_is_safe(key: &str) -> bool {
+    if key.is_empty() {
+        return false;
+    }
+    // Reject any path separator — the key must be a bare filename stem.
+    if key.contains('/') || key.contains('\\') {
+        return false;
+    }
+    // Windows drive-letter prefix: "C:foo" or "C:\..." etc.
+    if key.len() >= 2 {
+        let b = key.as_bytes();
+        if b[1] == b':' && b[0].is_ascii_alphabetic() {
+            return false;
+        }
+    }
+    // Path-level check: must parse as exactly one Normal component.
+    // This catches `..`, `.` (CurDir), RootDir, and any Prefix.
+    let mut components = Path::new(key).components();
+    match components.next() {
+        Some(Component::Normal(_)) => {}
+        _ => return false,
+    }
+    // No second component allowed (guards exotic encodings not caught above).
+    if components.next().is_some() {
+        return false;
+    }
+    true
+}
+
+/// Resolve a Prism `iconKey` to an icon file in the launcher's central `icons/` directory.
+///
+/// Prism/MultiMC stores custom icons in `<dataRoot>/icons/<key>.<ext>`.
+/// The data root is inferred by going two levels up from `instance_dir`
+/// (`<dataRoot>/instances/<name>/` → `<dataRoot>/`).
+///
+/// Returns the path to the first matching file (in [`ICON_EXTS`] order), or
+/// `None` when:
+/// - `icon_key` fails the safety check (contains `/`, `\`, `..`, drive letter, etc.).
+/// - The icon key corresponds to a built-in theme icon (no file on disk).
+/// - The `icons/` directory does not exist.
+/// - No file with an allowed extension is found.
+/// - The parent chain cannot be resolved (missing ancestors).
+pub fn resolve_icon_path(instance_dir: &Path, icon_key: &str) -> Option<PathBuf> {
+    // Reject any icon_key that could escape the icons/ directory (FIX 1 — BLOCKER).
+    // icon_key comes from untrusted instance.cfg: "../../../etc/passwd", "/abs", "C:\x",
+    // "a/b" etc. must all be rejected before they are joined into a filesystem path.
+    if !icon_key_is_safe(icon_key) {
+        return None;
+    }
+    // instance_dir is <dataRoot>/instances/<name>/ — data root is two levels up.
+    let data_root = instance_dir.parent()?.parent()?;
+    let icons_dir = data_root.join("icons");
+    for ext in ICON_EXTS {
+        let candidate = icons_dir.join(format!("{}.{}", icon_key, ext));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
