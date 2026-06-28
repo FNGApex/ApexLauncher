@@ -1,4 +1,4 @@
-# CLAUDE.md
+cla# CLAUDE.md
 
 <atomic-signals>
 
@@ -89,6 +89,13 @@ scripts/build.sh dev                 # dev window, HMR
 > workload (MSVC v143 + Windows SDK — provides `rc.exe` for `tauri-winres`). `apex-build.bat`
 > self-sources `vcvarsall.bat` so any shell works, not just a Developer prompt. MSI also needs
 > the VBSCRIPT optional Windows feature. See `docs/spec/phase7-installers.md`.
+
+> **CI is the one sanctioned exception to the build-via-`build.sh` rule.** GitHub Actions
+> (`.github/workflows/test.yml` + `bundle.yml`) calls `cargo`/`npm`/`tauri` **directly** on
+> native win/mac/linux runners — `build.sh`'s WSL→Windows mirror is dead weight there and
+> `apex-build.bat` hardcodes this dev machine's paths. `test.yml` gates PRs (ubuntu) + push-to-main
+> (3-OS); `bundle.yml` builds all installers on `v*` tags / manual dispatch. Local builds still go
+> through `build.sh`. See `docs/spec/ci-pipeline.md`.
 
 **On WSL (this machine):** the script mirrors the source tree onto the **native Windows
 filesystem** at `C:\Users\drgor\Documents\GitHub\ApexLauncher` (via rsync `--delete`, excluding
