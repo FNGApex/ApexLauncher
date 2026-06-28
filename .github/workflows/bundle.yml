@@ -125,3 +125,49 @@ jobs:
           name: macos-dmg-${{ matrix.target }}
           path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
           retention-days: 14
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Distinct prefix-key from test.yml and from the macos legs (which append the
+      # cross-compile target).  Windows has no matrix, so plain 'bundle' is unique.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          prefix-key: bundle
+
+      # Sources the VS2022 MSVC dev environment so that rc.exe is on PATH.
+      # rc.exe is required by tauri-winres to embed the Windows resource manifest
+      # (version string, icon) into the binary during the Rust link step.
+      # windows-latest ships VS2022 + Windows SDK; this action just activates the
+      # developer command-prompt environment so rc.exe is discoverable.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      # No apt deps — all system-level prerequisites are provided by windows-latest.
+      # --bundles "msi nsis" emits both installer formats in one tauri build invocation:
+      #   MSI  → src-tauri/target/release/bundle/msi/ApexLauncher_0.1.0_x64_en-US.msi
+      #   NSIS → src-tauri/target/release/bundle/nsis/ApexLauncher_0.1.0_x64-setup.exe
+      # (phase7 IP-3 and IP-4; filenames match the version in tauri.conf.json)
+      - name: Build MSI + NSIS
+        run: npm run tauri build -- --bundles "msi nsis"
+
+      # Upload both installer formats under a single artifact name.
+      # Glob patterns are format-stable (tolerate future version bumps in the filename).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+          retention-days: 14
