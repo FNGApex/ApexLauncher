@@ -155,12 +155,15 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       # No apt deps — all system-level prerequisites are provided by windows-latest.
-      # --bundles "msi nsis" emits both installer formats in one tauri build invocation:
+      # `--bundles msi nsis` emits both installer formats in one tauri build invocation.
+      # The two formats MUST be separate argv tokens (clap `--bundles` is variadic):
+      # a quoted "msi nsis" is parsed as a single invalid value. (bash array expansion
+      # in build.sh splits them; a literal quoted string under pwsh does not.)
       #   MSI  → src-tauri/target/release/bundle/msi/ApexLauncher_0.1.0_x64_en-US.msi
       #   NSIS → src-tauri/target/release/bundle/nsis/ApexLauncher_0.1.0_x64-setup.exe
       # (phase7 IP-3 and IP-4; filenames match the version in tauri.conf.json)
       - name: Build MSI + NSIS
-        run: npm run tauri build -- --bundles "msi nsis"
+        run: npm run tauri build -- --bundles msi nsis
 
       # Upload both installer formats under a single artifact name.
       # Glob patterns are format-stable (tolerate future version bumps in the filename).
