@@ -1,15 +1,17 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Loader2, Upload, X } from "lucide-react";
+import { FolderOpen, Loader2, Upload, X } from "lucide-react";
 import {
   createInstance,
   getLoaders,
   importCurseforgeZip,
+  importExternalInstance,
   importMrpack,
   listMinecraftVersions,
   type LoaderKind,
 } from "@/lib/ipc";
+import { Toggle } from "@/components/Toggle";
 import { META_STALE_TIME } from "@/lib/query";
 
 const LOADER_LABELS: Record<LoaderKind, string> = {
@@ -24,7 +26,7 @@ function isLoaderKind(v: string): v is LoaderKind {
   return Object.keys(LOADER_LABELS).includes(v);
 }
 
-type Tab = "create" | "import";
+type Tab = "create" | "import" | "importLauncher";
 
 /** Create-instance dialog. MC version and loader builds are fetched live from
  *  Mojang/Forge/Fabric/Quilt/NeoForge metadata; the loader list is filtered to
@@ -68,12 +70,17 @@ export function NewInstanceModal({
           <TabButton active={tab === "import"} onClick={() => setTab("import")}>
             Import pack
           </TabButton>
+          <TabButton active={tab === "importLauncher"} onClick={() => setTab("importLauncher")}>
+            From launcher
+          </TabButton>
         </div>
 
         {tab === "create" ? (
           <CreateTab onClose={onClose} />
-        ) : (
+        ) : tab === "import" ? (
           <ImportTab onClose={onClose} />
+        ) : (
+          <ImportLauncherTab onClose={onClose} />
         )}
       </div>
     </div>
@@ -349,6 +356,119 @@ function ImportTab({ onClose }: { onClose: () => void }) {
             <Upload className="size-4" />
           )}
           {importMutation.isPending ? "Importing…" : "Choose file…"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ImportLauncherTab({ onClose }: { onClose: () => void }) {
+  const qc = useQueryClient();
+  const [dir, setDir] = useState<string | null>(null);
+  const [nameOverride, setNameOverride] = useState("");
+  const [identifyMods, setIdentifyMods] = useState(false);
+  const [skipLogs, setSkipLogs] = useState(true);
+
+  async function pickDir() {
+    const raw = await open({ directory: true, multiple: false });
+    if (typeof raw === "string") setDir(raw);
+  }
+
+  const importMutation = useMutation({
+    mutationFn: async () => {
+      if (!dir) return null;
+      return await importExternalInstance(
+        dir,
+        nameOverride.trim() || undefined,
+        identifyMods,
+        skipLogs,
+      );
+    },
+    onSuccess: async (taskId) => {
+      if (taskId === null) return;
+      await qc.invalidateQueries({ queryKey: ["instances"] });
+      onClose();
+    },
+  });
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted">
+        Import a Prism Launcher, MultiMC, or PolyMC instance from your computer.
+      </p>
+
+      {/* Folder picker */}
+      <Field label="Instance folder">
+        <div className="flex gap-2">
+          <div className="input flex-1 truncate text-sm" title={dir ?? undefined}>
+            {dir ? (
+              <span className="text-foreground">{dir}</span>
+            ) : (
+              <span className="text-muted">No folder selected</span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={pickDir}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm font-medium text-foreground hover:bg-background"
+          >
+            <FolderOpen className="size-4" />
+            Browse…
+          </button>
+        </div>
+      </Field>
+
+      {/* Name override */}
+      <Field label="Name override (optional)">
+        <input
+          value={nameOverride}
+          onChange={(e) => setNameOverride(e.target.value)}
+          placeholder="Leave blank to use source name"
+          className="input"
+        />
+      </Field>
+
+      {/* Toggles */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground">
+            Skip logs &amp; crash reports
+          </span>
+          <Toggle checked={skipLogs} onChange={setSkipLogs} label="Skip logs & crash reports" />
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground">
+            Identify mods (Modrinth){" "}
+            <span className="text-xs text-muted">— one network request</span>
+          </span>
+          <Toggle checked={identifyMods} onChange={setIdentifyMods} label="Identify mods (Modrinth)" />
+        </div>
+      </div>
+
+      {importMutation.isError && (
+        <p className="text-sm text-danger">{String(importMutation.error)}</p>
+      )}
+
+      <div className="flex justify-end gap-2 pt-2">
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-lg px-4 py-2 text-sm font-medium text-muted hover:bg-background hover:text-foreground"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={() => importMutation.mutate()}
+          disabled={!dir || importMutation.isPending}
+          className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          {importMutation.isPending ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <FolderOpen className="size-4" />
+          )}
+          {importMutation.isPending ? "Importing…" : "Import"}
         </button>
       </div>
     </div>
