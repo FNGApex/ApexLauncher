@@ -1,0 +1,17 @@
+{
+  "formatVersion": 1,
+  "components": [
+    {
+      "uid": "net.minecraft",
+      "version": "1.12.2",
+      "cachedName": "Minecraft",
+      "important": true
+    },
+    {
+      "uid": "com.mumfrey.liteloader",
+      "version": "1.12.2-SNAPSHOT",
+      "cachedName": "LiteLoader",
+      "important": true
+    }
+  ]
+}
