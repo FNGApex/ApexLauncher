@@ -825,3 +825,181 @@ fn sec_path_safety_accepts_valid_relative() {
     assert!(relative_path_is_safe(Path::new("config/foo.toml")));
     assert!(relative_path_is_safe(Path::new("a")));
 }
+
+// ── CP-5: plan_external_import ────────────────────────────────────────────────
+
+/// Helper: build a minimal MmcPack json with just net.minecraft.
+fn vanilla_pack_json(mc: &str) -> String {
+    format!(
+        r#"{{"components":[{{"uid":"net.minecraft","version":"{mc}"}}]}}"#
+    )
+}
+
+#[test]
+fn cp5_plan_legacy_instance_type_returns_error() {
+    let cfg = parse_instance_cfg("InstanceType=Legacy\nname=Old Pack\n").expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.7.10")).expect("parse");
+    let result = plan_external_import(&cfg, &pack, None);
+    assert!(result.is_err(), "Legacy instance type must return Err");
+    match result.unwrap_err() {
+        LauncherImportError::Rejected(_) => {}
+        other => panic!("expected Rejected error for Legacy, got {:?}", other),
+    }
+}
+
+#[test]
+fn cp5_plan_vanilla_loader_maps_to_vanilla_no_version() {
+    let cfg = parse_instance_cfg("name=Vanilla Pack\n").expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.21.4")).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert_eq!(plan.loader_kind, "vanilla");
+    assert!(plan.loader_version.is_none(), "vanilla must have no loader version");
+    assert!(plan.warnings.is_empty(), "vanilla has no warnings");
+}
+
+#[test]
+fn cp5_plan_fabric_loader_maps_through() {
+    let cfg = parse_instance_cfg("name=Fabric Pack\n").expect("parse");
+    let json = r#"{
+        "components":[
+            {"uid":"net.minecraft","version":"1.21.1"},
+            {"uid":"net.fabricmc.fabric-loader","version":"0.16.9"}
+        ]}"#;
+    let pack = parse_mmc_pack(json).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert_eq!(plan.loader_kind, "fabric");
+    assert_eq!(plan.loader_version.as_deref(), Some("0.16.9"));
+    assert!(plan.warnings.is_empty());
+}
+
+#[test]
+fn cp5_plan_unsupported_loader_becomes_vanilla_with_warning() {
+    let cfg = parse_instance_cfg("name=Lite Pack\n").expect("parse");
+    let json = r#"{
+        "components":[
+            {"uid":"net.minecraft","version":"1.12.2"},
+            {"uid":"com.mumfrey.liteloader","version":"1.12.2"}
+        ]}"#;
+    let pack = parse_mmc_pack(json).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert_eq!(plan.loader_kind, "vanilla");
+    assert!(plan.loader_version.is_none());
+    assert_eq!(plan.warnings.len(), 1, "exactly one warning for unsupported loader");
+    assert!(
+        plan.warnings[0].contains("liteloader"),
+        "warning must name the unsupported loader; got: {}",
+        plan.warnings[0]
+    );
+}
+
+#[test]
+fn cp5_plan_name_override_takes_priority_over_cfg_name() {
+    let cfg = parse_instance_cfg("name=Original Name\n").expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.21.1")).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, Some("Override Name")).expect("should succeed");
+    assert_eq!(plan.name, "Override Name");
+}
+
+#[test]
+fn cp5_plan_cfg_name_used_when_no_override() {
+    let cfg = parse_instance_cfg("name=My Pack\n").expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.21.1")).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert_eq!(plan.name, "My Pack");
+}
+
+#[test]
+fn cp5_plan_empty_override_falls_back_to_cfg_name() {
+    // An empty-string override must not win over the cfg name (filtered out).
+    let cfg = parse_instance_cfg("name=My Pack\n").expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.21.1")).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, Some("")).expect("should succeed");
+    assert_eq!(plan.name, "My Pack", "empty override must fall back to cfg name");
+}
+
+#[test]
+fn cp5_plan_default_name_imported_when_no_cfg_name_and_no_override() {
+    // No `name` key in cfg, no override → falls back to "Imported".
+    let cfg = parse_instance_cfg("InstanceType=OneSix\n").expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.21.1")).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert_eq!(plan.name, "Imported", "must default to 'Imported' when no name available");
+}
+
+#[test]
+fn cp5_plan_memory_override_applied_when_gate_true() {
+    let cfg = parse_instance_cfg("OverrideMemory=true\nMinMemAlloc=512\nMaxMemAlloc=8192\n")
+        .expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.21.1")).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert!(plan.override_memory, "gate must be true");
+    assert_eq!(plan.max_mem_mb, Some(8192));
+    assert_eq!(plan.min_mem_mb, Some(512));
+}
+
+#[test]
+fn cp5_plan_memory_gate_false_means_do_not_apply() {
+    let cfg =
+        parse_instance_cfg("OverrideMemory=false\nMinMemAlloc=512\nMaxMemAlloc=8192\n")
+            .expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.21.1")).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert!(!plan.override_memory, "gate must be false — orchestrator must not apply the values");
+}
+
+#[test]
+fn cp5_plan_java_path_override_when_gate_true() {
+    let cfg =
+        parse_instance_cfg("OverrideJavaLocation=true\nJavaPath=/usr/lib/jvm/java-21/bin/java\n")
+            .expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.21.1")).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert!(plan.override_java_location);
+    assert_eq!(
+        plan.java_path.as_deref(),
+        Some("/usr/lib/jvm/java-21/bin/java")
+    );
+}
+
+#[test]
+fn cp5_plan_java_path_gate_false_means_do_not_apply() {
+    let cfg =
+        parse_instance_cfg("OverrideJavaLocation=false\nJavaPath=/usr/lib/jvm/java-21/bin/java\n")
+            .expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.21.1")).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert!(!plan.override_java_location, "gate false → orchestrator must not apply java path");
+}
+
+#[test]
+fn cp5_plan_java_args_override_when_gate_true() {
+    let cfg =
+        parse_instance_cfg("OverrideJavaArgs=true\nJvmArgs=-XX:+UseG1GC -Xss1M\n").expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.21.1")).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert!(plan.override_java_args);
+    assert_eq!(plan.jvm_args.as_deref(), Some("-XX:+UseG1GC -Xss1M"));
+}
+
+#[test]
+fn cp5_plan_java_args_gate_false_means_do_not_apply() {
+    let cfg = parse_instance_cfg("OverrideJavaArgs=false\nJvmArgs=-XX:+UseG1GC\n").expect("parse");
+    let pack = parse_mmc_pack(&vanilla_pack_json("1.21.1")).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert!(!plan.override_java_args);
+}
+
+#[test]
+fn cp5_plan_minecraft_version_comes_from_pack() {
+    let cfg = parse_instance_cfg("name=Test\n").expect("parse");
+    let json = r#"{
+        "components":[
+            {"uid":"net.minecraft","version":"1.20.1"},
+            {"uid":"net.minecraftforge","version":"47.2.0"}
+        ]}"#;
+    let pack = parse_mmc_pack(json).expect("parse");
+    let plan = plan_external_import(&cfg, &pack, None).expect("should succeed");
+    assert_eq!(plan.minecraft, "1.20.1");
+    assert_eq!(plan.loader_kind, "forge");
+    assert_eq!(plan.loader_version.as_deref(), Some("47.2.0"));
+}

@@ -2982,6 +2982,27 @@ pub struct CfImportResult {
     pub manual: Vec<core::modpack::CfManualFile>,
 }
 
+/// Result returned to the frontend after a successful external-launcher instance import
+/// (`import_external_instance`).
+#[derive(Debug, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalImportResult {
+    /// Slug of the newly-created instance.
+    pub slug: String,
+    /// Display name of the instance (from `name_override` or the source `instance.cfg`).
+    pub name: String,
+    /// Loader kind string (`"vanilla"`, `"fabric"`, `"quilt"`, `"forge"`, `"neoforge"`).
+    pub loader: String,
+    /// Number of game files copied into the instance.
+    pub files_copied: u32,
+    /// Number of mods identified via Modrinth SHA-1 lookup (always 0 until CP-6).
+    pub mods_identified: u32,
+    /// Non-fatal warnings surfaced during import (e.g. an unsupported loader
+    /// demoted to vanilla). Empty on a clean import. The frontend surfaces these
+    /// so a silent loader demotion is never hidden from the user.
+    pub warnings: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // CP-3: ImportCfZipJob
 // ---------------------------------------------------------------------------
@@ -3885,6 +3906,312 @@ async fn install_atl_modpack(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// CP-5: ImportExternalJob + import_external_instance
+// ---------------------------------------------------------------------------
+
+/// [`TaskJob`] that imports a Prism/MultiMC/PolyMC instance directory as a new
+/// ApexLauncher instance.
+///
+/// Unlike the pack-install jobs there is **no download phase** — the game files
+/// are already on disk. The job flow is:
+///
+/// - **PLAN:** read `instance.cfg` + `mmc-pack.json`, call
+///   [`core::launcher_import::plan_external_import`] (rejects Legacy instances).
+/// - **APPLY:** copy the game directory into a staging dir with
+///   [`core::launcher_import::copy_game_dir`], promote it to `<slug>/mc/`,
+///   apply Java/memory overrides + icon, save the manifest.
+///
+/// The staging dir (`<inst_dir>/.staging-<task_id>`) is removed on both success
+/// and failure to avoid orphan directories.
+struct ImportExternalJob {
+    app: tauri::AppHandle,
+    task_id_cell: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Path to the source Prism/MultiMC instance directory.
+    instance_dir: std::path::PathBuf,
+    /// Optional display name override (`name_override ?? cfg.name ?? "Imported"`).
+    name_override: Option<String>,
+    /// When `true`, omit `logs/` and `crash-reports/` from the copy.
+    skip_logs: bool,
+    /// Accepted for CP-6 wiring; currently unused (SHA-1 Modrinth identification).
+    #[allow(dead_code)]
+    identify_mods: bool,
+}
+
+#[async_trait::async_trait]
+impl TaskJob for ImportExternalJob {
+    async fn run(self: Box<Self>, ctx: &core::task_manager::TaskContext) {
+        use core::launcher_import::{
+            copy_game_dir, parse_instance_cfg, parse_mmc_pack, plan_external_import,
+            resolve_game_dir, resolve_icon_path,
+        };
+        use core::modpack::promote_staging;
+        use std::sync::atomic::Ordering;
+
+        let task_id = self.task_id_cell.load(Ordering::SeqCst);
+        log::info!(
+            "launcher_import: ImportExternalJob task_id={task_id} dir='{}'",
+            self.instance_dir.display()
+        );
+
+        // --- PLAN ---
+        ctx.enter_planning().await;
+
+        if ctx.is_cancelled() {
+            ctx.finish_cancelled().await;
+            return;
+        }
+
+        // Read and parse instance.cfg.
+        let cfg_path = self.instance_dir.join("instance.cfg");
+        let cfg_text = match std::fs::read_to_string(&cfg_path) {
+            Ok(t) => t,
+            Err(e) => {
+                ctx.finish_failed(format!("could not read instance.cfg: {e}")).await;
+                return;
+            }
+        };
+        let cfg = match parse_instance_cfg(&cfg_text) {
+            Ok(c) => c,
+            Err(e) => {
+                ctx.finish_failed(format!("parse instance.cfg: {e}")).await;
+                return;
+            }
+        };
+
+        // Read and parse mmc-pack.json.
+        let pack_path = self.instance_dir.join("mmc-pack.json");
+        let pack_text = match std::fs::read_to_string(&pack_path) {
+            Ok(t) => t,
+            Err(e) => {
+                ctx.finish_failed(format!("could not read mmc-pack.json: {e}")).await;
+                return;
+            }
+        };
+        let pack = match parse_mmc_pack(&pack_text) {
+            Ok(p) => p,
+            Err(e) => {
+                ctx.finish_failed(format!("parse mmc-pack.json: {e}")).await;
+                return;
+            }
+        };
+
+        // Build the plan — may reject Legacy instances.
+        let plan = match plan_external_import(&cfg, &pack, self.name_override.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                ctx.finish_failed(e.to_string()).await;
+                return;
+            }
+        };
+
+        // Surface non-fatal warnings via the task log.
+        for w in &plan.warnings {
+            log::warn!("launcher_import: {w}");
+        }
+
+        // Resolve source game dir — `.minecraft` preferred, then `minecraft`.
+        let game_dir = match resolve_game_dir(&self.instance_dir) {
+            Ok(d) => d,
+            Err(e) => {
+                ctx.finish_failed(e.to_string()).await;
+                return;
+            }
+        };
+
+        // Create the ApexLauncher instance (writes instance.json + empty mc/mods/).
+        let inst = match instances::create(
+            &self.app,
+            CreateInstanceReq {
+                name: plan.name.clone(),
+                minecraft: plan.minecraft.clone(),
+                loader: instances::Loader {
+                    kind: plan.loader_kind.clone(),
+                    version: plan.loader_version.clone(),
+                },
+            },
+        ) {
+            Ok(i) => i,
+            Err(e) => {
+                ctx.finish_failed(e).await;
+                return;
+            }
+        };
+
+        let inst_dir = match core::store::instances_dir(&self.app) {
+            Ok(d) => d.join(&inst.slug),
+            Err(e) => {
+                ctx.finish_failed(e).await;
+                return;
+            }
+        };
+        let mc_dir = inst_dir.join("mc");
+        let staging_dir = staging_dir_for(&inst_dir, task_id);
+
+        // --- APPLY (no download phase — all files are local) ---
+        ctx.enter_applying().await;
+
+        // Copy source game dir into staging.
+        let files_copied = match copy_game_dir(&game_dir, &staging_dir, self.skip_logs) {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                ctx.finish_failed(format!("copy game dir: {e}")).await;
+                return;
+            }
+        };
+
+        // Promote staging into mc/ (atomic rename within the same volume).
+        if let Err(e) = promote_staging(&staging_dir, &mc_dir) {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            ctx.finish_failed(format!("promote staging: {e}")).await;
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&staging_dir);
+
+        // Load the manifest and apply overrides.
+        let result = match instances::load_manifest(&self.app, &inst.slug) {
+            Ok(mut instance) => {
+                // Step 6 — Java/memory overrides, gated by Override* flags.
+                if plan.override_memory {
+                    if let Some(max) = plan.max_mem_mb {
+                        instance.java.memory_mb = max;
+                    }
+                    instance.java.min_memory_mb = plan.min_mem_mb;
+                    instance.java.use_pack_settings = true;
+                }
+                if plan.override_java_location {
+                    instance.java.path_override = plan.java_path.clone();
+                }
+                if plan.override_java_args {
+                    instance.java.args_override = plan.jvm_args.clone();
+                }
+
+                // Step 7 — icon: resolve_icon_path → write_instance_icon when Some.
+                if let Some(icon_key) = cfg.icon_key.as_deref() {
+                    if let Some(icon_path) = resolve_icon_path(&self.instance_dir, icon_key) {
+                        if let Err(e) =
+                            instances::write_instance_icon(&inst_dir, &mut instance, &icon_path)
+                        {
+                            log::warn!("launcher_import: could not apply icon: {e}");
+                        }
+                    }
+                }
+
+                // Step 8 — source=None (already None), pack_locked=false (already false).
+                match instances::save_manifest(&self.app, &inst.slug, &instance) {
+                    Ok(_) => Ok(ExternalImportResult {
+                        slug: inst.slug.clone(),
+                        name: inst.name.clone(),
+                        loader: plan.loader_kind.clone(),
+                        files_copied,
+                        mods_identified: 0, // CP-6 wires the SHA-1 Modrinth lookup
+                        warnings: plan.warnings.clone(),
+                    }),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        };
+
+        match result {
+            Ok(r) => {
+                log::info!(
+                    "launcher_import: ImportExternalJob done — slug='{}' files_copied={}",
+                    r.slug,
+                    r.files_copied
+                );
+                match serde_json::to_value(&r) {
+                    Ok(v) => ctx.finish_done_with_result(v).await,
+                    Err(e) => ctx.finish_failed(format!("serialize result: {e}")).await,
+                }
+            }
+            Err(e) => ctx.finish_failed(e).await,
+        }
+    }
+}
+
+/// Enqueue an external-launcher instance import task and return its id synchronously.
+async fn enqueue_import_external(
+    app: &tauri::AppHandle,
+    manager: &tauri::State<'_, TaskManager>,
+    instance_dir: std::path::PathBuf,
+    name_override: Option<String>,
+    identify_mods: bool,
+    skip_logs: bool,
+) -> Result<u64, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let task_id_cell: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let task_id_cell_job = Arc::clone(&task_id_cell);
+
+    // Human-readable label: prefer a non-empty name_override, fall back to directory name.
+    let display_name = name_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            instance_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Instance")
+        });
+    let label = format!("Import {display_name}");
+
+    let id = manager
+        .enqueue(TaskSpec {
+            kind: TaskKind::PackInstall,
+            parent_label: label,
+            job: Box::new(ImportExternalJob {
+                app: app.clone(),
+                task_id_cell: task_id_cell_job,
+                instance_dir,
+                name_override,
+                skip_logs,
+                identify_mods,
+            }),
+        })
+        .await;
+
+    task_id_cell.store(id, Ordering::SeqCst);
+    Ok(id)
+}
+
+/// Import a Prism/MultiMC/PolyMC instance directory as a new ApexLauncher instance.
+///
+/// Returns a **task id** (`Promise<number>` on the frontend). The terminal
+/// [`ExternalImportResult`] arrives asynchronously via the `task://update` event
+/// when `status.kind === "done"` and `task.result` is set.
+///
+/// - `instance_dir` — absolute path to the source instance directory
+///   (contains `instance.cfg` + `mmc-pack.json` + `.minecraft/` or `minecraft/`).
+/// - `name_override` — optional display-name override; falls back to `cfg.name`
+///   then `"Imported"`.
+/// - `identify_mods` — reserved for CP-6 (opt-in Modrinth SHA-1 mod identification);
+///   currently accepted but unused.
+/// - `skip_logs` — when `true`, omit `logs/` and `crash-reports/` from the copy.
+#[tauri::command]
+#[specta::specta]
+async fn import_external_instance(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, TaskManager>,
+    instance_dir: String,
+    name_override: Option<String>,
+    identify_mods: bool,
+    skip_logs: bool,
+) -> Result<u64, String> {
+    enqueue_import_external(
+        &app,
+        &manager,
+        std::path::PathBuf::from(instance_dir),
+        name_override,
+        identify_mods,
+        skip_logs,
+    )
+    .await
+}
+
 /// Enqueue a CurseForge `.zip` import task and return its id synchronously.
 #[tauri::command]
 #[specta::specta]
@@ -4482,6 +4809,8 @@ pub enum TaskResult {
     MrpackImport(MrpackImportResult),
     /// Result of `import_curseforge_zip` / `install_modpack` (CF branch).
     CfImport(CfImportResult),
+    /// Result of `import_external_instance` (Prism/MultiMC/PolyMC import).
+    ExternalImport(ExternalImportResult),
     /// Result of `install_modpack` (typed tagged union with `kind` field).
     ModpackInstall(ModpackInstallResult),
     /// Result of `update_modpack`.
@@ -4547,6 +4876,7 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             validate_java_path,
             import_mrpack,
             import_curseforge_zip,
+            import_external_instance,
             install_modpack,
             update_modpack,
             refresh_pack_meta,

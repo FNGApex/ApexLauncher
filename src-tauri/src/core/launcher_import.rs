@@ -42,6 +42,11 @@ pub enum LauncherImportError {
     #[error("unsafe path rejected: {0}")]
     UnsafePath(String),
 
+    /// The instance configuration is explicitly unsupported (e.g. `InstanceType=Legacy`).
+    /// The message string is the user-facing reason.
+    #[error("{0}")]
+    Rejected(String),
+
     /// I/O error during game-dir copy.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -581,6 +586,110 @@ pub fn resolve_icon_path(instance_dir: &Path, icon_key: &str) -> Option<PathBuf>
         }
     }
     None
+}
+
+// ── CP-5: Plan function (pure) ────────────────────────────────────────────────
+
+/// The resolved plan for importing a Prism/MultiMC/PolyMC instance (output of
+/// [`plan_external_import`]).
+///
+/// Contains everything the orchestrator (`ImportExternalJob` in `lib.rs`) needs to
+/// create the ApexLauncher instance, apply Java/memory overrides, and copy the
+/// game directory tree. No I/O is performed by the plan function itself.
+#[derive(Debug)]
+pub struct ExternalImportPlan {
+    /// Resolved instance name (`name_override ?? cfg.name ?? "Imported"`).
+    pub name: String,
+    /// Minecraft version string from `mmc-pack.json`.
+    pub minecraft: String,
+    /// Loader kind: `"vanilla"`, `"fabric"`, `"quilt"`, `"forge"`, or `"neoforge"`.
+    pub loader_kind: String,
+    /// Loader version (e.g. `"0.16.9"` for Fabric). `None` for vanilla.
+    pub loader_version: Option<String>,
+    /// When `true`, the orchestrator must apply `max_mem_mb`/`min_mem_mb` to `JavaCfg`.
+    pub override_memory: bool,
+    /// Max heap MiB (`-Xmx`). Meaningful only when `override_memory` is `true`.
+    pub max_mem_mb: Option<u32>,
+    /// Min heap MiB (`-Xms`). Meaningful only when `override_memory` is `true`.
+    pub min_mem_mb: Option<u32>,
+    /// When `true`, the orchestrator must apply `java_path` to `JavaCfg.path_override`.
+    pub override_java_location: bool,
+    /// Absolute path to a Java binary. Meaningful only when `override_java_location` is `true`.
+    pub java_path: Option<String>,
+    /// When `true`, the orchestrator must apply `jvm_args` to `JavaCfg.args_override`.
+    pub override_java_args: bool,
+    /// Extra JVM arguments. Meaningful only when `override_java_args` is `true`.
+    pub jvm_args: Option<String>,
+    /// Non-fatal warnings accumulated during planning (e.g. unsupported loader mapped to vanilla).
+    pub warnings: Vec<String>,
+}
+
+/// Map parsed `PrismInstanceCfg` + `MmcPack` into an [`ExternalImportPlan`].
+///
+/// Implements the field-mapping contract from the spec (steps 1–6):
+///
+/// 1. Reject `instance_type == "Legacy"` with [`LauncherImportError::Rejected`].
+/// 2. Name: `name_override ?? cfg.name ?? "Imported"`.
+/// 3. Minecraft version from `pack.minecraft`.
+/// 4. Loader:
+///    - [`ImportedLoader::Vanilla`] → `loader_kind = "vanilla"`, `loader_version = None`.
+///    - [`ImportedLoader::Loader`] → pass kind + version through unchanged.
+///    - [`ImportedLoader::Unsupported(x)`] → `loader_kind = "vanilla"`, `loader_version = None`,
+///      push a warning ("loader '{x}' is not supported …").
+/// 5. Java/memory overrides are threaded through the plan verbatim; the orchestrator
+///    applies them only when the corresponding `override_*` gate is `true` (step 6).
+///
+/// # Errors
+/// Returns [`LauncherImportError::Rejected`] for Legacy (pre-1.6) instances, which
+/// cannot be imported (they lack a `mmc-pack.json` component list).
+pub fn plan_external_import(
+    cfg: &PrismInstanceCfg,
+    pack: &MmcPack,
+    name_override: Option<&str>,
+) -> Result<ExternalImportPlan, LauncherImportError> {
+    // Step 1: reject Legacy instances (field-mapping step 1).
+    if cfg.instance_type.as_deref() == Some("Legacy") {
+        return Err(LauncherImportError::Rejected(
+            "legacy MultiMC instances are not supported (pre-1.6 format)".to_string(),
+        ));
+    }
+
+    // Step 2: resolve name (override ?? cfg.name ?? "Imported").
+    let name = name_override
+        .filter(|s| !s.is_empty())
+        .or(cfg.name.as_deref())
+        .unwrap_or("Imported")
+        .to_string();
+
+    // Steps 3–4: resolve loader from the parsed MmcPack.
+    let mut warnings = Vec::new();
+    let (loader_kind, loader_version) = match &pack.loader {
+        ImportedLoader::Vanilla => ("vanilla".to_string(), None),
+        ImportedLoader::Loader { kind, version } => (kind.clone(), Some(version.clone())),
+        ImportedLoader::Unsupported(uid) => {
+            warnings.push(format!(
+                "loader '{}' is not supported by ApexLauncher; imported as vanilla",
+                uid
+            ));
+            ("vanilla".to_string(), None)
+        }
+    };
+
+    // Step 5 / step 6: thread Override* gates + values through unchanged.
+    Ok(ExternalImportPlan {
+        name,
+        minecraft: pack.minecraft.clone(),
+        loader_kind,
+        loader_version,
+        override_memory: cfg.override_memory,
+        max_mem_mb: cfg.max_mem_mb,
+        min_mem_mb: cfg.min_mem_mb,
+        override_java_location: cfg.override_java_location,
+        java_path: cfg.java_path.clone(),
+        override_java_args: cfg.override_java_args,
+        jvm_args: cfg.jvm_args.clone(),
+        warnings,
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
