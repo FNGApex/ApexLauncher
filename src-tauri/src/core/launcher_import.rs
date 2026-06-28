@@ -12,9 +12,11 @@
 //!   ([`copy_game_dir`]).
 //! - **CP-4** — Icon resolution helper ([`resolve_icon_path`]).
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
+use sha1::Digest;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -50,6 +52,18 @@ pub enum LauncherImportError {
     /// I/O error during game-dir copy.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Non-200 HTTP response during Modrinth mod identification.
+    #[error("mod identification request failed (HTTP {0})")]
+    HttpError(u16),
+
+    /// HTTP transport error during Modrinth mod identification.
+    #[error("mod identification HTTP client error: {0}")]
+    HttpClientError(String),
+
+    /// The Modrinth `version_files` response could not be parsed.
+    #[error("mod identification response parse error: {0}")]
+    IdentifyParseError(String),
 }
 
 // ── CP-1: instance.cfg → PrismInstanceCfg ────────────────────────────────────
@@ -690,6 +704,172 @@ pub fn plan_external_import(
         jvm_args: cfg.jvm_args.clone(),
         warnings,
     })
+}
+
+// ── CP-6: Modrinth SHA-1 mod identification ───────────────────────────────────
+
+/// Raw hashes object inside a Modrinth version file entry.
+#[derive(Debug, Deserialize)]
+struct MrFileHashes {
+    sha1: Option<String>,
+    sha512: Option<String>,
+}
+
+/// A single downloadable file within a Modrinth version object.
+#[derive(Debug, Deserialize)]
+struct MrVersionFile {
+    hashes: MrFileHashes,
+    /// Declared filename (not used for the ModEntry — we use the on-disk name).
+    #[allow(dead_code)]
+    filename: String,
+    #[allow(dead_code)]
+    primary: bool,
+}
+
+/// One entry in the `POST /v2/version_files` response map.
+///
+/// The map is keyed by the SHA-1 hex string that was submitted in the request.
+#[derive(Debug, Deserialize)]
+struct MrVersionObject {
+    project_id: String,
+    /// Modrinth version id (the `"id"` field in the response object).
+    id: String,
+    files: Vec<MrVersionFile>,
+}
+
+/// Identify mods in `mods_dir` via a single batched Modrinth SHA-1 lookup.
+///
+/// # Behaviour
+/// - Enumerates `*.jar` and `*.jar.disabled` files **directly** in `mods_dir` (not recursive).
+/// - If the directory contains no such files, returns `Ok(vec![])` **without** calling
+///   `client` at all (api-frugality).
+/// - For every jar, SHA-1 hashes the bytes and collects them.
+/// - Makes exactly **one** `POST https://api.modrinth.com/v2/version_files` call with all
+///   hashes in a single batch.
+/// - Builds a [`crate::core::instances::ModEntry`] for each hash present in the response.
+///   Unmatched jars produce no entry (stay folder-only).
+/// - Returns an error on a non-200 response or on malformed JSON. Does **not** panic.
+/// - `name`, `icon_url`, `summary` are always `None` — honoring api-frugality;
+///   `enrich_instance_mods` backfills these lazily later.
+pub async fn identify_mods_modrinth(
+    client: &dyn crate::core::providers::ProviderHttpClient,
+    mods_dir: &Path,
+) -> Result<Vec<crate::core::instances::ModEntry>, LauncherImportError> {
+    // 1. Enumerate .jar and .jar.disabled files directly in mods_dir (non-recursive).
+    //    If the directory doesn't exist, treat it as empty.
+    if !mods_dir.is_dir() {
+        return Ok(vec![]);
+    }
+
+    let mut jar_entries: Vec<(String, PathBuf)> = Vec::new(); // (filename, full_path)
+
+    for dir_entry in std::fs::read_dir(mods_dir)? {
+        let dir_entry = dir_entry?;
+        let path = dir_entry.path();
+
+        // Use symlink_metadata so we inspect the entry itself, not a link target.
+        let meta = path.symlink_metadata()?;
+        if !meta.file_type().is_file() {
+            continue;
+        }
+
+        let filename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+
+        if filename.ends_with(".jar") || filename.ends_with(".jar.disabled") {
+            jar_entries.push((filename, path));
+        }
+    }
+
+    // 2. Short-circuit: no jar files → return empty without any HTTP call.
+    if jar_entries.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // 3. SHA-1 hash each jar; build hash → filename map (filename = on-disk name).
+    let mut hash_to_filename: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    for (filename, path) in &jar_entries {
+        let bytes = std::fs::read(path)?;
+        let mut hasher = sha1::Sha1::new();
+        hasher.update(&bytes);
+        let sha1_hex = hex::encode(hasher.finalize());
+        hash_to_filename.insert(sha1_hex, filename.clone());
+    }
+
+    // 4. Build POST body: {"hashes": [...sha1_hex...], "algorithm": "sha1"}.
+    let hash_list: Vec<&str> = hash_to_filename.keys().map(String::as_str).collect();
+    let body = serde_json::json!({
+        "hashes": hash_list,
+        "algorithm": "sha1"
+    })
+    .to_string();
+
+    // 5. POST to Modrinth /v2/version_files (keyless, single batch).
+    let (status, response_body) = client
+        .post(
+            "https://api.modrinth.com/v2/version_files",
+            &[("Content-Type", "application/json")],
+            body,
+        )
+        .await
+        .map_err(|e| LauncherImportError::HttpClientError(e.to_string()))?;
+
+    // 6. Check status — non-200 is a clean error, not a panic.
+    if status != 200 {
+        return Err(LauncherImportError::HttpError(status));
+    }
+
+    // 7. Parse response: object keyed by sha1_hex → MrVersionObject.
+    let version_map: std::collections::HashMap<String, MrVersionObject> =
+        serde_json::from_str(&response_body)
+            .map_err(|e| LauncherImportError::IdentifyParseError(e.to_string()))?;
+
+    // 8. Emit a ModEntry for each hash present in the response.
+    let mut result: Vec<crate::core::instances::ModEntry> = Vec::new();
+
+    for (sha1_hex, version) in &version_map {
+        // Ignore hashes in the response that we did not submit (shouldn't happen but be safe).
+        let filename = match hash_to_filename.get(sha1_hex) {
+            Some(f) => f.clone(),
+            None => continue,
+        };
+
+        // Find the matching file entry to extract sha512 (if present).
+        let matched_file = version
+            .files
+            .iter()
+            .find(|f| f.hashes.sha1.as_deref() == Some(sha1_hex.as_str()));
+
+        let mut hashes = BTreeMap::new();
+        hashes.insert("sha1".to_string(), sha1_hex.clone());
+        if let Some(file) = matched_file {
+            if let Some(sha512) = &file.hashes.sha512 {
+                hashes.insert("sha512".to_string(), sha512.clone());
+            }
+        }
+
+        let enabled = !filename.ends_with(".jar.disabled");
+
+        result.push(crate::core::instances::ModEntry {
+            provider: "modrinth".to_string(),
+            project_id: version.project_id.clone(),
+            version_id: version.id.clone(),
+            file_name: filename,
+            hashes,
+            enabled,
+            side: "both".to_string(),
+            from_pack: false,
+            name: None,
+            icon_url: None,
+            summary: None,
+        });
+    }
+
+    Ok(result)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

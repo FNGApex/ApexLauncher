@@ -1003,3 +1003,335 @@ fn cp5_plan_minecraft_version_comes_from_pack() {
     assert_eq!(plan.loader_kind, "forge");
     assert_eq!(plan.loader_version.as_deref(), Some("47.2.0"));
 }
+
+// ── CP-6: identify_mods_modrinth ─────────────────────────────────────────────
+
+use crate::core::providers::ProviderHttpClient;
+use std::sync::{Arc, Mutex};
+
+/// Minimal async SHA-1 hex helper for test use.
+fn sha1_hex_of(bytes: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(bytes);
+    hex::encode(h.finalize())
+}
+
+/// Build a valid Modrinth `/v2/version_files` JSON response for two hashes.
+fn build_mock_version_files_response(
+    hash_a: &str,
+    project_id_a: &str,
+    version_id_a: &str,
+    filename_a: &str,
+    sha512_a: &str,
+    hash_b: &str,
+    project_id_b: &str,
+    version_id_b: &str,
+    filename_b: &str,
+    sha512_b: &str,
+) -> String {
+    format!(
+        r#"{{
+  "{hash_a}": {{
+    "project_id": "{project_id_a}",
+    "id": "{version_id_a}",
+    "files": [{{
+      "hashes": {{"sha1": "{hash_a}", "sha512": "{sha512_a}"}},
+      "filename": "{filename_a}",
+      "primary": true
+    }}]
+  }},
+  "{hash_b}": {{
+    "project_id": "{project_id_b}",
+    "id": "{version_id_b}",
+    "files": [{{
+      "hashes": {{"sha1": "{hash_b}", "sha512": "{sha512_b}"}},
+      "filename": "{filename_b}",
+      "primary": true
+    }}]
+  }}
+}}"#
+    )
+}
+
+/// Mock POST-only client that records (url, body) per call and returns a canned response.
+struct CapturingPostClient {
+    response: (u16, String),
+    calls: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl CapturingPostClient {
+    fn new(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            response: (status, body.into()),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+
+    fn last_url(&self) -> Option<String> {
+        self.calls.lock().unwrap().last().map(|(u, _)| u.clone())
+    }
+
+    fn last_body(&self) -> Option<String> {
+        self.calls.lock().unwrap().last().map(|(_, b)| b.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderHttpClient for CapturingPostClient {
+    async fn get(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+    ) -> Result<(u16, String), reqwest::Error> {
+        panic!("identify_mods_modrinth must not call GET");
+    }
+
+    async fn post(
+        &self,
+        url: &str,
+        _headers: &[(&str, &str)],
+        body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        self.calls.lock().unwrap().push((url.to_string(), body));
+        Ok(self.response.clone())
+    }
+}
+
+/// Client that panics on any call — used to prove no HTTP is made.
+struct NeverCalledClient;
+
+#[async_trait::async_trait]
+impl ProviderHttpClient for NeverCalledClient {
+    async fn get(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+    ) -> Result<(u16, String), reqwest::Error> {
+        panic!("HTTP client must not be called (api-frugality)");
+    }
+
+    async fn post(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+        _body: String,
+    ) -> Result<(u16, String), reqwest::Error> {
+        panic!("HTTP client must not be called (api-frugality)");
+    }
+}
+
+const SHA512_A: &str = "ee26b0dd4af7e749aa1a8ee3c10ae9923f618980772e473f8819a5d4940e0db27ac185f8a0e1d5f84f88bc887fd67b143732c304cc5fa9ad8e6f57f50028a8ff";
+const SHA512_B: &str = "b24f79685fb6d5efbd0b30dc39e73df1f63e50bdcad2fc03b8fd99b55a3bb0ebddadcf57b7cd1ede148804df77bd79f43266e9d6cd8ca3a4fe4de9e57e91e4a4";
+
+#[tokio::test]
+async fn cp6_empty_mods_dir_zero_http_calls() {
+    let tmp = TempDir::new().unwrap();
+    let mods_dir = tmp.path().join("mods");
+    std::fs::create_dir_all(&mods_dir).unwrap();
+
+    let client = NeverCalledClient;
+    let result = identify_mods_modrinth(&client, &mods_dir).await;
+    assert!(result.is_ok(), "empty mods dir must return Ok(vec![]): {result:?}");
+    assert!(result.unwrap().is_empty(), "empty mods dir must yield no entries");
+}
+
+#[tokio::test]
+async fn cp6_request_shape_single_batched_post() {
+    let tmp = TempDir::new().unwrap();
+    let mods_dir = tmp.path().join("mods");
+    std::fs::create_dir_all(&mods_dir).unwrap();
+
+    let content_a = b"identify-jar-content-alpha";
+    let content_b = b"identify-jar-content-beta";
+    let hash_a = sha1_hex_of(content_a);
+    let hash_b = sha1_hex_of(content_b);
+
+    std::fs::write(mods_dir.join("mod_a.jar"), content_a).unwrap();
+    std::fs::write(mods_dir.join("mod_b.jar"), content_b).unwrap();
+
+    let response_json = build_mock_version_files_response(
+        &hash_a, "AANobbMI", "ver_a_01", "mod_a.jar", SHA512_A,
+        &hash_b, "gvQqBUqZ", "ver_b_01", "mod_b.jar", SHA512_B,
+    );
+
+    let client = CapturingPostClient::new(200, response_json);
+    let _ = identify_mods_modrinth(&client, &mods_dir).await.unwrap();
+
+    // Exactly one POST call.
+    assert_eq!(client.call_count(), 1, "must make exactly one batched POST");
+
+    // URL must be the Modrinth version_files endpoint.
+    let url = client.last_url().unwrap();
+    assert_eq!(
+        url, "https://api.modrinth.com/v2/version_files",
+        "POST URL must be the Modrinth version_files endpoint"
+    );
+
+    // Request body must have the right shape.
+    let body_str = client.last_body().unwrap();
+    let body: serde_json::Value = serde_json::from_str(&body_str)
+        .expect("POST body must be valid JSON");
+    assert_eq!(
+        body["algorithm"].as_str().unwrap_or(""),
+        "sha1",
+        "body.algorithm must be 'sha1'"
+    );
+    let hashes = body["hashes"].as_array().expect("body.hashes must be an array");
+    assert_eq!(hashes.len(), 2, "body.hashes must contain exactly 2 entries");
+    let hash_strs: Vec<&str> = hashes.iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(hash_strs.contains(&hash_a.as_str()), "hashes must include hash of mod_a.jar");
+    assert!(hash_strs.contains(&hash_b.as_str()), "hashes must include hash of mod_b.jar");
+}
+
+#[tokio::test]
+async fn cp6_matched_hash_produces_mod_entry_with_correct_fields() {
+    let tmp = TempDir::new().unwrap();
+    let mods_dir = tmp.path().join("mods");
+    std::fs::create_dir_all(&mods_dir).unwrap();
+
+    let content_a = b"sodium-jar-bytes";
+    let hash_a = sha1_hex_of(content_a);
+
+    std::fs::write(mods_dir.join("sodium.jar"), content_a).unwrap();
+
+    // Response has only hash_a matched; build a single-entry response.
+    let response_json = format!(
+        r#"{{
+  "{hash_a}": {{
+    "project_id": "AANobbMI",
+    "id": "sodium_ver_01",
+    "files": [{{
+      "hashes": {{"sha1": "{hash_a}", "sha512": "{SHA512_A}"}},
+      "filename": "sodium.jar",
+      "primary": true
+    }}]
+  }}
+}}"#
+    );
+
+    let client = CapturingPostClient::new(200, response_json);
+    let entries = identify_mods_modrinth(&client, &mods_dir).await.unwrap();
+
+    assert_eq!(entries.len(), 1, "one matched hash must produce one ModEntry");
+    let entry = &entries[0];
+    assert_eq!(entry.provider, "modrinth", "provider must be 'modrinth'");
+    assert_eq!(entry.project_id, "AANobbMI", "project_id must match response");
+    assert_eq!(entry.version_id, "sodium_ver_01", "version_id must match response id");
+    assert_eq!(entry.file_name, "sodium.jar", "file_name must be the on-disk filename");
+    assert_eq!(
+        entry.hashes.get("sha1").map(String::as_str),
+        Some(hash_a.as_str()),
+        "hashes map must contain the sha1 we computed"
+    );
+    assert!(entry.enabled, "an active .jar must have enabled=true");
+    assert_eq!(entry.side, "both");
+    assert!(!entry.from_pack, "from_pack must be false for imported mods");
+    // api-frugality: display metadata must NOT be fetched
+    assert!(entry.name.is_none(), "name must be None (no per-project fetch)");
+    assert!(entry.icon_url.is_none(), "icon_url must be None");
+    assert!(entry.summary.is_none(), "summary must be None");
+}
+
+#[tokio::test]
+async fn cp6_unmatched_hash_produces_no_entry() {
+    let tmp = TempDir::new().unwrap();
+    let mods_dir = tmp.path().join("mods");
+    std::fs::create_dir_all(&mods_dir).unwrap();
+
+    let content_unmatched = b"some-obscure-mod-not-on-modrinth";
+    let hash_unmatched = sha1_hex_of(content_unmatched);
+    std::fs::write(mods_dir.join("obscure.jar"), content_unmatched).unwrap();
+
+    // Response is empty — no matched hashes.
+    let response_json = "{}".to_string();
+
+    let client = CapturingPostClient::new(200, response_json);
+    let entries = identify_mods_modrinth(&client, &mods_dir).await.unwrap();
+
+    // Unmatched jar must produce zero ModEntries but the client was still called once.
+    assert_eq!(client.call_count(), 1, "should still call the endpoint even with no matches");
+    assert!(
+        entries.is_empty(),
+        "unmatched hash (hash={hash_unmatched}) must yield no ModEntry"
+    );
+}
+
+#[tokio::test]
+async fn cp6_disabled_jar_produces_entry_with_enabled_false() {
+    let tmp = TempDir::new().unwrap();
+    let mods_dir = tmp.path().join("mods");
+    std::fs::create_dir_all(&mods_dir).unwrap();
+
+    let content = b"disabled-jar-content";
+    let hash = sha1_hex_of(content);
+
+    // Write as .jar.disabled — the identify fn must enumerate these too.
+    std::fs::write(mods_dir.join("mymod.jar.disabled"), content).unwrap();
+
+    let response_json = format!(
+        r#"{{
+  "{hash}": {{
+    "project_id": "DISABLED1",
+    "id": "ver_disabled",
+    "files": [{{
+      "hashes": {{"sha1": "{hash}", "sha512": "{SHA512_B}"}},
+      "filename": "mymod.jar.disabled",
+      "primary": true
+    }}]
+  }}
+}}"#
+    );
+
+    let client = CapturingPostClient::new(200, response_json);
+    let entries = identify_mods_modrinth(&client, &mods_dir).await.unwrap();
+
+    assert_eq!(entries.len(), 1, "disabled jar must produce one ModEntry");
+    let entry = &entries[0];
+    assert!(!entry.enabled, "a .jar.disabled file must produce enabled=false");
+    assert_eq!(entry.file_name, "mymod.jar.disabled");
+    assert_eq!(entry.provider, "modrinth");
+}
+
+#[tokio::test]
+async fn cp6_non_200_response_returns_error() {
+    let tmp = TempDir::new().unwrap();
+    let mods_dir = tmp.path().join("mods");
+    std::fs::create_dir_all(&mods_dir).unwrap();
+    std::fs::write(mods_dir.join("a.jar"), b"bytes").unwrap();
+
+    let client = CapturingPostClient::new(500, r#"{"error":"internal server error"}"#);
+    let result = identify_mods_modrinth(&client, &mods_dir).await;
+    assert!(result.is_err(), "non-200 response must return Err");
+}
+
+#[tokio::test]
+async fn cp6_malformed_json_response_returns_error() {
+    let tmp = TempDir::new().unwrap();
+    let mods_dir = tmp.path().join("mods");
+    std::fs::create_dir_all(&mods_dir).unwrap();
+    std::fs::write(mods_dir.join("a.jar"), b"bytes").unwrap();
+
+    let client = CapturingPostClient::new(200, "not valid json at all {{{{");
+    let result = identify_mods_modrinth(&client, &mods_dir).await;
+    assert!(result.is_err(), "malformed JSON response must return Err");
+}
+
+#[tokio::test]
+async fn cp6_non_jar_files_are_not_enumerated() {
+    // .txt files must be ignored; only .jar and .jar.disabled are hashed.
+    let tmp = TempDir::new().unwrap();
+    let mods_dir = tmp.path().join("mods");
+    std::fs::create_dir_all(&mods_dir).unwrap();
+    std::fs::write(mods_dir.join("readme.txt"), b"not a jar").unwrap();
+    std::fs::write(mods_dir.join("config.toml"), b"config").unwrap();
+
+    // If only non-jar files are present, no POST call should be made.
+    let client = NeverCalledClient;
+    let result = identify_mods_modrinth(&client, &mods_dir).await.unwrap();
+    assert!(result.is_empty(), "non-jar files must not produce entries");
+}

@@ -3933,8 +3933,8 @@ struct ImportExternalJob {
     name_override: Option<String>,
     /// When `true`, omit `logs/` and `crash-reports/` from the copy.
     skip_logs: bool,
-    /// Accepted for CP-6 wiring; currently unused (SHA-1 Modrinth identification).
-    #[allow(dead_code)]
+    /// When `true`, SHA-1 hash every jar in `mc/mods/` after promote and do a
+    /// single batched keyless Modrinth lookup to write `ModEntry`s for matches.
     identify_mods: bool,
 }
 
@@ -4098,14 +4098,43 @@ impl TaskJob for ImportExternalJob {
                     }
                 }
 
-                // Step 8 — source=None (already None), pack_locked=false (already false).
+                // Step 9 (CP-6) — opt-in Modrinth SHA-1 mod identification.
+                //
+                // When `identify_mods` is true: SHA-1 hash every jar in mc/mods/,
+                // perform a single batched keyless Modrinth POST /v2/version_files,
+                // and append a ModEntry for each matched hash.
+                //
+                // On error: log a warning and continue (import still succeeds,
+                // mods_identified = 0 — api-frugality trumps a non-fatal identify failure).
+                let mods_identified = if self.identify_mods {
+                    let http = ReqwestProviderClient(reqwest::Client::new());
+                    let mods_dir = mc_dir.join("mods");
+                    match core::launcher_import::identify_mods_modrinth(&http, &mods_dir).await {
+                        Ok(identified) => {
+                            let count = identified.len() as u32;
+                            instance.mods.extend(identified);
+                            count
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "launcher_import: mod identification failed (import succeeds): {e}"
+                            );
+                            0
+                        }
+                    }
+                } else {
+                    0
+                };
+
+                // Steps 8 & 10 — source/pack_locked are already None/false from create;
+                // persist the manifest (with any mods appended in step 9) and return.
                 match instances::save_manifest(&self.app, &inst.slug, &instance) {
                     Ok(_) => Ok(ExternalImportResult {
                         slug: inst.slug.clone(),
                         name: inst.name.clone(),
                         loader: plan.loader_kind.clone(),
                         files_copied,
-                        mods_identified: 0, // CP-6 wires the SHA-1 Modrinth lookup
+                        mods_identified,
                         warnings: plan.warnings.clone(),
                     }),
                     Err(e) => Err(e),
@@ -4188,8 +4217,9 @@ async fn enqueue_import_external(
 ///   (contains `instance.cfg` + `mmc-pack.json` + `.minecraft/` or `minecraft/`).
 /// - `name_override` — optional display-name override; falls back to `cfg.name`
 ///   then `"Imported"`.
-/// - `identify_mods` — reserved for CP-6 (opt-in Modrinth SHA-1 mod identification);
-///   currently accepted but unused.
+/// - `identify_mods` — when `true`, SHA-1 hashes every jar in `mc/mods/` after copy+promote
+///   and does a single batched keyless Modrinth `POST /v2/version_files` lookup to write
+///   `ModEntry`s for matched jars so update-checking is available. Default `false`.
 /// - `skip_logs` — when `true`, omit `logs/` and `crash-reports/` from the copy.
 #[tauri::command]
 #[specta::specta]
