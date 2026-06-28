@@ -42,13 +42,21 @@ is verified by `check`; mac/Linux artifact production + smoke-test are deferred 
   documented `scripts/build.sh` WSL→Windows path. IP-5/6/7 are not.
 - **glibc floor:** Linux artifacts built on Ubuntu 22.04 / Debian 12 (WebKitGTK 4.1) so older
   distros don't hit `GLIBC_2.xx not found`.
-- **`native-tls` dependency:** Linux build host needs OpenSSL dev headers until the separate
-  `native-tls`→`rustls-tls` CI slice lands. Not changed here.
-- **Out of scope:** signing/notarization, auto-update, the GitHub Actions CI matrix,
-  `native-tls`→`rustls-tls`. Artifacts ship unsigned.
+- **~~`native-tls` dependency~~ — SUPERSEDED:** `feat/rustls-tls-switch` merged; reqwest uses
+  rustls, so the Linux build host no longer needs OpenSSL dev headers. The CI Linux legs install
+  no `libssl-dev`. (Original note: OpenSSL headers needed until the rustls slice lands.)
+- **~~Out of scope: GitHub Actions CI matrix~~ — NOW SHIPPED:** `docs/spec/ci-pipeline.md` —
+  `bundle.yml` builds + uploads all installer formats (MSI/NSIS/2×DMG/AppImage/tarball) on
+  win/mac/linux runners, verified green. The IP-5/6/7 "verify on a real OS or CI" gate is now
+  satisfied by CI (macOS DMG + Linux AppImage/tarball first-built there).
+- **Out of scope (still):** signing/notarization, auto-update. Artifacts ship unsigned.
 
 ## Change log
 
+- 2026-06-27 — **CI matrix shipped** (`docs/spec/ci-pipeline.md`): `bundle.yml` builds all
+  installer formats on GitHub Actions; macOS DMG (dual-arch) + Linux AppImage/tarball first-built
+  + verified green there, retiring the IP-5/6/7 "unverified on those OSes" risk. `native-tls`
+  note superseded (rustls merged — no OpenSSL dep).
 - 2026-06-19 — **Windows leg shipped + verified.** IP-1 (per-platform bundle config), IP-2
   (`bundle <fmt...>` build mode in `build.sh` + `apex-build.bat` forwarding `--bundles`), IP-3
   (MSI), IP-4 (NSIS) all done. Both installers build, install, launch (app window confirmed),

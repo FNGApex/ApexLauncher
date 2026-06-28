@@ -1,0 +1,115 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-progress runs for the same ref so a new push to a branch does not
+# queue behind its predecessor.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Emit the rust-test matrix JSON based on the trigger event.
+  # Mechanism: a dedicated setup job (not per-leg `if:` guards).
+  # Rationale: a guarded leg still spins up a runner and shows a (skipped)
+  # status check on the PR, polluting the required-checks list.  The setup-job
+  # approach keeps the PR check list to exactly one entry (ubuntu-22.04) and
+  # the push-to-main run expands to all three OSes transparently.
+  setup:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo 'matrix={"os":["ubuntu-22.04"]}' >> $GITHUB_OUTPUT
+          else
+            echo 'matrix={"os":["ubuntu-22.04","windows-latest","macos-latest"]}' >> $GITHUB_OUTPUT
+          fi
+
+  rust-test:
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          prefix-key: test
+
+      # TEST variant: no libfuse2/file (AppImage bundling lives in bundle.yml only).
+      - name: Install Linux WebKit/GTK deps
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      # Windows: source the VS2022 developer environment so rc.exe (tauri-winres)
+      # is on PATH.  The windows-latest runner ships VS2022 + Windows SDK
+      # preinstalled; msvc-dev-cmd only activates the environment.
+      - name: Activate MSVC developer environment
+        if: startsWith(matrix.os, 'windows')
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # --retries 2 absorbs the known timing flake (cp4_concurrency_bound_not_exceeded
+      # in download_tests.rs) without masking real failures: a genuine failure fails
+      # all three attempts while a flake passes on retry.
+      - name: Run Rust test suite
+        run: cargo nextest run --manifest-path src-tauri/Cargo.toml --retries 2
+
+  # Platform-independent: always runs on ubuntu, on both PR and push-to-main.
+  # Also needs Linux WebKit/GTK because the bindings-drift step compiles
+  # the Rust library (bindings_export_tests.rs is gated not(target_os="windows")).
+  frontend-and-bindings:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Linux WebKit/GTK deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          prefix-key: test
+
+      - run: npm ci
+
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit
+
+      - name: Frontend production build
+        run: npm run build
+
+      # Bindings-drift gate: re-export src/lib/bindings.ts through the same
+      # make_builder() the app uses, then fail if the committed file differs.
+      # This catches Rust DTO/command/event changes that were not followed by a
+      # bindings.ts regeneration (scripts/build.sh dev on Windows).
+      - name: Export bindings.ts
+        run: cargo test --manifest-path src-tauri/Cargo.toml export_bindings
+
+      - name: Assert bindings.ts is up to date
+        run: git diff --exit-code src/lib/bindings.ts

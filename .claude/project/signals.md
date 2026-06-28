@@ -20,9 +20,9 @@
 
 **Always build/test via `scripts/build.sh`** — the single cross-platform entrypoint. On **WSL** it mirrors the source onto the native Windows FS (`C:\Users\drgor\Documents\GitHub\ApexLauncher`) and builds there with `scripts/apex-build.bat` (native NTFS → incremental compilation works; no `\\wsl.localhost` UNC, no GTK blocker). On **macOS/Linux** it builds natively in place. Do not call `cargo`/`npm` directly for build/test. WSL-native is still fine for formatting (`rustfmt --edition 2021`).
 
-No CI configuration exists yet (planned Phase 7).
+**CI:** GitHub Actions (`.github/workflows/test.yml` + `bundle.yml`) call `cargo`/`npm`/`tauri` **directly** on native runners — the one sanctioned exception to the build-via-`build.sh` rule (`build.sh`'s WSL-mirror is dead on native runners; `apex-build.bat` hardcodes this dev machine). `test.yml`: ubuntu rust-test (`cargo nextest --retries 2`) + frontend (tsc/vite) + bindings-drift gate on PRs; full 3-OS on push-to-main. `bundle.yml`: all installers (MSI/NSIS/2×DMG/AppImage/tarball) on `v*` tags + manual dispatch. Verified green. Spec: `docs/spec/ci-pipeline.md`. Signing + auto-update still deferred.
 
-**Known test flake:** `cp4_concurrency_bound_not_exceeded` in `download_tests.rs` — timing-sensitive, pre-existing, tracked.
+**Known test flake:** `cp4_concurrency_bound_not_exceeded` in `download_tests.rs` — timing-sensitive, pre-existing, tracked (CI absorbs it via `nextest --retries 2`).
 
 ## Language breakdown
 
@@ -38,7 +38,7 @@ No CI configuration exists yet (planned Phase 7).
 
 ## DevOps & CI
 
-No CI pipeline yet. Cross-platform GitHub Actions builds planned for Phase 7. No signing or auto-update infrastructure.
+Cross-platform GitHub Actions CI live (`.github/workflows/test.yml` + `bundle.yml`): test gate on PR (ubuntu) + push-to-main (3-OS); installer bundling (MSI/NSIS/DMG×2/AppImage/tarball) on `v*` tags + dispatch — all verified green on win/mac/linux. CI calls cargo/npm/tauri directly (not `build.sh`). No signing or auto-update yet (deferred follow-up). Spec: `docs/spec/ci-pipeline.md`.
 
 ---
 

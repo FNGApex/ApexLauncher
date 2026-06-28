@@ -1,0 +1,176 @@
+name: Bundle
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same ref (a re-tagged push or a re-dispatched run).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Distinct prefix-key from test.yml so the release cache never collides with
+      # the debug-build cache produced by the rust-test job.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          prefix-key: bundle
+
+      # BUNDLE variant (spec §Linux deps): libfuse2 + file are required for AppImage
+      # tooling and are intentionally absent from test.yml's linux dep install.
+      # ubuntu-22.04 ships libwebkit2gtk-4.1-dev (Tauri v2 requirement; 4.0 is Tauri v1).
+      # libappindicator3-dev is correct for 22.04; on 24.04 use libayatana-appindicator3-dev.
+      # No libssl-dev — reqwest uses rustls (feat/rustls-tls-switch merged).
+      - name: Install Linux WebKit/GTK + AppImage deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2 file
+
+      # Invokes the npm "tauri" script (package.json: "tauri": "tauri") which delegates
+      # to the locally-installed @tauri-apps/cli.  --bundles appimage limits output to
+      # the AppImage format only (avoids tauri trying to build deb/rpm on this runner).
+      - name: Build AppImage
+        run: npm run tauri build -- --bundles appimage
+
+      # Linux tarball (phase7 IP-6): raw release binary + .desktop + README.
+      # The Cargo package name is "modloader" (no [[bin]] override in Cargo.toml),
+      # so the release binary is at src-tauri/target/release/modloader.
+      # The binary is renamed to ApexLauncher inside the tarball to match the
+      # productName ("ApexLauncher" in tauri.conf.json) for user-facing distribution.
+      - name: Package tarball
+        run: |
+          mkdir -p dist-tar/ApexLauncher
+          cp src-tauri/target/release/modloader dist-tar/ApexLauncher/ApexLauncher
+          cp README.md dist-tar/ApexLauncher/
+          printf '[Desktop Entry]\nName=ApexLauncher\nExec=ApexLauncher\nType=Application\nCategories=Game;\n' \
+            > dist-tar/ApexLauncher/ApexLauncher.desktop
+          tar -C dist-tar -czf ApexLauncher_0.1.0_amd64.tar.gz ApexLauncher
+
+      # Upload both the AppImage (tauri-generated, name includes version+arch) and the
+      # manually-wrapped tarball.  The glob on *.AppImage tolerates the exact filename
+      # without hard-coding the version string a second time.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundles
+          path: |
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            ApexLauncher_0.1.0_amd64.tar.gz
+          retention-days: 14
+
+  macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # targets: installs the required cross-compilation target alongside the stable
+      # toolchain.  On macos-latest (Apple Silicon M-series runner), aarch64-apple-darwin
+      # is the native target; x86_64-apple-darwin is cross-compiled.  Using the dtolnay
+      # action's targets: input (rather than a separate rustup-target-add step) installs
+      # the target before rust-cache runs, so it is included in the cache key.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # prefix-key includes the matrix target to prevent the two legs from sharing a
+      # cache entry: both run on macos-latest with stable Rust, so without the target
+      # suffix their keys would collide and the slower x86_64 cross-compile could
+      # overwrite the aarch64 cache (or vice-versa).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          prefix-key: bundle-${{ matrix.target }}
+
+      # --target routes output to target/<target>/release/... (not target/release/)
+      # because tauri build uses a target-specific subdirectory when --target is given.
+      # --bundles dmg limits the output to the DMG format only.
+      # No apt/Linux deps or ilammy/msvc-dev-cmd needed on macOS.
+      - name: Build DMG
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles dmg
+
+      # Artifact name is per-arch (macos-dmg-aarch64-apple-darwin /
+      # macos-dmg-x86_64-apple-darwin) to avoid the upload-artifact@v4 name-collision
+      # error that would fire if both matrix legs uploaded under the same artifact name.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-${{ matrix.target }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          retention-days: 14
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Distinct prefix-key from test.yml and from the macos legs (which append the
+      # cross-compile target).  Windows has no matrix, so plain 'bundle' is unique.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          prefix-key: bundle
+
+      # Sources the VS2022 MSVC dev environment so that rc.exe is on PATH.
+      # rc.exe is required by tauri-winres to embed the Windows resource manifest
+      # (version string, icon) into the binary during the Rust link step.
+      # windows-latest ships VS2022 + Windows SDK; this action just activates the
+      # developer command-prompt environment so rc.exe is discoverable.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      # No apt deps — all system-level prerequisites are provided by windows-latest.
+      # `--bundles msi nsis` emits both installer formats in one tauri build invocation.
+      # The two formats MUST be separate argv tokens (clap `--bundles` is variadic):
+      # a quoted "msi nsis" is parsed as a single invalid value. (bash array expansion
+      # in build.sh splits them; a literal quoted string under pwsh does not.)
+      #   MSI  → src-tauri/target/release/bundle/msi/ApexLauncher_0.1.0_x64_en-US.msi
+      #   NSIS → src-tauri/target/release/bundle/nsis/ApexLauncher_0.1.0_x64-setup.exe
+      # (phase7 IP-3 and IP-4; filenames match the version in tauri.conf.json)
+      - name: Build MSI + NSIS
+        run: npm run tauri build -- --bundles msi nsis
+
+      # Upload both installer formats under a single artifact name.
+      # Glob patterns are format-stable (tolerate future version bumps in the filename).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+          retention-days: 14
