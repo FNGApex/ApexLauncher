@@ -297,6 +297,22 @@ export const commands = {
 	/**  Enqueue a CurseForge `.zip` import task and return its id synchronously. */
 	importCurseforgeZip: (cfZipPath: string, nameOverride: string | null) => typedError<number, string>(__TAURI_INVOKE("import_curseforge_zip", { cfZipPath, nameOverride })),
 	/**
+	 *  Import a Prism/MultiMC/PolyMC instance directory as a new ApexLauncher instance.
+	 * 
+	 *  Returns a **task id** (`Promise<number>` on the frontend). The terminal
+	 *  [`ExternalImportResult`] arrives asynchronously via the `task://update` event
+	 *  when `status.kind === "done"` and `task.result` is set.
+	 * 
+	 *  - `instance_dir` — absolute path to the source instance directory
+	 *    (contains `instance.cfg` + `mmc-pack.json` + `.minecraft/` or `minecraft/`).
+	 *  - `name_override` — optional display-name override; falls back to `cfg.name`
+	 *    then `"Imported"`.
+	 *  - `identify_mods` — reserved for CP-6 (opt-in Modrinth SHA-1 mod identification);
+	 *    currently accepted but unused.
+	 *  - `skip_logs` — when `true`, omit `logs/` and `crash-reports/` from the copy.
+	 */
+	importExternalInstance: (instanceDir: string, nameOverride: string | null, identifyMods: boolean, skipLogs: boolean) => typedError<number, string>(__TAURI_INVOKE("import_external_instance", { instanceDir, nameOverride, identifyMods, skipLogs })),
+	/**
 	 *  Install a modpack from a Browse `ProjectSummary` in one click.
 	 * 
 	 *  Returns the enqueued task id. The terminal `task://update` event carries the
@@ -553,6 +569,29 @@ export type ExpectedHash =
 { type: "sha512"; value: string } | 
 /**  MD5 hex digest (used by ATLauncher mod jars). */
 { type: "md5"; value: string };
+
+/**
+ *  Result returned to the frontend after a successful external-launcher instance import
+ *  (`import_external_instance`).
+ */
+export type ExternalImportResult = {
+	/**  Slug of the newly-created instance. */
+	slug: string,
+	/**  Display name of the instance (from `name_override` or the source `instance.cfg`). */
+	name: string,
+	/**  Loader kind string (`"vanilla"`, `"fabric"`, `"quilt"`, `"forge"`, `"neoforge"`). */
+	loader: string,
+	/**  Number of game files copied into the instance. */
+	filesCopied: number,
+	/**  Number of mods identified via Modrinth SHA-1 lookup (always 0 until CP-6). */
+	modsIdentified: number,
+	/**
+	 *  Non-fatal warnings surfaced during import (e.g. an unsupported loader
+	 *  demoted to vanilla). Empty on a clean import. The frontend surfaces these
+	 *  so a silent loader demotion is never hidden from the user.
+	 */
+	warnings: string[],
+};
 
 /**  A single file download that failed during `add_mod`. */
 export type FailedMod = {
@@ -1262,6 +1301,8 @@ export type TaskResult =
 MrpackImportResult | 
 /**  Result of `import_curseforge_zip` / `install_modpack` (CF branch). */
 CfImportResult | 
+/**  Result of `import_external_instance` (Prism/MultiMC/PolyMC import). */
+ExternalImportResult | 
 /**  Result of `install_modpack` (typed tagged union with `kind` field). */
 ModpackInstallResult | 
 /**  Result of `update_modpack`. */

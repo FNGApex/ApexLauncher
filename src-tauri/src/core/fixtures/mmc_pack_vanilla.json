@@ -1,0 +1,16 @@
+{
+  "formatVersion": 1,
+  "components": [
+    {
+      "uid": "net.minecraft",
+      "version": "1.21.4",
+      "cachedName": "Minecraft",
+      "important": true
+    },
+    {
+      "uid": "org.lwjgl3",
+      "version": "3.3.3",
+      "cachedName": "LWJGL 3"
+    }
+  ]
+}

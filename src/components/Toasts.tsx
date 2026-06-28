@@ -38,6 +38,13 @@ function arrLen(result: TaskResult, key: string): number {
   return Array.isArray(v) ? v.length : 0;
 }
 
+/** Extract non-fatal warning strings from an ExternalImportResult-style result. */
+function resultWarnings(result: TaskResult): string[] {
+  const v = (result as Record<string, unknown>)["warnings"];
+  if (!Array.isArray(v)) return [];
+  return v.filter((w): w is string => typeof w === "string");
+}
+
 /** Collect `pageUrl`s from a result's `manual` array (CF allowModDistribution:false). */
 function manualPageUrls(result: TaskResult): string[] {
   const v = (result as Record<string, unknown>)["manual"];
@@ -66,6 +73,19 @@ function summarizeDone(id: number, result: TaskResult): ToastEntry {
   const manual = arrLen(result, "manual");
 
   if (failed === 0 && manual === 0) {
+    const warnings = resultWarnings(result);
+    if (warnings.length > 0) {
+      const nameVal = (result as Record<string, unknown>)["name"];
+      const name = typeof nameVal === "string" ? nameVal : "Instance";
+      const suffix = warnings.length > 1 ? ` (+${warnings.length - 1} more)` : "";
+      return {
+        id,
+        kind: "partial",
+        label: `"${name}" imported — ${warnings[0]}${suffix}`,
+        slug,
+        manualUrls: [],
+      };
+    }
     return { id, kind: "success", label: labelFor(result), slug, manualUrls: [] };
   }
 

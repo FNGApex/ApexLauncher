@@ -352,6 +352,23 @@ export function importCurseforgeZip(cfZipPath: string, nameOverride?: string) {
   return unwrap(commands.importCurseforgeZip(cfZipPath, nameOverride ?? null));
 }
 
+// --- Launcher import (Prism/MultiMC/PolyMC) ---
+
+/**
+ * Import an external launcher instance (Prism/MultiMC/PolyMC). Enqueues a task
+ * and resolves to the task id; the terminal `ExternalImportResult` rides `task://update`.
+ */
+export function importExternalInstance(
+  instanceDir: string,
+  nameOverride: string | undefined,
+  identifyMods: boolean,
+  skipLogs: boolean,
+) {
+  return unwrap(
+    commands.importExternalInstance(instanceDir, nameOverride ?? null, identifyMods, skipLogs),
+  );
+}
+
 // --- Phase 6 slice C: Browse → one-click install ---
 
 /**
