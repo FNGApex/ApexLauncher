@@ -6,7 +6,8 @@ hard parts (launch + auth) before polishing UI.
 **Status legend:** `✅ Done` · `🚧 Active` · `⬜ Planned` — per item, `- [x]` shipped / `- [ ]` outstanding.
 
 **Overall:** Phases 0–6 ✅, download-runner-rework ✅, generated TS types ✅. Active work is
-**Phase 7 — Polish & ship**.
+**Phase 7 — Polish & ship** — icons/themes, launcher import, installers, and CI shipped;
+crash-log help, skin/cape preview, signing/auto-update remain.
 
 ## Phase 0 — Scaffold & shell — ✅ Done
 - [x] Tauri 2 + React 19 + TS + Vite 7 + Tailwind v4 project (shadcn primitives deferred).
@@ -113,13 +114,19 @@ Retires the standing `ipc.ts`/`store.ts` hand-mirror drift risk (CP-1→6, merge
   `AccountMeta`→`AccountMeta_Serialize`).
 
 ## Phase 7 — Polish & ship — 🚧 Active
-- [ ] Instance icons, themes (dark/light), skin/cape preview, import from other launchers.
-- [~] **Installers (Phase 7a).** Windows MSI + NSIS done + verified (IP-1→IP-4, unsigned) —
-  see `docs/spec/phase7-installers.md`. macOS DMG + Linux AppImage/tarball config landed but
-  build on their own hosts (`ip-f-mac` / `ip-f-linux`); IP-8 README docs pending.
-- [ ] Cross-platform CI builds (GitHub Actions: win/mac/linux), signing, auto-update. Switch
-  reqwest `native-tls` → `rustls-tls` before CI to drop the OpenSSL build dependency.
+- [x] Instance icons + themes (dark/light) — shipped (session 2026-06-26 batch).
+- [x] Import from other launchers — Prism/MultiMC/PolyMC instance import
+  (`core/launcher_import.rs`, "From launcher" modal tab; merged `ddf3fa4`). CP-8
+  (ATLauncher-launcher import) deferred.
+- [x] **Installers (Phase 7a).** Windows MSI + NSIS verified (IP-1→IP-4, unsigned) —
+  `docs/spec/phase7-installers.md`. macOS DMG ×2 + Linux AppImage/tarball build in CI.
+- [x] Cross-platform CI (GitHub Actions): `test.yml` (PR gate + 3-OS push-to-main) +
+  `bundle.yml` (installers on `v*` tags / dispatch) — `docs/spec/ci-pipeline.md`. reqwest
+  switched `native-tls` → `rustls-tls`.
+- [ ] Skin/cape preview.
 - [ ] Error reporting, crash log parsing/help.
+- [ ] Code signing + auto-update.
+- [ ] IP-8 README installer docs.
 
 ## Cross-cutting — ✅ Done (maintenance ongoing)
 - [x] Generated TS types from Rust (tauri-specta) so IPC stays in sync — see the dedicated
@@ -132,8 +139,7 @@ Retires the standing `ipc.ts`/`store.ts` hand-mirror drift risk (CP-1→6, merge
 ---
 
 ### Suggested next action
-Phases 0–6 are complete; the download-runner-rework hardening and the generated-TS-types
-foundation are both merged. The remaining work is the **Phase 7 — Polish & ship** slices —
-start with the user-facing polish (instance icons, dark/light themes, crash-log parsing), then
-the ship infrastructure (cross-platform GitHub Actions CI, the `native-tls`→`rustls-tls` switch,
-signing, auto-update).
+Phase 7 is mostly shipped: icons/themes, launcher import, installers, and cross-platform CI
+are all on `main`. Remaining slices, roughly in value order: **crash-log parsing/help** (last
+substantial user-facing feature), skin/cape preview (small), then release infrastructure
+(code signing, auto-update, IP-8 README installer docs) when a public release is near.
