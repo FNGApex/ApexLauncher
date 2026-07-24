@@ -1,0 +1,15 @@
+---- Minecraft Crash Report ----
+// You should try our sister game, Minceraft!
+
+Time: 7/23/26, 6:03 PM
+Description: Initializing game
+
+java.lang.OutOfMemoryError: Java heap space
+	at java.base/java.util.Arrays.copyOf(Arrays.java:3745)
+	at net.minecraft.class_1234.method_9999(class_1234.java:10)
+
+-- System Details --
+Details:
+	Minecraft Version: 1.20.1
+	Minecraft Version ID: 1.20.1
+	Memory: 4000000000 bytes / 4294967296 bytes (4096 MiB) up to 4294967296 bytes (4096 MiB)

@@ -1,0 +1,33 @@
+---- Minecraft Crash Report ----
+// I bet Cylons wouldn't have this problem.
+
+Time: 7/23/26, 4:02 PM
+Description: Ticking entity
+
+net.minecraft.ReportedException: Ticking entity
+	at TRANSFORMER/examplemod@1.0.0/com.example.examplemod.EntityMixin.tick(EntityMixin.java:88) ~[examplemod-1.0.0.jar%23392!/:?] {mixin from mod examplemod: examplemod.mixins.json}
+	at TRANSFORMER/neoforge@21.1.209/net.neoforged.neoforge.common.NeoForgeMod.tick(NeoForgeMod.java:145) ~[neoforge-21.1.209-universal.jar:?] {}
+	at net.minecraft.world.level.Level.tickEntity(Level.java:900) ~[client-1.21.jar%233!/:?] {}
+	at net.minecraft.server.MinecraftServer.tickChildren(MinecraftServer.java:1234) ~[server-1.21.jar:?] {}
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: Server thread
+Stacktrace:
+	at TRANSFORMER/examplemod@1.0.0/com.example.examplemod.EntityMixin.tick(EntityMixin.java:88) ~[examplemod-1.0.0.jar%23392!/:?] {mixin from mod examplemod: examplemod.mixins.json}
+	at net.minecraft.world.level.Level.tickEntity(Level.java:900) ~[client-1.21.jar%233!/:?] {}
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21
+	Minecraft Version ID: 1.21
+	Operating System: Windows 11 (amd64) version 10.0
+	Java Version: 21.0.3, Eclipse Adoptium
+	Mod List:
+		minecraft-1.21.jar                  | Minecraft                     | minecraft            | 1.21
+		neoforge-21.1.209-universal.jar     | NeoForge                      | neoforge             | 21.1.209
+		examplemod-1.0.0.jar                | Example Mod                   | examplemod           | 1.0.0
+
+#@!@# Game crashed! Crash report saved to: #@!@# ./crash-reports/crash-2026-07-23_16.02.00-server.txt

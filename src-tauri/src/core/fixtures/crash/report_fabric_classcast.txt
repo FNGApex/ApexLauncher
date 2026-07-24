@@ -1,0 +1,43 @@
+---- Minecraft Crash Report ----
+// Don't be sad, have a hug! <3
+
+Time: 7/23/26, 3:14 PM
+Description: Rendering overlay
+
+java.lang.ClassCastException: class net.minecraft.class_1122 cannot be cast to class net.minecraft.class_3311
+	at net.minecraft.class_310.method_1587(class_310.java:1234)
+	at net.minecraft.class_310.method_1523(class_310.java:987)
+	at net.minecraft.class_310.run(class_310.java:645)
+	at net.minecraft.client.main.Main.main(Main.java:256)
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: Render thread
+Stacktrace:
+	at net.minecraft.class_310.method_1587(class_310.java:1234)
+	at net.minecraft.class_310.method_1523(class_310.java:987)
+	at net.minecraft.class_310.run(class_310.java:645)
+	at net.minecraft.client.main.Main.main(Main.java:256)
+
+-- Affected level --
+Details:
+	Level dimension: minecraft:overworld
+
+-- System Details --
+Details:
+	Minecraft Version: 1.20.1
+	Minecraft Version ID: 1.20.1
+	Operating System: Windows 10 (amd64) version 10.0
+	Java Version: 17.0.9, Eclipse Adoptium
+	Java VM Version: OpenJDK 64-Bit Server VM (mixed mode), Eclipse Adoptium
+	Memory: 512864032 bytes (489 MiB) / 2147483648 bytes (2048 MiB) up to 4294967296 bytes (4096 MiB)
+	CPUs: 8
+	Fabric Mods:
+		fabricloader: Fabric Loader 0.15.7
+		fabric-api: Fabric API 0.92.0+1.20.1
+		examplemod: Example Mod 1.0.0
+		minecraft: Minecraft 1.20.1
+
+#@!@# Game crashed! Crash report saved to: #@!@# ./crash-reports/crash-2026-07-23_15.14.00-client.txt

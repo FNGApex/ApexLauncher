@@ -1,0 +1,31 @@
+---- Minecraft Crash Report ----
+// Shall we play a game?
+
+Time: 7/23/26, 5:45 PM
+Description: Unexpected error
+
+java.lang.NullPointerException: Cannot invoke "net.minecraft.class_746.method_7346()" because "this.field_1724" is null
+	at net.minecraft.class_746.method_3143(class_746.java:512)
+	at net.minecraft.class_310.method_1523(class_310.java:987)
+	at net.minecraft.class_310.run(class_310.java:645)
+	at net.minecraft.client.main.Main.main(Main.java:256)
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: Render thread
+Stacktrace:
+	at net.minecraft.class_746.method_3143(class_746.java:512)
+	at net.minecraft.class_310.method_1523(class_310.java:987)
+
+-- System Details --
+Details:
+	Minecraft Version: 1.20.4
+	Minecraft Version ID: 1.20.4
+	Operating System: Linux (amd64) version 6.5.0
+	Java Version: 21.0.1, Eclipse Adoptium
+	Memory: 400000000 bytes (381 MiB) / 2147483648 bytes (2048 MiB) up to 4294967296 bytes (4096 MiB)
+	CPUs: 4
+
+#@!@# Game crashed! Crash report saved to: #@!@# ./crash-reports/crash-2026-07-23_17.45.00-client.txt

@@ -21,9 +21,11 @@
 //! - `modpack`     — Modrinth `.mrpack` parse + plan + overrides extraction (Phase 6 slice A).
 //! - `atl`       — ATLauncher `ModProvider` implementation (Phase 7 / ATL CP-1).
 //! - `launcher_import` — Prism/MultiMC/PolyMC instance importer — pure parse/plan layer (Phase 7).
+//! - `crash`     — crash-report parser + rule-based analysis (crash-log-help CP-1+).
 
 pub mod atl;
 pub mod auth;
+pub mod crash;
 pub mod curseforge;
 pub mod download;
 pub mod forge_installer;
