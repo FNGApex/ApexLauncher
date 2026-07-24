@@ -9,7 +9,7 @@ Serial FIFO `TaskManager` (Approach C): one worker tokio task drains an unbounde
 ## CLI code
 
 - `src-tauri/src/core/task_manager.rs` — `TaskKind`, `TaskStatus`, `ChildItem`, `Task`, `TaskProgress`, `TaskObserver` trait, `NoOpObserver`, `TaskContext` (per-task handle: `enter_planning`, `enter_downloading`, `start_child`, `finish_child`, `enter_applying`, `finish_done`, `finish_done_with_result`, `finish_failed`, `finish_cancelled`, `cancel_token`, `is_cancelled`; no lock held across `.await`), `TaskJob` async trait, `TaskSpec`, `TaskManager` (cloneable: `enqueue` → `u64`, `list`, `cancel`); `worker_loop` (FIFO drain; safety-net `finish_done` if job returns without terminal status); ends with `#[cfg(test)] #[path = "task_manager_tests.rs"] mod tests;`
-- `src-tauri/src/core/task_manager_tests.rs` — 17 unit tests (all `#[tokio::test]`): FIFO ordering, cancel-queued, cancel-running, snapshot counts, `finish_done_with_result` payload, observer full-lifecycle
+- `src-tauri/src/core/task_manager_tests.rs` — 16 unit tests (all `#[tokio::test]`): FIFO ordering, cancel-queued, cancel-running, snapshot counts, `finish_done_with_result` payload, observer full-lifecycle
 - `src-tauri/src/lib.rs` — `TauriTaskObserver` (emits `task://progress` via `TaskProgressPayload` and `task://update` via `TaskUpdatePayload`); `list_tasks` + `cancel_task` Tauri commands; `TaskManager` registered via `.manage(...)`; `ImportMrpackJob`, `ImportCfZipJob`, `ImportFtbJob`, `ImportAtlJob`, `ImportExternalJob`, `UpdateModpackJob`, `ModAddJob`, `ModUpdateJob` — all `TaskJob` implementors; `staging_dir_for(inst_dir, task_id)` → `<inst_dir>/.staging-<task_id>/`
 
 ## Artifacts
