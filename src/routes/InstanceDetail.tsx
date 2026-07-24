@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-query";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowLeft,
   Check,
   ChevronDown,
@@ -15,6 +16,7 @@ import {
   Download,
   ExternalLink,
   FileBox,
+  FolderOpen,
   ImagePlus,
   Key,
   Loader2,
@@ -22,14 +24,16 @@ import {
   Play,
   RefreshCw,
   Search,
+  Settings as SettingsIcon,
   Square,
   Trash2,
   X,
 } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   addMod,
   enrichInstanceMods,
+  getCrashAnalysis,
   getInstance,
   getModVersions,
   getSettings,
@@ -44,6 +48,7 @@ import {
   setPendingLaunchWarningSuppressed,
   updateMod,
   updateModpack,
+  type CrashAnalysisPayload,
   type FolderMod,
   type Instance,
   type ModEntry,
@@ -71,6 +76,11 @@ const enrichedSlugs = new Set<string>();
 // The backend throttles to once/24h; this guard prevents redundant calls within a
 // single session before a refetch has settled.
 const refreshedSlugs = new Set<string>();
+
+// CP-6: tracks instances for which the crash-analysis mount backfill has run
+// this session, so a terminal run with no store entry (e.g. after a page
+// reload, before the AppShell listener re-attaches) is fetched at most once.
+const crashBackfilledSlugs = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Outlet context type — consumed by the four tab components
@@ -104,6 +114,10 @@ export function InstanceDetail() {
   // and replayed logs including any exit that fired while the user was on another page.
   const runState = useAppStore((s) => (slug ? s.runs.get(slug) : undefined));
   const runLogLines = useAppStore((s) => (slug ? s.runLogs.get(slug) : undefined));
+
+  // CP-6: retained crash analysis for this instance's current run, if any.
+  const crash = useAppStore((s) => (slug ? s.crashes.get(slug) : undefined));
+  const setCrash = useAppStore((s) => s.setCrash);
 
   // An instance is active while status is "preparing" or "running".
   const running = runState?.status === "preparing" || runState?.status === "running";
@@ -201,6 +215,27 @@ export function InstanceDetail() {
         refreshedSlugs.delete(slug);
       });
   }, [slug, data?.instance.source, qc]);
+
+  // CP-6: one-shot backfill. AppShell's `crash://analyzed` listener normally
+  // seeds the store as soon as the post-exit hook fires, but a page load /
+  // navigation that lands here after the event already fired (or before the
+  // listener attached) would otherwise show nothing — so pull it once when
+  // the store has no entry and the run is terminal (not preparing/running).
+  useEffect(() => {
+    if (!slug || crash) return;
+    if (crashBackfilledSlugs.has(slug)) return;
+    const status = runState?.status;
+    const terminal = status === "exited" || status === "killed" || status === "failed";
+    if (!terminal) return;
+    crashBackfilledSlugs.add(slug);
+    getCrashAnalysis(slug)
+      .then((analysis) => {
+        if (analysis) setCrash(slug, analysis);
+      })
+      .catch((err) => {
+        console.warn("getCrashAnalysis failed:", err);
+      });
+  }, [slug, crash, runState?.status, setCrash]);
 
   // Launch entrypoint: gate on pending manual downloads (CP-4) before doing the
   // real launch. When the pack has unresolved manual files and the user hasn't
@@ -545,6 +580,12 @@ export function InstanceDetail() {
           </div>
 
           {/* ----------------------------------------------------------------
+              CP-6: crash analysis panel — shown above the console when the
+              store holds a retained analysis for this instance's run.
+          ---------------------------------------------------------------- */}
+          {crash && <CrashPanel crash={crash} />}
+
+          {/* ----------------------------------------------------------------
               Console — persistent chrome, shown when the instance is running
               or has accumulated log lines. T5: collapsible, seeded from
               showConsoleDefault setting.
@@ -816,6 +857,106 @@ function PendingLaunchModal({ pending, onClose, onLaunchAnyway }: PendingLaunchM
         </div>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CP-6: crash analysis panel
+// Rendered above the console when the store holds a retained analysis for
+// the instance's current run. Amber-themed (matches the toast + the
+// pendingManual "Missing mods" styling elsewhere on this page).
+// ---------------------------------------------------------------------------
+
+interface CrashPanelProps {
+  crash: CrashAnalysisPayload;
+}
+
+function CrashPanel({ crash }: CrashPanelProps) {
+  const [detailExpanded, setDetailExpanded] = useState(false);
+  const hasDetail = crash.exception != null || crash.detail.length > 0;
+  const showJavaSettingsLink = crash.kind === "out_of_memory" || crash.kind === "unsupported_java";
+
+  return (
+    <section className="mb-8 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-5">
+      <div className="mb-1.5 flex items-center gap-2">
+        <AlertTriangle className="size-5 shrink-0 text-amber-300" />
+        <h2 className="text-base font-semibold text-amber-200">{crash.headline}</h2>
+      </div>
+      <p className="mb-3 text-sm text-amber-100/80">{crash.suggestion}</p>
+
+      {/* Suspect chips */}
+      {crash.suspects.length > 0 && (
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {crash.suspects.map((s, i) => (
+            <span
+              key={`${s.modId ?? s.jar ?? s.display}-${i}`}
+              className="inline-flex items-center rounded-full border border-border bg-surface-2 px-2.5 py-0.5 text-xs font-medium text-foreground"
+            >
+              {s.display}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Collapsible detail */}
+      {hasDetail && (
+        <div className="mb-3">
+          <button
+            type="button"
+            onClick={() => setDetailExpanded((prev) => !prev)}
+            className="flex items-center gap-1.5 text-xs font-medium text-amber-200/80 hover:text-amber-100"
+          >
+            Details
+            {detailExpanded ? (
+              <ChevronUp className="size-3.5" />
+            ) : (
+              <ChevronDown className="size-3.5" />
+            )}
+          </button>
+          {detailExpanded && (
+            <div className="mt-2 rounded-lg border border-amber-500/20 bg-surface/40 p-3 font-mono text-xs text-foreground">
+              {crash.exception && <p className="mb-1.5">{crash.exception}</p>}
+              {crash.detail.map((line, i) => (
+                <p key={i} className="whitespace-pre-wrap text-muted">
+                  {line}
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Actions */}
+      <div className="flex flex-wrap items-center gap-2">
+        {crash.reportPath && (
+          <button
+            onClick={() => revealItemInDir(crash.reportPath!).catch(console.error)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/25"
+          >
+            <FolderOpen className="size-3.5" />
+            Open crash report
+          </button>
+        )}
+        {crash.jvmErrorPath && (
+          <button
+            onClick={() => revealItemInDir(crash.jvmErrorPath!).catch(console.error)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/25"
+          >
+            <FolderOpen className="size-3.5" />
+            Open hs_err log
+          </button>
+        )}
+        {showJavaSettingsLink && (
+          <Link
+            to="tech"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-2 px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-surface"
+          >
+            <SettingsIcon className="size-3.5" />
+            Java settings
+          </Link>
+        )}
+      </div>
+    </section>
   );
 }
 

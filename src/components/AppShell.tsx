@@ -25,6 +25,8 @@ export function AppShell() {
   const upsertRun = useAppStore((s) => s.upsertRun);
   const appendLog = useAppStore((s) => s.appendLog);
   const setLogs = useAppStore((s) => s.setLogs);
+  const setCrash = useAppStore((s) => s.setCrash);
+  const clearCrash = useAppStore((s) => s.clearCrash);
 
   // First-run sidebar seed: if the user has never manually toggled the sidebar
   // (i.e. the "apex-ui" key doesn't exist in localStorage yet), apply the
@@ -77,6 +79,20 @@ export function AppShell() {
         status: event.payload.status,
         exitCode: event.payload.exitCode,
       });
+      // A fresh launch always installs a new backend RunState with
+      // `crash: None` — drop any retained analysis from a previous run.
+      const { status } = event.payload;
+      if (status === "preparing" || status === "running") {
+        clearCrash(event.payload.slug);
+      }
+    }).then((fn) => {
+      if (cancelled) fn();
+      else reg(fn);
+    }).catch(console.error);
+
+    // CP-6: crash analysis surfaced by the post-exit detection hook.
+    events.crashAnalyzed.listen((event) => {
+      setCrash(event.payload.slug, event.payload.analysis);
     }).then((fn) => {
       if (cancelled) fn();
       else reg(fn);

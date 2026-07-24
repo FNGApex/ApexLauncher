@@ -81,12 +81,19 @@ export type {
   RunInfoPayload,
   RunLogPayload,
   JavaProbe,
+  CrashAnalysisPayload,
+  CrashSuspectPayload,
   // Event payload type still referenced by name in a component (`Sidebar`);
   // channels themselves are subscribed via the generated `events.*`.
   DeviceCodePayload,
 } from "@/lib/bindings";
 
-import type { AccountMeta_Serialize, RunInfoPayload, RunLogPayload } from "@/lib/bindings";
+import type {
+  AccountMeta_Serialize,
+  RunInfoPayload,
+  RunLogPayload,
+  CrashAnalysisPayload,
+} from "@/lib/bindings";
 
 /**
  * Persisted account metadata exposed to the frontend. The generated `AccountMeta`
@@ -507,6 +514,16 @@ export function getRunState(slug: string): Promise<RunInfoPayload | null> {
 /** Replay buffered log lines for an instance. Returns `null` when untracked. */
 export function getRunLogs(slug: string): Promise<RunLogPayload[] | null> {
   return commands.getRunLogs(slug);
+}
+
+/**
+ * Read an instance's retained crash analysis (CP-4's post-exit detection hook),
+ * if any. `null` when the slug is untracked or no crash was recorded for the
+ * current run — a relaunch always clears it. Synchronous state read, same
+ * shape as `getRunState` / `getRunLogs` above (not a `Result`-wrapped command).
+ */
+export function getCrashAnalysis(slug: string): Promise<CrashAnalysisPayload | null> {
+  return commands.getCrashAnalysis(slug);
 }
 
 /** Read the current Download-Manager task snapshot (all tasks, any status). */

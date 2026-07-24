@@ -5,6 +5,7 @@ import type {
   TaskProgressPayload,
   RunUpdatePayload,
   RunLogPayload,
+  CrashAnalysisPayload,
 } from "@/lib/bindings";
 
 // ---------------------------------------------------------------------------
@@ -30,6 +31,9 @@ export type RunState = RunUpdatePayload & { elapsedMs?: number | null };
 /** Buffered log line in the runs slice (mirrors the `get_run_logs` / `launch://log` shape). */
 export type RunLogLine = RunLogPayload;
 
+/** Re-exported so store consumers don't reach into `bindings.ts` directly. */
+export type { CrashAnalysisPayload };
+
 // ---------------------------------------------------------------------------
 // Store slices
 // ---------------------------------------------------------------------------
@@ -51,7 +55,16 @@ interface RunsSlice {
   setLogs: (slug: string, lines: RunLogLine[]) => void;
 }
 
-export type AppStore = TasksSlice & RunsSlice;
+interface CrashesSlice {
+  /** Retained crash analysis for the current run of each instance, keyed by
+   *  slug. Cleared when a new launch starts (`preparing`/`running`); a
+   *  relaunch always installs a fresh backend `RunState` with `crash: None`. */
+  crashes: Map<string, CrashAnalysisPayload>;
+  setCrash: (slug: string, analysis: CrashAnalysisPayload) => void;
+  clearCrash: (slug: string) => void;
+}
+
+export type AppStore = TasksSlice & RunsSlice & CrashesSlice;
 
 export const useAppStore = create<AppStore>()((set) => ({
   // --- tasks slice ---
@@ -102,6 +115,24 @@ export const useAppStore = create<AppStore>()((set) => ({
       const next = new Map(state.runLogs);
       next.set(slug, lines);
       return { runLogs: next };
+    }),
+
+  // --- crashes slice ---
+  crashes: new Map(),
+
+  setCrash: (slug, analysis) =>
+    set((state) => {
+      const next = new Map(state.crashes);
+      next.set(slug, analysis);
+      return { crashes: next };
+    }),
+
+  clearCrash: (slug) =>
+    set((state) => {
+      if (!state.crashes.has(slug)) return {};
+      const next = new Map(state.crashes);
+      next.delete(slug);
+      return { crashes: next };
     }),
 }));
 

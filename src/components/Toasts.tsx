@@ -54,10 +54,10 @@ function manualPageUrls(result: TaskResult): string[] {
     .filter((u): u is string => typeof u === "string");
 }
 
-type ToastKind = "success" | "partial" | "failed";
+type ToastKind = "success" | "partial" | "failed" | "crash";
 
 interface ToastEntry {
-  id: number;
+  id: number | string;
   kind: ToastKind;
   label: string;
   slug: string | null;
@@ -110,8 +110,13 @@ function summarizeDone(id: number, result: TaskResult): ToastEntry {
 
 export function Toasts() {
   const tasks = useAppStore((s) => s.tasks);
+  const crashes = useAppStore((s) => s.crashes);
   // Track which task ids have already produced a toast so we show each once.
   const shownRef = useRef<Set<number>>(new Set());
+  // Track which slugs have already produced a crash toast for their *current*
+  // entry. Pruned whenever the slug leaves the map (relaunch clears it), so a
+  // later crash on the same instance toasts again.
+  const shownCrashRef = useRef<Set<string>>(new Set());
   const [toasts, setToasts] = useState<ToastEntry[]>([]);
   const navigate = useNavigate();
 
@@ -142,7 +147,34 @@ export function Toasts() {
     }
   }, [tasks]);
 
-  function dismiss(id: number) {
+  // CP-6: amber warning toast on a new crash entry.
+  useEffect(() => {
+    const newToasts: ToastEntry[] = [];
+
+    for (const [slug, analysis] of crashes) {
+      if (shownCrashRef.current.has(slug)) continue;
+      shownCrashRef.current.add(slug);
+      newToasts.push({
+        id: `crash-${slug}-${Date.now()}`,
+        kind: "crash",
+        label: `${analysis.headline} — ${slug}`,
+        slug,
+        manualUrls: [],
+      });
+    }
+
+    // Prune slugs no longer present so a fresh crash on the same instance
+    // (after a relaunch clears the old one) toasts again.
+    for (const slug of shownCrashRef.current) {
+      if (!crashes.has(slug)) shownCrashRef.current.delete(slug);
+    }
+
+    if (newToasts.length > 0) {
+      setToasts((prev) => [...prev, ...newToasts]);
+    }
+  }, [crashes]);
+
+  function dismiss(id: number | string) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }
 
@@ -157,7 +189,7 @@ export function Toasts() {
         >
           {toast.kind === "failed" ? (
             <AlertCircle className="size-4 shrink-0 text-danger" />
-          ) : toast.kind === "partial" ? (
+          ) : toast.kind === "partial" || toast.kind === "crash" ? (
             <AlertTriangle className="size-4 shrink-0 text-amber-400" />
           ) : (
             <CheckCircle className="size-4 shrink-0 text-green-400" />

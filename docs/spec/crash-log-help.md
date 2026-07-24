@@ -1,6 +1,6 @@
 # Spec: Crash-log parsing & help
 
-Design: `docs/design/crash-log-help.md`. Status: proposed. Build/test ONLY via
+Design: `docs/design/crash-log-help.md`. Status: implemented (CP-1..CP-6; dev smoke pending). Build/test ONLY via
 `scripts/build.sh`. Rust tests = sibling `<stem>_tests.rs`; pure parse/analyze fns
 unit-tested with fixtures under `src-tauri/src/core/fixtures/crash/`.
 
@@ -169,6 +169,13 @@ blocks exit bookkeeping (runs after playtime recording).
 
 ## Change log
 
+- 2026-07-24 — CP-6 implemented (crashes store slice, AppShell sub + clear-on-relaunch,
+  CrashPanel, amber toast with slug-keyed re-arming dedup). "Java settings" links to the
+  `tech` tab — JavaTab renders inside TechTab, no standalone route. Toast labels use slug
+  (Toasts has no instance-name access) — v1. Dev smoke pending (force OOM via -Xmx64m).
+- 2026-07-24 — CP-5 implemented (camelCase DTOs, `crash://analyzed` typed event,
+  `get_crash_analysis` sync command + registry-level testable helper; bindings.ts
+  regenerated via dev-window export).
 - 2026-07-23 — CP-4 implemented (detection wiring, 8 fake-child tests). Hook runs after
   ALL exit bookkeeping incl. the `exited` emit (retry can't delay it). Manifest read is a
   direct `instance.json` parse via public `Instance`/`ModEntry` DTOs — `load_manifest`

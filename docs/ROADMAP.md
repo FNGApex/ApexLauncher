@@ -124,7 +124,9 @@ Retires the standing `ipc.ts`/`store.ts` hand-mirror drift risk (CP-1→6, merge
   `bundle.yml` (installers on `v*` tags / dispatch) — `docs/spec/ci-pipeline.md`. reqwest
   switched `native-tls` → `rustls-tls`.
 - [ ] Skin/cape preview.
-- [ ] Error reporting, crash log parsing/help.
+- [x] Crash log parsing/help — local-only post-exit analysis (`core/crash.rs` parse →
+  11-rule table → suspect attribution), CrashPanel + amber toast; zero network, zero
+  watchers. `docs/spec/crash-log-help.md`. Dev smoke pending.
 - [ ] Code signing + auto-update.
 - [ ] IP-8 README installer docs.
 
