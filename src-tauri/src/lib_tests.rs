@@ -1152,3 +1152,67 @@ fn atl_recommended_from_memory_none_when_zero_or_absent() {
         "absent memory must produce None recommended"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CP-5 (crash-log-help): IPC surface — payload DTOs + get_crash_analysis
+// ---------------------------------------------------------------------------
+
+fn crash_analysis_fixture() -> crash::CrashAnalysis {
+    crash::CrashAnalysis {
+        kind: "mod_crash".to_string(),
+        headline: "Crash implicates ExampleMod".to_string(),
+        suggestion: "Try updating or disabling it.".to_string(),
+        exception: Some("java.lang.NullPointerException: boom".to_string()),
+        suspects: vec![crash::CrashSuspect {
+            display: "ExampleMod".to_string(),
+            mod_id: Some("examplemod".to_string()),
+            jar: Some("examplemod-1.0.jar".to_string()),
+        }],
+        detail: vec!["at examplemod.Foo.bar(Foo.java:42)".to_string()],
+        report_path: Some("C:/insts/foo/mc/crash-reports/crash-1.txt".to_string()),
+        jvm_error_path: Some("C:/insts/foo/mc/hs_err_pid123.log".to_string()),
+    }
+}
+
+/// `CrashAnalysisPayload::from(&CrashAnalysis)` must carry every field through
+/// and serialize with camelCase field names (`reportPath`, `jvmErrorPath`,
+/// `modId`) — the wire shape `crash://analyzed` and `get_crash_analysis` both
+/// return.
+#[test]
+fn crash_analysis_payload_from_carries_fields_camel_case() {
+    let analysis = crash_analysis_fixture();
+    let payload = CrashAnalysisPayload::from(&analysis);
+    let v: Value = serde_json::to_value(&payload).expect("serialize");
+
+    assert_eq!(v["kind"], "mod_crash");
+    assert_eq!(v["headline"], "Crash implicates ExampleMod");
+    assert_eq!(v["suggestion"], "Try updating or disabling it.");
+    assert_eq!(v["exception"], "java.lang.NullPointerException: boom");
+    assert_eq!(
+        v["reportPath"], "C:/insts/foo/mc/crash-reports/crash-1.txt",
+        "report_path must be camelCase reportPath in the wire shape; full value: {v}"
+    );
+    assert_eq!(
+        v["jvmErrorPath"], "C:/insts/foo/mc/hs_err_pid123.log",
+        "jvm_error_path must be camelCase jvmErrorPath in the wire shape; full value: {v}"
+    );
+    assert_eq!(v["detail"][0], "at examplemod.Foo.bar(Foo.java:42)");
+
+    let suspect = &v["suspects"][0];
+    assert_eq!(suspect["display"], "ExampleMod");
+    assert_eq!(
+        suspect["modId"], "examplemod",
+        "mod_id must be camelCase modId in the wire shape; full value: {v}"
+    );
+    assert_eq!(suspect["jar"], "examplemod-1.0.jar");
+}
+
+/// `get_crash_analysis` (via the testable registry-read helper, since the
+/// `#[tauri::command]` fn itself needs `tauri::State`) returns `None` for a slug
+/// the running registry has never seen — no panic, no Tauri runtime needed.
+#[test]
+fn get_crash_analysis_unknown_slug_is_none() {
+    let registry = launch::new_running_registry();
+    let result = get_crash_analysis_from_registry(&registry, "no-such-instance");
+    assert!(result.is_none(), "unknown slug must yield None, got is_some={}", result.is_some());
+}

@@ -89,6 +89,23 @@ export const commands = {
 	 */
 	getRunLogs: (slug: string) => __TAURI_INVOKE<RunLogPayload[] | null>("get_run_logs", { slug }),
 	/**
+	 *  Read a single instance's retained crash analysis (CP-4's post-exit detection
+	 *  hook), if any. `None` if the slug is not tracked or no crash was recorded for
+	 *  its current run — a relaunch always installs a fresh `RunState` and clears it.
+	 *  Not task-queued: a plain synchronous state read, same access pattern as
+	 *  `get_run_state` / `get_run_logs` above.
+	 */
+	getCrashAnalysis: (slug: string) => __TAURI_INVOKE<{
+	kind: string,
+	headline: string,
+	suggestion: string,
+	exception: string | null,
+	suspects: CrashSuspectPayload[],
+	detail: string[],
+	reportPath: string | null,
+	jvmErrorPath: string | null,
+} | null>("get_crash_analysis", { slug }),
+	/**
 	 *  Read the current Download-Manager task snapshot. Survives navigation —
 	 *  any page can hydrate from this regardless of when it mounted.
 	 */
@@ -307,8 +324,9 @@ export const commands = {
 	 *    (contains `instance.cfg` + `mmc-pack.json` + `.minecraft/` or `minecraft/`).
 	 *  - `name_override` — optional display-name override; falls back to `cfg.name`
 	 *    then `"Imported"`.
-	 *  - `identify_mods` — reserved for CP-6 (opt-in Modrinth SHA-1 mod identification);
-	 *    currently accepted but unused.
+	 *  - `identify_mods` — when `true`, SHA-1 hashes every jar in `mc/mods/` after copy+promote
+	 *    and does a single batched keyless Modrinth `POST /v2/version_files` lookup to write
+	 *    `ModEntry`s for matched jars so update-checking is available. Default `false`.
 	 *  - `skip_logs` — when `true`, omit `logs/` and `crash-reports/` from the copy.
 	 */
 	importExternalInstance: (instanceDir: string, nameOverride: string | null, identifyMods: boolean, skipLogs: boolean) => typedError<number, string>(__TAURI_INVOKE("import_external_instance", { instanceDir, nameOverride, identifyMods, skipLogs })),
@@ -349,6 +367,7 @@ export const commands = {
 /** Events */
 export const events = {
 	authDeviceCode: makeEvent<DeviceCodePayload>("auth://device-code"),
+	crashAnalyzed: makeEvent<CrashAnalyzedPayload>("crash://analyzed"),
 	downloadProgress: makeEvent<ProgressPayload>("download://progress"),
 	installLog: makeEvent<InstallLogPayload>("install://log"),
 	launchExit: makeEvent<LaunchExitPayload>("launch://exit"),
@@ -511,6 +530,48 @@ export type CfManualFile = {
  */
 export type ChildItem = {
 	label: string,
+};
+
+/**
+ *  A CP-4 crash analysis result, carried on `crash://analyzed` and returned by
+ *  `get_crash_analysis`.
+ * 
+ *  Mirrors [`crash::CrashAnalysis`] with serde rename so the TypeScript side
+ *  receives camelCase (`reportPath`, `jvmErrorPath`).
+ */
+export type CrashAnalysisPayload = {
+	kind: string,
+	headline: string,
+	suggestion: string,
+	exception: string | null,
+	suspects: CrashSuspectPayload[],
+	detail: string[],
+	reportPath: string | null,
+	jvmErrorPath: string | null,
+};
+
+/**
+ *  Payload emitted on the `crash://analyzed` Tauri event channel.
+ * 
+ *  Fired once per run by [`TauriLaunchSink::crashed`] — CP-4's post-exit
+ *  detection hook in `monitor_child` calls `sink.crashed(...)` after storing the
+ *  same analysis on the retained `RunState.crash` (see `get_crash_analysis`).
+ */
+export type CrashAnalyzedPayload = {
+	slug: string,
+	analysis: CrashAnalysisPayload,
+};
+
+/**
+ *  One suspected mod carried on [`CrashAnalysisPayload::suspects`].
+ * 
+ *  Mirrors [`crash::CrashSuspect`] with serde rename so the TypeScript side
+ *  receives camelCase (`modId`).
+ */
+export type CrashSuspectPayload = {
+	display: string,
+	modId: string | null,
+	jar: string | null,
 };
 
 export type CreateInstanceReq = {

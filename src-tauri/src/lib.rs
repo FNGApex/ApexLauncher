@@ -16,6 +16,7 @@ use core::launch::{self, LaunchSink, RunningRegistry};
 use core::loader_profile;
 use core::loaders::{self, LoaderOption};
 use core::resolver::{self, ResolveResult};
+use core::crash;
 use core::curseforge::CurseForgeProvider;
 use core::mod_install::{AddModResult, UpdateModResult};
 use core::modpack;
@@ -521,6 +522,74 @@ struct RunUpdatePayload {
     exit_code: Option<i32>,
 }
 
+/// One suspected mod carried on [`CrashAnalysisPayload::suspects`].
+///
+/// Mirrors [`crash::CrashSuspect`] with serde rename so the TypeScript side
+/// receives camelCase (`modId`).
+#[derive(Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+struct CrashSuspectPayload {
+    display: String,
+    mod_id: Option<String>,
+    jar: Option<String>,
+}
+
+impl From<&crash::CrashSuspect> for CrashSuspectPayload {
+    fn from(s: &crash::CrashSuspect) -> Self {
+        Self {
+            display: s.display.clone(),
+            mod_id: s.mod_id.clone(),
+            jar: s.jar.clone(),
+        }
+    }
+}
+
+/// A CP-4 crash analysis result, carried on `crash://analyzed` and returned by
+/// `get_crash_analysis`.
+///
+/// Mirrors [`crash::CrashAnalysis`] with serde rename so the TypeScript side
+/// receives camelCase (`reportPath`, `jvmErrorPath`).
+#[derive(Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+struct CrashAnalysisPayload {
+    kind: String,
+    headline: String,
+    suggestion: String,
+    exception: Option<String>,
+    suspects: Vec<CrashSuspectPayload>,
+    detail: Vec<String>,
+    report_path: Option<String>,
+    jvm_error_path: Option<String>,
+}
+
+impl From<&crash::CrashAnalysis> for CrashAnalysisPayload {
+    fn from(a: &crash::CrashAnalysis) -> Self {
+        Self {
+            kind: a.kind.clone(),
+            headline: a.headline.clone(),
+            suggestion: a.suggestion.clone(),
+            exception: a.exception.clone(),
+            suspects: a.suspects.iter().map(CrashSuspectPayload::from).collect(),
+            detail: a.detail.clone(),
+            report_path: a.report_path.clone(),
+            jvm_error_path: a.jvm_error_path.clone(),
+        }
+    }
+}
+
+/// Payload emitted on the `crash://analyzed` Tauri event channel.
+///
+/// Fired once per run by [`TauriLaunchSink::crashed`] — CP-4's post-exit
+/// detection hook in `monitor_child` calls `sink.crashed(...)` after storing the
+/// same analysis on the retained `RunState.crash` (see `get_crash_analysis`).
+#[derive(Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+#[tauri_specta(event_name = "crash://analyzed")]
+struct CrashAnalyzedPayload {
+    slug: String,
+    analysis: CrashAnalysisPayload,
+}
+
 /// A [`LaunchSink`] that emits `launch://log`, `launch://exit`, and `run://update`
 /// events on the Tauri event channel.
 struct TauriLaunchSink {
@@ -555,6 +624,15 @@ impl LaunchSink for TauriLaunchSink {
             exit_code,
         };
         let _ = self.app.emit("run://update", payload);
+    }
+
+    fn crashed(&self, instance_id: &str, analysis: &crash::CrashAnalysis) {
+        use tauri::Emitter as _;
+        let payload = CrashAnalyzedPayload {
+            slug: instance_id.to_owned(),
+            analysis: CrashAnalysisPayload::from(analysis),
+        };
+        let _ = self.app.emit("crash://analyzed", payload);
     }
 }
 
@@ -1261,6 +1339,37 @@ fn get_run_logs(
 ) -> Option<Vec<RunLogPayload>> {
     launch::get_run_logs(&**registry_state, &slug)
         .map(|lines| lines.into_iter().map(RunLogPayload::from).collect())
+}
+
+/// Snapshot a single instance's retained crash analysis out of the running
+/// registry, if any. Split out from the `#[tauri::command]` fn (which needs
+/// `tauri::State`) so it's unit-testable without a Tauri runtime — mirrors the
+/// `list_running` / `get_run_state` split, except the equivalent core-level
+/// accessor for `RunState.crash` doesn't exist yet, so the registry read lives
+/// here rather than in `core::launch`.
+fn get_crash_analysis_from_registry(
+    registry: &RunningRegistry,
+    slug: &str,
+) -> Option<CrashAnalysisPayload> {
+    let guard = registry.lock().unwrap();
+    guard
+        .get(slug)
+        .and_then(|s| s.crash.as_ref())
+        .map(CrashAnalysisPayload::from)
+}
+
+/// Read a single instance's retained crash analysis (CP-4's post-exit detection
+/// hook), if any. `None` if the slug is not tracked or no crash was recorded for
+/// its current run — a relaunch always installs a fresh `RunState` and clears it.
+/// Not task-queued: a plain synchronous state read, same access pattern as
+/// `get_run_state` / `get_run_logs` above.
+#[tauri::command]
+#[specta::specta]
+fn get_crash_analysis(
+    registry_state: tauri::State<'_, Arc<RunningRegistry>>,
+    slug: String,
+) -> Option<CrashAnalysisPayload> {
+    get_crash_analysis_from_registry(&**registry_state, &slug)
 }
 
 // --- Version & loader metadata (Mojang / Forge / Fabric / Quilt / NeoForge). ---
@@ -4880,6 +4989,7 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             list_running,
             get_run_state,
             get_run_logs,
+            get_crash_analysis,
             list_tasks,
             cancel_task,
             begin_login,
@@ -4921,6 +5031,7 @@ pub(crate) fn make_builder() -> Builder<tauri::Wry> {
             TaskUpdatePayload,
             InstallLogPayload,
             ManualResolvedPayload,
+            CrashAnalyzedPayload,
         ])
 }
 
