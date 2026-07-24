@@ -100,7 +100,7 @@ exception line, then the raw report text, then each log-tail line. No regex crat
 | 7 | `missing_class` | `ClassNotFoundException`, `NoClassDefFoundError` | A mod references a class that isn't present (missing dependency or version mismatch) | the missing class name |
 | 8 | `native_crash` | exit code ∈ {−1073741819, −1073740791, 134, 139} OR (`jvm_error_path` set) — flag-based, not needle | JVM/native crash / update graphics drivers + Java; links hs_err file | none |
 | 9 | `gl_error` | `GLFW error`, `Failed to create GLFW window`, `does not appear to support OpenGL`, `org.lwjgl.` (exception only) | Graphics/driver problem / update GPU drivers | GLFW error line |
-| 10 | `mod_crash` | (fallback when a report exists AND suspects non-empty) | Crash implicates <suspect> / try updating or disabling it | none |
+| 10 | `mod_crash` | (fallback when a report exists AND parsed `suspect_mod_ids`/`suspect_jars` non-empty — `suspect_packages` deliberately excluded, it is always populated and would starve `generic`) | Crash implicates <suspect> / try updating or disabling it | none |
 | 11 | `generic` | (always matches) | Game crashed (exit <code>) / open the crash report; check the log | none |
 
 Suggestion strings live beside the table as plain `&'static str` templates with `{}` slots
@@ -169,6 +169,8 @@ blocks exit bookkeeping (runs after playtime recording).
 
 ## Change log
 
+- 2026-07-23 — CP-2 implemented (analyze + 11-rule table, 29 tests, 5 log fixtures).
+  Rule-10 gate clarified: parsed ids/jars only, packages excluded (always populated).
 - 2026-07-23 — CP-1 implemented (`core/crash.rs`, 23 tests, 4 fixtures). Jar extraction
   stop-chars amended `%`/`!` → `%`/`!`/`:` (real `~[jar:?]` frame syntax requires it);
   `suspect_packages` documented as always-populated. Exception-header scan is

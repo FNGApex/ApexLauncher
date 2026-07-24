@@ -1,0 +1,5 @@
+[main/ERROR] (FabricLoader) Could not launch game
+net.fabricmc.loader.impl.FormattedException: Mod resolution encountered an incompatible mod set!
+Unmet dependency listing:
+- Mod 'Example Mod' (examplemod) 1.0.0 requires version 2.0 or later of mod 'Other Mod' (othermod), which is missing!
+- Mod 'Second Mod' (secondmod) 1.0.0 requires any version of mod 'Third Mod' (thirdmod), which is missing!

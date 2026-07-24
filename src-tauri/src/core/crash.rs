@@ -456,6 +456,409 @@ fn push_unique(result: &mut Vec<String>, seen: &mut HashSet<String>, val: String
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CP-2: rule engine (`analyze`)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Input to [`analyze`] (spec §Data shapes). Pulled together at the call site from a
+/// (possibly absent) parsed crash report, the in-memory log-ring tail, and process
+/// exit info — no I/O happens here.
+pub struct AnalyzeInput<'a> {
+    pub report: Option<&'a ParsedReport>,
+    pub report_text: Option<&'a str>,
+    /// Last ≤300 ring lines, stream-agnostic.
+    pub log_tail: &'a [String],
+    pub exit_code: Option<i32>,
+    pub report_path: Option<String>,
+    /// `hs_err_pid*.log` path, if present.
+    pub jvm_error_path: Option<String>,
+}
+
+/// One suspected mod surfaced alongside a [`CrashAnalysis`]. Populated by CP-3's
+/// `resolve_suspects` — `analyze` always leaves [`CrashAnalysis::suspects`] empty.
+#[derive(Clone)]
+pub struct CrashSuspect {
+    pub display: String,
+    pub mod_id: Option<String>,
+    pub jar: Option<String>,
+}
+
+/// The result of running the ordered `RULES` table against an [`AnalyzeInput`].
+#[derive(Clone)]
+pub struct CrashAnalysis {
+    /// Stable rule id (spec §Rule table) — part of the IPC contract, never renamed.
+    pub kind: String,
+    pub headline: String,
+    pub suggestion: String,
+    /// `"class: message"` single line, built from `report.exception` when present.
+    pub exception: Option<String>,
+    /// Always empty as of CP-2 — populated by CP-3's `resolve_suspects`.
+    pub suspects: Vec<CrashSuspect>,
+    /// Verbatim key lines pulled by the matched rule's detail extractor, capped at 12.
+    pub detail: Vec<String>,
+    pub report_path: Option<String>,
+    pub jvm_error_path: Option<String>,
+}
+
+/// The un-enriched shape a single rule function hands back to [`analyze`]; `analyze`
+/// fills in `exception`/`suspects`/`report_path`/`jvm_error_path` uniformly afterwards.
+struct RuleMatch {
+    kind: &'static str,
+    headline: String,
+    suggestion: String,
+    detail: Vec<String>,
+}
+
+type RuleFn = fn(&AnalyzeInput, Option<&str>) -> Option<RuleMatch>;
+
+/// Ordered rule table (spec §Rule table) — first match wins. `rule_generic` is last
+/// and always matches, so `RULES.iter().find_map(...)` in [`analyze`] never falls through.
+static RULES: &[RuleFn] = &[
+    rule_fabric_unmet_deps,
+    rule_forge_missing_deps,
+    rule_duplicate_mods,
+    rule_out_of_memory,
+    rule_unsupported_java,
+    rule_mixin_failure,
+    rule_missing_class,
+    rule_native_crash,
+    rule_gl_error,
+    rule_mod_crash,
+    rule_generic,
+];
+
+/// Run the ordered `RULES` table over `input`, returning the first match (spec §Rule
+/// table: "first match wins"). `rule_generic` always matches, so this never panics.
+pub fn analyze(input: AnalyzeInput) -> CrashAnalysis {
+    let exception_line = build_exception_line(input.report);
+
+    let matched = RULES
+        .iter()
+        .find_map(|rule_fn| rule_fn(&input, exception_line.as_deref()))
+        .expect("rule_generic always matches");
+
+    CrashAnalysis {
+        kind: matched.kind.to_string(),
+        headline: matched.headline,
+        suggestion: matched.suggestion,
+        exception: exception_line,
+        suspects: Vec::new(),
+        detail: matched.detail,
+        report_path: input.report_path,
+        jvm_error_path: input.jvm_error_path,
+    }
+}
+
+/// `CrashAnalysis.exception` = `"class: message"` (or bare `class` when there's no
+/// message) from the report's top-level exception, when present.
+fn build_exception_line(report: Option<&ParsedReport>) -> Option<String> {
+    let exc = report?.exception.as_ref()?;
+    Some(match &exc.message {
+        Some(msg) => format!("{}: {}", exc.class, msg),
+        None => exc.class.clone(),
+    })
+}
+
+/// Fill the first `{}` slot in `template` with `val` (spec: suggestion/headline
+/// strings are `&'static str` templates with `{}` slots + a small format helper).
+fn fmt1(template: &str, val: &str) -> String {
+    template.replacen("{}", val, 1)
+}
+
+// ── Needle matching (spec: exception line, then raw report text, then each log-tail line) ──
+
+/// `true` if any of `needles` is a case-sensitive substring of the exception line,
+/// the raw report text, or any log-tail line, checked in that order.
+fn any_needle_matches(input: &AnalyzeInput, exception_line: Option<&str>, needles: &[&str]) -> bool {
+    if let Some(exc) = exception_line {
+        if needles.iter().any(|n| exc.contains(n)) {
+            return true;
+        }
+    }
+    if let Some(text) = input.report_text {
+        if needles.iter().any(|n| text.contains(n)) {
+            return true;
+        }
+    }
+    input.log_tail.iter().any(|line| needles.iter().any(|n| line.contains(n)))
+}
+
+/// The first whole line (exception line, then a `report_text` line, then a
+/// `log_tail` line, in that order) containing any of `needles`, trimmed.
+fn line_matching_any_needle(input: &AnalyzeInput, exception_line: Option<&str>, needles: &[&str]) -> Option<String> {
+    if let Some(exc) = exception_line {
+        if needles.iter().any(|n| exc.contains(n)) {
+            return Some(exc.trim().to_string());
+        }
+    }
+    if let Some(text) = input.report_text {
+        if let Some(line) = text.lines().find(|l| needles.iter().any(|n| l.contains(n))) {
+            return Some(line.trim().to_string());
+        }
+    }
+    input.log_tail.iter().find(|l| needles.iter().any(|n| l.contains(n))).map(|l| l.trim().to_string())
+}
+
+/// `report_text` lines followed by `log_tail` lines — the combined verbatim search
+/// space used by detail extractors that scan for shaped lines (not just a single
+/// matched line).
+fn combined_lines<'a>(input: &'a AnalyzeInput) -> Vec<&'a str> {
+    let mut lines: Vec<&str> = Vec::new();
+    if let Some(text) = input.report_text {
+        lines.extend(text.lines());
+    }
+    lines.extend(input.log_tail.iter().map(|s| s.as_str()));
+    lines
+}
+
+/// Trimmed, non-blank lines immediately following the first line containing any of
+/// `needles`, capped at `cap`, stopping at the first blank line (spec rules 2/3:
+/// "verbatim block/lines … after the needle line").
+fn lines_after_any_needle(lines: &[&str], needles: &[&str], cap: usize) -> Vec<String> {
+    let Some(pos) = lines.iter().position(|l| needles.iter().any(|n| l.contains(n))) else {
+        return Vec::new();
+    };
+    lines[pos + 1..]
+        .iter()
+        .take_while(|l| !l.trim().is_empty())
+        .take(cap)
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
+/// Extract the substring immediately after `needle` in `line` (stripping a leading
+/// `':'` and surrounding whitespace, then taking the first whitespace-delimited
+/// token) — used to pull a bare class name out of an exception line.
+fn extract_class_name_after(line: &str, needle: &str) -> Option<String> {
+    let pos = line.find(needle)?;
+    let rest = &line[pos + needle.len()..];
+    let rest = rest.strip_prefix(':').unwrap_or(rest).trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
+
+// ── Rule 1: fabric_unmet_deps ────────────────────────────────────────────────────
+
+const FABRIC_UNMET_DEPS_NEEDLES: &[&str] = &[
+    "Mod resolution encountered an incompatible mod set",
+    "Incompatible mods found",
+    "Unmet dependency listing",
+];
+
+fn rule_fabric_unmet_deps(input: &AnalyzeInput, exception_line: Option<&str>) -> Option<RuleMatch> {
+    if !any_needle_matches(input, exception_line, FABRIC_UNMET_DEPS_NEEDLES) {
+        return None;
+    }
+    let detail = combined_lines(input)
+        .into_iter()
+        .filter(|l| {
+            let t = l.trim();
+            t.starts_with("- Mod '") || t.contains("requires version") || t.contains("which is missing")
+        })
+        .take(12)
+        .map(|l| l.trim().to_string())
+        .collect();
+    Some(RuleMatch {
+        kind: "fabric_unmet_deps",
+        headline: "Missing or incompatible mod dependencies.".to_string(),
+        suggestion: "Install or update the mods listed below to satisfy the missing dependency requirements."
+            .to_string(),
+        detail,
+    })
+}
+
+// ── Rule 2: forge_missing_deps ───────────────────────────────────────────────────
+
+const FORGE_MISSING_DEPS_NEEDLES: &[&str] = &["Missing or unsupported mandatory dependencies"];
+
+fn rule_forge_missing_deps(input: &AnalyzeInput, exception_line: Option<&str>) -> Option<RuleMatch> {
+    if !any_needle_matches(input, exception_line, FORGE_MISSING_DEPS_NEEDLES) {
+        return None;
+    }
+    let lines = combined_lines(input);
+    let detail = lines_after_any_needle(&lines, FORGE_MISSING_DEPS_NEEDLES, 12);
+    Some(RuleMatch {
+        kind: "forge_missing_deps",
+        headline: "Missing required mod dependencies.".to_string(),
+        suggestion: "Install the missing mods listed below, matching the required versions.".to_string(),
+        detail,
+    })
+}
+
+// ── Rule 3: duplicate_mods ───────────────────────────────────────────────────────
+
+const DUPLICATE_MODS_NEEDLES: &[&str] =
+    &["DuplicateModsFoundException", "Found duplicate mods", "duplicate mods"];
+
+fn rule_duplicate_mods(input: &AnalyzeInput, exception_line: Option<&str>) -> Option<RuleMatch> {
+    if !any_needle_matches(input, exception_line, DUPLICATE_MODS_NEEDLES) {
+        return None;
+    }
+    let lines = combined_lines(input);
+    let detail = lines_after_any_needle(&lines, DUPLICATE_MODS_NEEDLES, 12);
+    Some(RuleMatch {
+        kind: "duplicate_mods",
+        headline: "The same mod is installed twice.".to_string(),
+        suggestion: "Remove one of the duplicate jar files and relaunch.".to_string(),
+        detail,
+    })
+}
+
+// ── Rule 4: out_of_memory ────────────────────────────────────────────────────────
+
+const OUT_OF_MEMORY_NEEDLES: &[&str] = &["java.lang.OutOfMemoryError"];
+
+fn rule_out_of_memory(input: &AnalyzeInput, exception_line: Option<&str>) -> Option<RuleMatch> {
+    let line = line_matching_any_needle(input, exception_line, OUT_OF_MEMORY_NEEDLES)?;
+    Some(RuleMatch {
+        kind: "out_of_memory",
+        headline: "The game ran out of memory.".to_string(),
+        suggestion: "Raise the allocated memory in the instance's Java settings and relaunch.".to_string(),
+        detail: vec![line],
+    })
+}
+
+// ── Rule 5: unsupported_java ─────────────────────────────────────────────────────
+
+const UNSUPPORTED_JAVA_NEEDLES: &[&str] = &[
+    "UnsupportedClassVersionError",
+    "has been compiled by a more recent version of the Java Runtime",
+];
+
+fn rule_unsupported_java(input: &AnalyzeInput, exception_line: Option<&str>) -> Option<RuleMatch> {
+    let line = line_matching_any_needle(input, exception_line, UNSUPPORTED_JAVA_NEEDLES)?;
+    Some(RuleMatch {
+        kind: "unsupported_java",
+        headline: "This mod or Minecraft version needs a different Java version.".to_string(),
+        suggestion: "Check the instance's Java settings and switch to the required Java major version."
+            .to_string(),
+        detail: vec![line],
+    })
+}
+
+// ── Rule 6: mixin_failure ────────────────────────────────────────────────────────
+
+const MIXIN_FAILURE_NEEDLES: &[&str] = &["MixinApplyError", "InjectionError", "Mixin apply failed"];
+
+fn rule_mixin_failure(input: &AnalyzeInput, exception_line: Option<&str>) -> Option<RuleMatch> {
+    let frame_match =
+        input.report.and_then(|r| r.exception.as_ref()).and_then(|e| {
+            e.frames.iter().find(|f| f.contains("mixin from mod")).cloned()
+        });
+
+    let detail = if let Some(frame) = frame_match {
+        vec![frame]
+    } else if any_needle_matches(input, exception_line, MIXIN_FAILURE_NEEDLES) {
+        line_matching_any_needle(input, exception_line, MIXIN_FAILURE_NEEDLES).into_iter().collect()
+    } else {
+        return None;
+    };
+
+    Some(RuleMatch {
+        kind: "mixin_failure",
+        headline: "A mod's mixin failed to apply.".to_string(),
+        suggestion: "This is usually a version incompatibility — try updating or removing the suspect mod."
+            .to_string(),
+        detail,
+    })
+}
+
+// ── Rule 7: missing_class ────────────────────────────────────────────────────────
+
+const MISSING_CLASS_NEEDLES: &[&str] = &["ClassNotFoundException", "NoClassDefFoundError"];
+
+fn rule_missing_class(input: &AnalyzeInput, exception_line: Option<&str>) -> Option<RuleMatch> {
+    let line = line_matching_any_needle(input, exception_line, MISSING_CLASS_NEEDLES)?;
+    let class_name = MISSING_CLASS_NEEDLES.iter().find_map(|needle| extract_class_name_after(&line, needle));
+    Some(RuleMatch {
+        kind: "missing_class",
+        headline: "A mod references a class that isn't present.".to_string(),
+        suggestion: "This usually means a missing dependency or a version mismatch — update or reinstall the \
+                     affected mods."
+            .to_string(),
+        detail: class_name.into_iter().collect(),
+    })
+}
+
+// ── Rule 8: native_crash ─────────────────────────────────────────────────────────
+
+/// Exit codes that indicate a JVM/native crash rather than a normal abnormal exit
+/// (Windows access violation, Windows heap corruption, SIGABRT, SIGSEGV — POSIX
+/// `128 + signal` convention).
+const NATIVE_CRASH_EXIT_CODES: &[i32] = &[-1073741819, -1073740791, 134, 139];
+
+fn rule_native_crash(input: &AnalyzeInput, _exception_line: Option<&str>) -> Option<RuleMatch> {
+    let exit_matches = input.exit_code.map(|c| NATIVE_CRASH_EXIT_CODES.contains(&c)).unwrap_or(false);
+    if !exit_matches && input.jvm_error_path.is_none() {
+        return None;
+    }
+    Some(RuleMatch {
+        kind: "native_crash",
+        headline: "The JVM or native code crashed.".to_string(),
+        suggestion: "Update your graphics drivers and Java runtime; the JVM error log has more detail."
+            .to_string(),
+        detail: Vec::new(),
+    })
+}
+
+// ── Rule 9: gl_error ──────────────────────────────────────────────────────────────
+
+const GL_ERROR_NEEDLES: &[&str] =
+    &["GLFW error", "Failed to create GLFW window", "does not appear to support OpenGL"];
+
+fn rule_gl_error(input: &AnalyzeInput, exception_line: Option<&str>) -> Option<RuleMatch> {
+    let lwjgl_in_exception = exception_line.map(|e| e.contains("org.lwjgl.")).unwrap_or(false);
+
+    let detail_line = if let Some(line) = line_matching_any_needle(input, exception_line, GL_ERROR_NEEDLES) {
+        Some(line)
+    } else if lwjgl_in_exception {
+        exception_line.map(|e| e.trim().to_string())
+    } else {
+        None
+    };
+
+    let detail_line = detail_line?;
+    Some(RuleMatch {
+        kind: "gl_error",
+        headline: "A graphics/driver problem prevented rendering.".to_string(),
+        suggestion: "Update your GPU drivers and try again.".to_string(),
+        detail: vec![detail_line],
+    })
+}
+
+// ── Rule 10: mod_crash ───────────────────────────────────────────────────────────
+
+const MOD_CRASH_HEADLINE_TEMPLATE: &str = "Crash implicates {}.";
+const MOD_CRASH_SUGGESTION_TEMPLATE: &str = "Try updating or disabling {} and relaunch.";
+
+fn rule_mod_crash(input: &AnalyzeInput, _exception_line: Option<&str>) -> Option<RuleMatch> {
+    let report = input.report?;
+    let suspect = report.suspect_mod_ids.first().or_else(|| report.suspect_jars.first())?;
+    Some(RuleMatch {
+        kind: "mod_crash",
+        headline: fmt1(MOD_CRASH_HEADLINE_TEMPLATE, suspect),
+        suggestion: fmt1(MOD_CRASH_SUGGESTION_TEMPLATE, suspect),
+        detail: Vec::new(),
+    })
+}
+
+// ── Rule 11: generic ─────────────────────────────────────────────────────────────
+
+const GENERIC_HEADLINE_WITH_CODE_TEMPLATE: &str = "Game crashed (exit {}).";
+const GENERIC_HEADLINE_NO_CODE: &str = "Game crashed (exit code unknown).";
+const GENERIC_SUGGESTION: &str = "Open the crash report and check the log for more detail.";
+
+fn rule_generic(input: &AnalyzeInput, _exception_line: Option<&str>) -> Option<RuleMatch> {
+    let headline = match input.exit_code {
+        Some(code) => fmt1(GENERIC_HEADLINE_WITH_CODE_TEMPLATE, &code.to_string()),
+        None => GENERIC_HEADLINE_NO_CODE.to_string(),
+    };
+    Some(RuleMatch { kind: "generic", headline, suggestion: GENERIC_SUGGESTION.to_string(), detail: Vec::new() })
+}
+
 #[cfg(test)]
 #[path = "crash_tests.rs"]
 mod tests;

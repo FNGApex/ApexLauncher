@@ -1,0 +1,3 @@
+[main/ERROR] Missing or unsupported mandatory dependencies to launch
+	- Mod ID: 'somemod', Requested by: 'anothermod', Expected range: '>=2.0', Actual version: '1.0'
+	- Mod ID: 'thirdmod', Requested by: 'anothermod', Expected range: '[1.0,)', Actual version: 'MISSING'

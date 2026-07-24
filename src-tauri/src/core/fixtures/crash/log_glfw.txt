@@ -1,0 +1,1 @@
+[Render thread/ERROR] GLFW error 65542: WGL: The driver does not appear to support OpenGL

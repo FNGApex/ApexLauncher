@@ -1,0 +1,2 @@
+[main/ERROR] net.minecraftforge.fml.loading.moddiscovery.DuplicateModsFoundException: Found duplicate mods:
+	Mod ID 'examplemod' found at 'examplemod-1.0.0.jar' and 'examplemod-1.0.1.jar'

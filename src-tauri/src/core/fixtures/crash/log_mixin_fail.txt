@@ -1,0 +1,2 @@
+[Render thread/ERROR] Mixin apply failed handler invoked
+org.spongepowered.asm.mixin.transformer.throwables.MixinApplyError: Mixin [examplemod.mixins.json:ExampleMixin] from mod examplemod failed to apply
