@@ -1,79 +1,49 @@
 # providers
 
-## What it does
+## Overview
 
-Normalized mod/modpack search backend for Modrinth, CurseForge, FTB, and ATLauncher. Exposes a `ModProvider` async_trait with `search`, `get_versions`, `get_project`, `get_projects_brief`, and `get_pack_summary` methods; all four providers share unified types. `PackInfo` (full project detail for the `BrowsePackInfo` page), `PackSummary` (update-check result for `refresh_pack_meta`), `ModBrief` (batched lightweight metadata for `enrich_instance_mods`), and `get_projects_brief` (batch fetch of `ModBrief`s by project IDs) are shared abstractions. `ProjectSummary.page_url` carries the provider page URL captured at add-time. FTB is keyless for browse; FTB modpack install requires the CF API key (mod jars are CurseForge-hosted). ATLauncher is keyless for BOTH browse AND install (opposite of FTB — ATL mod jars are self-hosted on the ATL CDN).
+Normalized mod/modpack search backend for Modrinth, CurseForge, FTB, and ATLauncher. `ModProvider` async_trait with `search`, `get_versions`, `get_project`, `get_projects_brief`, `get_pack_summary`. Shared types: `PackInfo` (full detail for BrowsePackInfo), `PackSummary` (update-check result), `ModBrief` (batched lightweight metadata for `enrich_instance_mods`).
+
+FTB: keyless browse; CF API key required for install (mod jars are CurseForge-hosted). ATL: keyless for both browse AND install (jars CDN-hosted on ATL servers).
 
 ## CLI code
 
-- `src-tauri/build.rs` — parses gitignored `src-tauri/.env` for `MODLOADER_CF_API_KEY` and emits `cargo:rustc-env`; missing `.env` bakes nothing; build always succeeds
-- `src-tauri/src/core/providers.rs` — normalized types: `ProjectSummary`, `ProjectVersion`, `VersionFile`, `Dependency`, `SearchParams`, `SearchResult`, `ProviderKind` (`Modrinth/CurseForge/Ftb/Atlauncher`, serde `"modrinth"/"curseForge"/"ftb"/"atlauncher"`), `ProjectType` (Mod/Modpack), `ModBrief { project_id, name, icon_url, summary }`, `PackInfo { name, description, icon_url, author, downloads, project_type, provider }`, `PackSummary { latest_version_id, latest_version, page_url }`; `ModProvider` trait with all 5 methods; `ProviderHttpClient` trait + `ReqwestProviderClient`; `ProviderError` enum; `cf_api_key_from`; raw MR + CF serde deserialization types; 35 tests in sibling `providers_tests.rs`
-- `src-tauri/src/core/modrinth.rs` — `ModrinthProvider` impl; `get_projects_brief` uses `GET /v2/projects?ids=[...]` batched call; `get_project` uses `GET /v2/project/{id}` + `GET /v2/project/{id}/members` for author; `get_pack_summary` uses `GET /v2/project/{id}/version?loaders=...&game_versions=...`; page_url built as `https://modrinth.com/{hit.project_type}/{hit.slug}`; 41 tests in sibling `modrinth_tests.rs`
-- `src-tauri/src/core/curseforge.rs` — `CurseForgeProvider` impl; `get_projects_brief` uses `POST /v1/mods` (batch mods endpoint); `get_project` uses `GET /v1/mods/{id}` + description endpoint; `get_pack_summary` uses `GET /v1/mods/{id}/files` filtered to release type; `classId=6` (mods) or `classId=4471` (modpacks); `get_file(client, project_id, file_id)` single-file resolver; `get_mod_slug(client, project_id: &str) -> Result<Option<String>>` — calls `GET /v1/mods/{id}`, returns the `slug` field from `CfModData` (`#[serde(default)]`, absent on older/partial responses); `CfModData` now carries `slug: Option<String>` alongside `name`, `logo`, `authors`, `summary`; 72 tests in sibling `curseforge_tests.rs`
-- `src-tauri/src/core/ftb.rs` — `FtbProvider` impl (keyless); browse API base `https://api.modpacks.ch`; list endpoints return `packs: Vec<u64>` → N+1 detail fetch for visible window; `search`: empty query → featured+popular deduped feed, term → `/public/modpack/search/{limit}?term=...`; `get_versions`: detail endpoint, sorted newest-first by id, `files` empty (manifest consumed at install time); `get_project`: detail → `PackInfo`; `get_pack_summary`: detail → `PackSummary`; `get_projects_brief`: no-op (no batch FTB mod-metadata endpoint; api-frugality); `newest_release_version(client, id)` + `get_version_manifest(client, id, version_id)` public helpers for the install planner; pub manifest types: `FtbVersionManifest { name, manifest_type, targets, specs, files }`, `FtbFile { name, path, url, sha1, size, file_type, clientonly, serveronly, optional, curseforge }`, `FtbCurseforge { project, file }`, `FtbTarget { name, target_type, version }`, `FtbSpecs { minimum, recommended }`; `FtbVersionManifest` has helper methods `loader()`, `minecraft()`, `loader_version()`; 11 tests in sibling `ftb_tests.rs`
-- `src-tauri/src/core/atl.rs` — `AtlProvider` impl (keyless unit struct); browse API base `https://api.atlauncher.com/v1`; UA-gated, Cloudflare-1020 guard; one `/packs/full/public` call powers Browse (whole catalog in one response, no N+1; client-side substring filter, name-sorted, windowed); pub manifest types: `AtlConfigsManifest { mods, loader_version }`, `AtlLoader { loader_type, version }`, `AtlMod { name, optional, client_download, server_download, url, md5, size }`, `AtlConfigs` (full Configs.json envelope); `AtlEnvelope<T>` API wrapper + lenient `unwrap_envelope` (keys on `error: bool`, `code` optional); pub helpers `newest_version(client, pack_name)`, `get_configs_manifest(client, pack_name, version)`, `cdn_image_url(pack_name)` (no fetch, deterministic); version path segments percent-encoded; `get_projects_brief`: no-op (api-frugality); 18 tests in sibling `atl_tests.rs`
-- `src-tauri/src/lib.rs` — `search_mods`, `get_mod_versions`, `get_pack_info`, `refresh_pack_meta` Tauri commands all dispatch on `"ftb"` and `"atlauncher"` provider arms; `ProviderCommandError { kind, message }` IPC error type; `enrich_instance_mods` command uses `get_projects_brief` to backfill mod metadata; ATL `get_projects_brief` is a no-op (self-hosted CDN jars, no batch metadata API)
+- `src-tauri/build.rs` — parses `src-tauri/.env` for `MODLOADER_CF_API_KEY`, emits `cargo:rustc-env`; missing `.env` bakes nothing; build always succeeds
+- `src-tauri/src/core/providers.rs` — `ProjectSummary`, `ProjectVersion`, `VersionFile`, `Dependency`, `SearchParams`, `SearchResult`, `ProviderKind` (`Modrinth/CurseForge/Ftb/Atlauncher`; serde `"modrinth"/"curseForge"/"ftb"/"atlauncher"`), `ProjectType` (Mod/Modpack), `ModBrief { project_id, name, icon_url, summary }`, `PackInfo`, `PackSummary`; `ModProvider` trait (5 methods); `ProviderHttpClient` trait + `ReqwestProviderClient` (injectable seam); `ProviderError`; `cf_api_key_from`; 35 tests in `providers_tests.rs`
+- `src-tauri/src/core/modrinth.rs` — `ModrinthProvider`; `get_projects_brief` uses `GET /v2/projects?ids=[...]`; `get_project` uses `GET /v2/project/{id}` + members for author; 41 tests in `modrinth_tests.rs`
+- `src-tauri/src/core/curseforge.rs` — `CurseForgeProvider`; `get_projects_brief` uses `POST /v1/mods`; `get_project` uses `GET /v1/mods/{id}` + description endpoint; `classId=6` (mods) / `classId=4471` (modpacks); `get_file(client, project_id, file_id)` single-file resolver; `get_mod_slug(client, project_id) -> Result<Option<String>>`; `CfModData { slug: Option<String>, name, logo, authors, summary }` (`#[serde(default)]`); 72 tests in `curseforge_tests.rs`
+- `src-tauri/src/core/ftb.rs` — `FtbProvider` (keyless); base `https://api.modpacks.ch`; empty query → featured+popular deduped feed; term → `/public/modpack/search/{limit}?term=...`; `get_versions`: newest-first by id, `files` empty (manifest consumed at install time); `get_projects_brief`: no-op (api-frugality); `newest_release_version` + `get_version_manifest` helpers; pub types: `FtbVersionManifest { name, manifest_type, targets, specs, files }`, `FtbFile { name, path, url, sha1, size, file_type, clientonly, serveronly, optional, curseforge }`, `FtbCurseforge { project, file }`, `FtbTarget { name, target_type, version }`, `FtbSpecs { minimum, recommended }`; 11 tests in `ftb_tests.rs`
+- `src-tauri/src/core/atl.rs` — `AtlProvider` (keyless unit struct); base `https://api.atlauncher.com/v1`; UA-gated (Cloudflare-1020 guard); one `/packs/full/public` call powers Browse (client-side substring filter, name-sorted, windowed); `get_projects_brief`: no-op (api-frugality); pub types: `AtlConfigsManifest { mods, loader_version }`, `AtlLoader { loader_type, version }`, `AtlMod { name, optional, client_download, server_download, url, md5, size }`, `AtlConfigs`; `AtlEnvelope<T>` + `unwrap_envelope` (keys on `error: bool`, `code` optional); helpers `newest_version`, `get_configs_manifest`, `cdn_image_url` (no fetch, deterministic); version path segments percent-encoded; 18 tests in `atl_tests.rs`
+- `src-tauri/src/lib.rs` — `search_mods`, `get_mod_versions`, `get_pack_info`, `refresh_pack_meta` dispatch on all four provider arms; `ProviderCommandError { kind, message }`; `enrich_instance_mods` calls `get_projects_brief` per provider
 
 ## Artifacts
 
-- `src/lib/ipc.ts` — `ProjectType`, `ProjectSummary`, `ProjectVersion`, `VersionFile`, `Dependency`, `SearchResult`, `ProviderCommandError`, `PackInfo`, `ModBrief` interfaces; `searchMods`, `getModVersions`, `getPackInfo` wrappers; provider routing strings lowercase (`"modrinth"`, `"curseforge"`, `"ftb"`, `"atlauncher"`)
-- `src/lib/bindings.ts` — `ProviderKind` union is `"modrinth" | "curseForge" | "ftb" | "atlauncher"` (note: `"curseForge"` camelCase from Rust serde, but ipc.ts routing uses lowercase `"curseforge"`; these are two distinct string shapes; `"ftb"` and `"atlauncher"` are the same in both forms)
-
-## Docs
-
-- `docs/spec/providers-browse.md` — slice A spec + implementation log
-- `docs/spec/curseforge-api-key.md` — baked CF key tier spec
-- `docs/design/providers.md` — normalized pipeline diagram, rationale
-- `docs/spec/browse-rework.md` — BR-A through BR-D; `get_pack_info`, per-provider split
-- `docs/spec/mod-metadata-ux.md` — `ModBrief`/`get_projects_brief`/`enrich_instance_mods` spec
-- `docs/spec/ftb-integration.md` — FTB provider spec: API facts, install flow, CF-referenced file resolution
-- `docs/design/ftb-integration.md` — FTB design rationale: keyless browse, CF-hosted jars, pending_manual pipeline reuse
-- `docs/spec/atlauncher-integration.md` — ATL provider spec: API facts, install flow, Configs.zip extraction, keyless install
-- `docs/design/atlauncher-integration.md` — ATL design rationale: keyless browse+install, CDN-hosted jars, update-apply deferral
+- `src/lib/ipc.ts` — `ProjectType`, `ProjectSummary`, `ProjectVersion`, `VersionFile`, `Dependency`, `SearchResult`, `ProviderCommandError`, `PackInfo`, `ModBrief`; `searchMods`, `getModVersions`, `getPackInfo` wrappers; routing strings lowercase (`"modrinth"`, `"curseforge"`, `"ftb"`, `"atlauncher"`)
+- `src/lib/bindings.ts` — `ProviderKind` union: `"modrinth" | "curseForge" | "ftb" | "atlauncher"` (note `"curseForge"` camelCase)
 
 ## Fixtures
 
-- `src-tauri/src/core/fixtures/modrinth_search.json` — 2-hit MR search response
-- `src-tauri/src/core/fixtures/modrinth_versions.json` — 3-version MR version list
-- `src-tauri/src/core/fixtures/modrinth_project_sodium.json` — full project detail for get_project test
-- `src-tauri/src/core/fixtures/modrinth_members_sodium.json` — team members for get_project author test
-- `src-tauri/src/core/fixtures/modrinth_projects_batch.json` — batch projects response for get_projects_brief test
-- `src-tauri/src/core/fixtures/cf_search.json` — 2-mod CF search response
-- `src-tauri/src/core/fixtures/cf_files.json` — 3-file CF files response (includes null downloadUrl)
-- `src-tauri/src/core/fixtures/cf_mod_jei.json` — single mod detail for get_project test
-- `src-tauri/src/core/fixtures/cf_mod_jei_description.json` — description response for get_project test
-- `src-tauri/src/core/fixtures/cf_mods_batch.json` — batch mods response for get_projects_brief test
-- `src-tauri/src/core/fixtures/ftb_featured.json` — FTB featured pack id list response
-- `src-tauri/src/core/fixtures/ftb_popular.json` — FTB popular pack id list response
-- `src-tauri/src/core/fixtures/ftb_search.json` — FTB search result (pack id list)
-- `src-tauri/src/core/fixtures/ftb_modpack_detail.json` — FTB pack detail response (`/public/modpack/{id}`)
-- `src-tauri/src/core/fixtures/atl_packs_public.json` — ATL full pack catalog response (`/v1/packs/full/public`)
-- `src-tauri/src/core/fixtures/atl_pack_detail.json` — ATL single pack detail response
-- `src-tauri/src/core/fixtures/atl_pack_latest.json` — ATL pack latest version response
-- `src-tauri/src/core/fixtures/atl_configs.json` — ATL Configs.json manifest fixture
+`src-tauri/src/core/fixtures/`: `modrinth_search.json`, `modrinth_versions.json`, `modrinth_project_sodium.json`, `modrinth_members_sodium.json`, `modrinth_projects_batch.json`, `cf_search.json`, `cf_files.json`, `cf_mod_jei.json`, `cf_mod_jei_description.json`, `cf_mods_batch.json`, `ftb_featured.json`, `ftb_popular.json`, `ftb_search.json`, `ftb_modpack_detail.json`, `atl_packs_public.json`, `atl_pack_detail.json`, `atl_pack_latest.json`, `atl_configs.json`
+
+## Docs
+
+- `docs/spec/providers-browse.md`, `docs/spec/curseforge-api-key.md`, `docs/design/providers.md`
+- `docs/spec/ftb-integration.md`, `docs/spec/atlauncher-integration.md`
 
 ## Coupling
 
-- `ipc.ts` `ProviderKind` response value `"curseForge"` (camelCase) vs routing param `"curseforge"` (lowercase): two distinct string shapes. `Browse.tsx`, `BrowsePackInfo.tsx`, `InstanceDetail.tsx`, `InfoTab.tsx` all branch on `mod.provider`/`instance.source.provider`; any serialization change breaks all these files. `"ftb"` and `"atlauncher"` are the same in both shapes (all-lowercase, unambiguous).
-- `ProviderCommandError.kind === "key_missing"` is checked by name in `Browse.tsx` and `InstanceDetail.tsx`; any rename in `lib.rs` breaks the frontend key-missing UI state. FTB browse is keyless but FTB install can raise `key_missing` (CF key required for CF-referenced jars). ATL browse AND install are both keyless — `key_missing` never arises for ATLauncher.
-- `get_pack_info` result (`PackInfo`) is used by `BrowsePackInfo.tsx` and `InfoTab.tsx` for pack detail display; `PackSummary` is used by `refresh_pack_meta` in `lib.rs` to write update-check fields to the instance manifest.
-- `enrich_instance_mods` in `lib.rs` calls `provider.get_projects_brief(mr_ids, cf_ids)` for each provider separately; FTB and ATL `get_projects_brief` are both no-ops (no batch metadata APIs), so mods from those providers skip enrichment.
-- modpack domain (`core/modpack.rs`) reuses `ProviderHttpClient`, `ProviderError`, `VersionFile`, and `CurseForgeProvider::get_file` for CF file resolution (used by CF pack builds and FTB's CF-referenced file subset). ATL install does not call `CurseForgeProvider::get_file` — ATL mod jars are CDN-hosted, fully self-contained, no CF dependency.
-- `settings.rs` `curseforge_api_key` field feeds `cf_api_key_from` at the command layer; FTB install calls `cf_api_key_from` inside `resolve_and_build_ftb_plan`; ATL install does not call `cf_api_key_from`.
-- FTB `get_versions` returns empty `files` on each `ProjectVersion` (no single jar); the install path consumes `FtbVersionManifest` directly via `get_version_manifest`.
-- ATL `get_versions` returns pack version entries from the catalog; the install path consumes `AtlConfigsManifest` directly via `get_configs_manifest` (CDN-hosted Configs.json, NOT the pack API envelope).
+- `ProviderKind` serde `"curseForge"` vs ipc.ts routing `"curseforge"`: two distinct string shapes. `"ftb"` and `"atlauncher"` are the same in both.
+- `ProviderCommandError.kind === "key_missing"` checked by name in `Browse.tsx` and `InstanceDetail.tsx`. FTB browse is keyless; FTB install can raise `key_missing`. ATL never raises `key_missing`.
+- `modpack.rs` reuses `ProviderHttpClient`, `ProviderError`, `VersionFile`, `CurseForgeProvider::get_file` for CF file resolution (CF pack builds + FTB CF-referenced files). ATL install does not call `CurseForgeProvider::get_file`.
+- `enrich_instance_mods` calls `provider.get_projects_brief`; FTB and ATL `get_projects_brief` are no-ops — mods from those providers skip enrichment.
 
-## Conventions worth knowing
+## Conventions
 
-- Injectable HTTP seam pattern: `ProviderHttpClient` mirrors `AuthHttpClient` in `auth.rs`. No live HTTP in any test.
-- CF key resolved at command layer via `cf_api_key_from(env_val, settings_val, baked_val)`. Precedence: env → settings → baked → `None`. Key never reaches the frontend.
-- All IPC-crossing structs carry `#[serde(rename_all = "camelCase")]`. CF numeric ids stringified to `String`.
-- `ProjectType::Mod` → MR facet `project_type:mod`, CF `classId=6`. `ProjectType::Modpack` → facet `project_type:modpack`, CF `classId=4471`. FTB and ATL are modpack-only; `ProjectType::Mod` is never used with either.
-- `ModProvider` is object-safe: `Box<dyn ModProvider>` compiles (asserted in `providers_tests.rs`).
-- `mod_install.rs` has no filesystem I/O and no Tauri commands — pure resolver/planner.
-- FTB N+1 detail fetch is acceptable because the catalog is small (~130 packs) and `api.modpacks.ch` caches aggressively (`max-age=900`). Only the visible window is fetched, not the full catalog.
-- ATL uses one `/packs/full/public` call for the whole catalog (no N+1); client-side substring filter and windowing. `api.atlauncher.com` is UA-gated (returns Cloudflare 1020 without a valid UA); `AtlProvider` sends a proper `User-Agent` header.
-- FTB pack page URL format: `https://www.feed-the-beast.com/modpacks/{id}` (numeric id, no slug — FTB has no slug concept).
-- ATL pack page URL format: `https://atlauncher.com/pack/{name}` (pack name slug).
-- FTB `ProviderKind` serializes as `"ftb"` (all-lowercase, unambiguous in both Rust serde `camelCase` form and ipc.ts routing form).
-- ATL `ProviderKind` serializes as `"atlauncher"` (all-lowercase, same in both forms).
+- No live HTTP in any test (injectable `ProviderHttpClient` seam mirrors `AuthHttpClient` pattern).
+- CF key resolved at command layer via `cf_api_key_from(env_val, settings_val, baked_val)`. Precedence: env → settings → baked → `None`. Key never reaches frontend.
+- `ModProvider` is object-safe: `Box<dyn ModProvider>` compiles.
+- `ProjectType::Mod` → MR facet `project_type:mod`, CF `classId=6`. `ProjectType::Modpack` → facet `project_type:modpack`, CF `classId=4471`. FTB and ATL are modpack-only.
+- FTB N+1 detail fetch acceptable: small catalog (~130 packs), `api.modpacks.ch` caches aggressively. Only visible window fetched.
+- ATL one `/packs/full/public` call for whole catalog; client-side substring filter. `api.atlauncher.com` is UA-gated.
+- FTB pack page URL: `https://www.feed-the-beast.com/modpacks/{id}` (numeric id, no slug).
+- ATL pack page URL: `https://atlauncher.com/pack/{name}`.

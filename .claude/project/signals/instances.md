@@ -1,61 +1,57 @@
 # instances
 
-## What it does
+## Overview
 
-Manages the full lifecycle of Minecraft instances: create, list, get (with mods-folder reconciliation), delete, and per-instance mod state operations (enable/disable, remove, update). Instances are stored as `instance.json` under `<data>/instances/<slug>/`. Newly created instances inherit the global default memory from `settings.json`. Playtime and last-played timestamp are recorded on game exit via `record_playtime`. Per-instance Java/RAM configuration: `JavaCfg` struct holds `major`, `memory_mb`, `min_memory_mb`, `args_override`, `path_override`, `use_pack_settings`; `set_instance_java` / `set_instance_java_on_disk` persist it; `java_resolve.rs` provides the pure 3-tier resolver used at launch time. `ModEntry` now carries `name`, `icon_url`, `summary` captured at add-time. `Source` carries pack update-check fields (`last_update_check`, `latest_version`, `latest_version_id`) and display fields (`icon_url`, `author`). `needs_update_check` helper throttles to once per 24h. **CF manual-download UX:** `PendingManual` struct (`project_id: u64`, `file_id: u64`, `file_name: String`, `page_url: String`, `expected_sha1: Option<String>`, `size: Option<u64>`); `Instance` carries `pending_manual: Vec<PendingManual>` + `suppress_pending_launch_warning: bool` (both `#[serde(default)]`); `reconcile_pending_manual(inst, mods_dir)` (pure, idempotent, hash-verified) removes resolved entries and returns `Vec<ResolvedManual>`; `ResolvedManual { file_name, sha1_matched: bool, sha1_mismatch: Option<String> }`; `set_pending_launch_warning_suppressed(_on_disk)` helpers persist the suppression flag. **Custom instance icons:** `Instance.icon: Option<String>` field is LIVE (timestamped relative filename `icon-<unixMillis>.<ext>`); `write_instance_icon(inst_dir, inst, src_path)` (pub) copies src to instance dir with ext allowlist {png,jpg,jpeg,webp,gif}, 4 MiB cap, replaces any prior `icon-*` file; `clear_instance_icon_file(inst_dir, inst)` (pub) removes all `icon-*` files and clears `inst.icon`; `set_instance_icon` / `clear_instance_icon` sync Tauri commands in `lib.rs`; icons served to the frontend via Tauri asset protocol (`convertFileSrc`).
+Instance CRUD and on-disk layout. Instances stored as `instance.json` under `<data>/instances/<slug>/`. Newly created instances seed `memory_mb` from global settings. Playtime and last-played recorded on game exit via `record_playtime`. Hardlink materializer in `materialize.rs`.
 
-## Artifacts
+**Per-instance Java/RAM:** `JavaCfg` (`major`, `memory_mb`, `min_memory_mb`, `args_override`, `path_override`, `use_pack_settings`); persisted by `set_instance_java`. `java_resolve.rs` pure 3-tier resolver used at launch time.
 
-- `src/routes/Home.tsx` — instance grid; delete via confirmation dialog; opens `NewInstanceModal`; TanStack Query key `["instances"]`
-- `src/routes/InstanceDetail.tsx` — tabbed detail shell; tabs: Info, Modlist, Tech, Java
-- `src/components/NewInstanceModal.tsx` — two-tab dialog: **Create** and **Import pack**
-- `src/routes/instance-tabs/JavaTab.tsx` — per-instance Java/RAM config form; `validateJavaPath` probe; calls `setInstanceJava` on save
-- `src/routes/instance-tabs/TechTab.tsx` — read-only instance stats; effective Java/RAM display
+**ModEntry metadata:** `name`, `icon_url`, `summary` captured at add-time; old manifests have `None`.
+
+**CF manual-download tracking:** `PendingManual { project_id, file_id, file_name, page_url, expected_sha1, size }`; `Instance.pending_manual: Vec<PendingManual>` + `Instance.suppress_pending_launch_warning: bool` (both `#[serde(default)]`). `reconcile_pending_manual(inst, mods_dir)` — pure, idempotent, hash-verified; returns `Vec<ResolvedManual>`.
+
+**Custom icons:** `Instance.icon: Option<String>` holds relative filename (e.g. `icon-1751000000000.png`). `write_instance_icon` — ext allowlist {png,jpg,jpeg,webp,gif}, 4 MiB cap, removes prior `icon-*` files. `clear_instance_icon_file` removes all `icon-*` files.
 
 ## CLI code
 
-- `src-tauri/src/core/instances.rs` — `Instance` (carries `icon: Option<String>`, `pending_manual: Vec<PendingManual>`, `suppress_pending_launch_warning: bool`), `PendingManual { project_id, file_id, file_name, page_url, expected_sha1, size }`, `ResolvedManual { file_name, sha1_matched, sha1_mismatch }`, `Loader`, `JavaCfg` (`major: Option<u32>`, `args_override: Option<String>`, `memory_mb: u32`, `min_memory_mb: Option<u32>`, `path_override: Option<String>`, `use_pack_settings: bool`), `RecommendedJava`, `Source` (`provider, project_id, file_id, pack_version, recommended, page_url, icon_url, author, last_update_check, latest_version, latest_version_id`), `ModEntry` (`provider, project_id, version_id, file_name, hashes, enabled, side, from_pack, name, icon_url, summary`), `FolderMod`, `InstanceDetail`, `CreateInstanceReq`; `list`, `create`, `get`, `delete`; `record_playtime`; `load_manifest`/`save_manifest`; `set_mod_enabled`/`set_mod_enabled_on_disk`, `remove_mod`/`remove_mod_from_disk`/`remove_mod_from_disk_files`; `ensure_not_locked`; `set_pack_lock`/`set_pack_lock_on_disk`; `set_instance_java`/`set_instance_java_on_disk`; `set_pending_launch_warning_suppressed`/`set_pending_launch_warning_suppressed_on_disk`; `reconcile_pending_manual(inst: &mut Instance, mods_dir: &Path) -> Vec<ResolvedManual>` (pure, idempotent; scans mods dir for each pending entry by file name; validates sha1 if `expected_sha1` present; removes resolved entries from `pending_manual`); `write_instance_icon(inst_dir, inst, src_path) -> Result<(), String>` (pub; ext allowlist, 4 MiB cap, timestamped copy, removes prior icon files); `clear_instance_icon_file(inst_dir, inst) -> Result<(), String>` (pub; removes all `icon-*` files, clears `inst.icon`); `slugify`/`unique_slug`/`validate_slug`/`validate_mod_file_name`; `scan_mods`; `needs_update_check(last: Option<&str>, now: DateTime<Utc>) -> bool`; 52 unit tests in sibling `instances_tests.rs`
-- `src-tauri/src/core/java_resolve.rs` (106 lines) — `EffectiveJava { xmx_mb, xms_mb, extra_args, java_path }`; `resolve_effective_java(inst, settings) -> EffectiveJava`; pure function, no I/O; 3-tier precedence: (1) `inst.source.recommended` fields when `Some`, (2) per-instance `inst.java` when `use_pack_settings == true`, (3) `settings` global defaults; 11 unit tests in sibling `java_resolve_tests.rs`
-- `src-tauri/src/core/materialize.rs` (149 lines) — `materialize_core` (injectable `link_fn` closure) + `materialize` (public wrapper using `std::fs::hard_link`); copies relative paths from `cache_root` into `instance_dir`; cross-device copy fallback; 9 unit tests in sibling `materialize_tests.rs`
-- `src-tauri/src/core/settings.rs` — `Settings` struct: `schema=1`, `default_memory_mb=4096`, `default_java_args="-XX:+UseG1GC"`, `curseforge_api_key: Option<String>`, `offline_mode: bool`, `sidebar_start_collapsed: bool`, `auto_download_java: bool`, `show_console_default: bool`, `keep_launcher_open: bool`, `maximize_on_start: bool`; `load`/`save`; blank API key normalized to `None` on save; 15 unit tests in sibling `settings_tests.rs`
-- `src-tauri/src/core/store.rs` (132 lines) — path helpers: `data_dir`, `instances_dir`, `cache_dir`, `cache_assets_dir`, `cache_libraries_dir`, `cache_versions_dir`, `cache_java_dir`, `cache_meta_dir`, `cache_installers_dir`, `account_file`; `data_root_from_base` + `cache_subdir_path` pure helpers; 13 unit tests in sibling `store_tests.rs`
-- `src-tauri/src/lib.rs` — Tauri command wrappers: `list_instances`, `create_instance`, `get_instance`, `delete_instance`, `get_settings`, `save_settings`, `app_paths`, `set_mod_enabled`, `remove_mod`, `set_pack_lock`, `set_instance_java`, `set_pending_launch_warning_suppressed`, `rescan_pending_manual`, `import_manual_file`, `start_pending_watch`, `stop_pending_watch`, `set_instance_icon`, `clear_instance_icon`; `add_mod`/`update_mod` enqueue `TaskJob` into `TaskManager` and return `u64` task id; all others are synchronous (no task id); `PendingWatcher` managed state (`Mutex<Option<(slug, Debouncer)>>`) — lazy `notify` watch on the open instance's `mods/` dir; `reconcile_and_emit` internal helper (reconciles, persists, emits `manual://resolved` event); `launch_instance` calls `reconcile_pending_manual` at prep time and persists if anything resolved
+- `src-tauri/src/core/instances.rs` — `Instance` (carries `icon`, `pending_manual`, `suppress_pending_launch_warning`), `PendingManual`, `ResolvedManual`, `Loader`, `JavaCfg`, `RecommendedJava`, `Source` (`provider, project_id, file_id, pack_version, recommended, page_url, icon_url, author, last_update_check, latest_version, latest_version_id`), `ModEntry` (`provider, project_id, version_id, file_name, hashes, enabled, side, from_pack, name, icon_url, summary`), `FolderMod`, `InstanceDetail`, `CreateInstanceReq`; `list`, `create`, `get`, `delete`; `record_playtime`; `load_manifest`/`save_manifest`; `set_mod_enabled`/`set_mod_enabled_on_disk`; `remove_mod`/`remove_mod_from_disk`; `ensure_not_locked`; `set_pack_lock`/`set_pack_lock_on_disk`; `set_instance_java`/`set_instance_java_on_disk`; `set_pending_launch_warning_suppressed`/`set_pending_launch_warning_suppressed_on_disk`; `reconcile_pending_manual`; `write_instance_icon`; `clear_instance_icon_file`; `slugify`/`unique_slug`/`validate_slug`/`validate_mod_file_name`; `scan_mods`; `needs_update_check`; 52 unit tests in `instances_tests.rs`
+- `src-tauri/src/core/java_resolve.rs` — `EffectiveJava { xmx_mb, xms_mb, extra_args, java_path }`; `resolve_effective_java(inst, settings)` pure, no I/O; 3-tier: (1) `inst.source.recommended`, (2) per-instance when `use_pack_settings == true`, (3) settings global; 11 tests in `java_resolve_tests.rs`
+- `src-tauri/src/core/materialize.rs` — `materialize_core` (injectable `link_fn`) + `materialize` (hardlink with copy fallback); 9 tests in `materialize_tests.rs`
+- `src-tauri/src/core/settings.rs` — `Settings`: `schema=1`, `default_memory_mb=4096`, `default_java_args`, `curseforge_api_key`, `offline_mode`, `sidebar_start_collapsed`, `auto_download_java`, `show_console_default`, `keep_launcher_open`, `maximize_on_start`; `load`/`save`; blank API key normalized to `None`; 15 tests in `settings_tests.rs`
+- `src-tauri/src/core/store.rs` — path helpers: `data_dir`, `instances_dir`, `cache_dir`, cache subdirs, `account_file`; 13 tests in `store_tests.rs`
+- `src-tauri/src/lib.rs` — Tauri commands: `list_instances`, `create_instance`, `get_instance`, `delete_instance`, `get_settings`, `save_settings`, `app_paths`, `set_mod_enabled`, `remove_mod`, `set_pack_lock`, `set_instance_java`, `set_pending_launch_warning_suppressed`, `rescan_pending_manual`, `import_manual_file`, `start_pending_watch`, `stop_pending_watch`, `set_instance_icon`, `clear_instance_icon`; `PendingWatcher` managed state (`Mutex<Option<(slug, Debouncer)>>`); `reconcile_and_emit` helper (reconciles, persists, emits `manual://resolved`)
+
+## Artifacts
+
+- `src/routes/Home.tsx` — instance grid; delete via confirmation; opens `NewInstanceModal`; query key `["instances"]`
+- `src/routes/InstanceDetail.tsx` — tabbed detail shell (Info/Modlist/Tech/Java); instance icon header with hover Set/Remove picker; `N missing` badge + `PendingLaunchModal`
+- `src/components/NewInstanceModal.tsx` — Create and Import pack tabs
+- `src/routes/instance-tabs/JavaTab.tsx` — per-instance Java/RAM config form; calls `setInstanceJava` on save
 
 ## Docs
 
 - `docs/ARCHITECTURE.md` §2-3 — on-disk layout and `instance.json` schema
-- `docs/ROADMAP.md` Phase 1 — scope of what is implemented
-- `docs/spec/ui-overhaul.md` WS-A — per-instance Java/RAM config spec
-- `docs/spec/cf-manual-download-ux.md` — CF manual-download UX spec (PendingManual, reconcile, watcher, launch gate)
-- `docs/design/cf-manual-download-ux.md` — design rationale
-- `docs/spec/theme-and-icons.md` — custom instance icon spec (write_instance_icon, clear, asset protocol, picker UX)
-- `docs/design/theme-and-icons.md` — design rationale for icons + theme
+- `docs/spec/cf-manual-download-ux.md` — PendingManual, reconcile, watcher, launch gate
+- `docs/spec/theme-and-icons.md` — custom instance icon spec
 
 ## Coupling
 
-- `NewInstanceModal` calls into the metadata domain to populate MC version and loader dropdowns.
-- `create` reads `settings::load` to seed `memory_mb` on new instances.
-- `launch_instance` in `lib.rs` calls `java_resolve::resolve_effective_java` (step 2) to compute the effective Java/RAM config before JVM argv assembly; calls `materialize` (step 6b).
-- `add_mod` and `update_mod` in `lib.rs` call into the mod-install domain (`core/mod_install.rs`).
-- `import_mrpack`/`import_curseforge_zip` in `lib.rs` (modpack domain) call `instances::create`, `instances::load_manifest`, and `instances::save_manifest`; they also populate `instance.pending_manual` from `CfManualFile` entries via `From<&CfManualFile> for PendingManual`.
-- `refresh_pack_meta` in `lib.rs` (modpack domain) calls `instances::load_manifest`, `instances::save_manifest`, `needs_update_check` to throttle, and writes `last_update_check`/`latest_version`/`latest_version_id` to the manifest.
-- `enrich_instance_mods` in `lib.rs` calls `instances::load_manifest`/`instances::save_manifest` and updates `ModEntry.name/icon_url/summary` fields.
-- `launch_instance` in `lib.rs` calls `instances::reconcile_pending_manual` at prep time before JVM argv assembly; persists the manifest if anything resolved; emits `manual://resolved` per resolution.
-- `rescan_pending_manual` / `import_manual_file` / `start_pending_watch` / `stop_pending_watch` in `lib.rs` all call into `instances::reconcile_pending_manual` (via `reconcile_and_emit` helper) and manage the `PendingWatcher` state.
+- `create` seeds `memory_mb` from `settings::load`.
+- `launch_instance` calls `java_resolve::resolve_effective_java` (step 2) and `materialize` (step 6b); calls `reconcile_pending_manual` at prep time.
+- `import_mrpack`/`import_curseforge_zip` (modpack domain) call `instances::create`/`load_manifest`/`save_manifest`; populate `instance.pending_manual` from `CfManualFile` entries.
+- `refresh_pack_meta` (modpack domain) calls `load_manifest`/`save_manifest`/`needs_update_check`; writes `last_update_check`/`latest_version`/`latest_version_id`.
+- `enrich_instance_mods` calls `load_manifest`/`save_manifest` and updates `ModEntry.name/icon_url/summary`.
 
-## Conventions worth knowing
+## Conventions
 
-- Slugs: lowercase alphanumeric + `-` only; `validate_slug` guards path traversal on `get`/`delete`/`set_mod_enabled`/`remove_mod`/`set_instance_java`.
-- `validate_mod_file_name` guards mod file name inputs: must end in `.jar`, no `/`, `\`, `:`, no `..` traversal, no absolute paths.
-- `scan_mods` recognizes `.disabled` / `.DISABLED` suffix; strips it to get the base `.jar` name; non-`.jar` files ignored; result sorted case-insensitively by `file_name`.
-- `set_mod_enabled_on_disk` is idempotent: already-in-target-state is a no-op.
-- `remove_mod_from_disk` removes both `.jar` and `.jar.disabled` forms; missing file is not an error.
-- `SCHEMA_VERSION = 1` in both `instances.rs` and `settings.rs`; bump triggers future migrations.
-- Instance list is sorted by `created` (ISO 8601 string compare, oldest first).
+- Slugs: lowercase alphanumeric + `-` only; `validate_slug` guards path traversal.
+- `validate_mod_file_name`: must end in `.jar`, no `/\:`, no `..`, no absolute paths.
+- `scan_mods`: recognizes `.disabled`/`.DISABLED` suffix; non-`.jar` files ignored; result sorted case-insensitively.
+- `set_mod_enabled_on_disk` is idempotent. `remove_mod_from_disk` removes both `.jar` and `.jar.disabled`; missing file is not an error.
+- `SCHEMA_VERSION = 1` in both `instances.rs` and `settings.rs`.
+- Instance list sorted by `created` (ISO 8601 string compare, oldest first).
 - TanStack Query keys: `["instances"]` (list), `["instance", slug]` (detail).
-- `needs_update_check` returns `true` when `last` is `None` or the parsed timestamp is more than 24h before `now`. Used by `refresh_pack_meta` in `lib.rs` to skip the network call.
-- `JavaCfg.use_pack_settings == false` means use the global default from `Settings`; `== true` means use the instance's own memory/args/path. The name "pack settings" is slightly misleading — it means "per-instance settings override", not pack-recommended.
-- `reconcile_pending_manual` is idempotent: a second call with the same `mods_dir` state is a no-op once all pending entries are resolved (or still missing). `try_resolve_pending` (private) checks file existence by name, then verifies sha1 if `expected_sha1` is `Some`; a size mismatch alone is not grounds for rejection (sha1 is authoritative).
-- `PendingWatcher` watches one instance's `mods/` dir at a time; `start_pending_watch` with a new slug replaces any prior watch (drops old debouncer). `stop_pending_watch` only stops if the slug matches the currently-watched slug.
-- `suppress_pending_launch_warning` is a per-instance opt-out written to `instance.json`; it survives sessions but is reset to `false` if `pending_manual` becomes empty (reconcile clears both).
-- `Instance.icon` holds a **relative filename** (e.g. `"icon-1751000000000.png"`), not an absolute path or URL. The frontend constructs a `convertFileSrc` URL from `<data_dir>/instances/<slug>/<icon>` to serve it via the Tauri asset protocol. Only one icon file at a time — `write_instance_icon` removes prior `icon-*` files before copying. Extension is lowercased and validated against the allowlist before copy.
+- `reconcile_pending_manual` is idempotent. `try_resolve_pending` checks file existence then verifies sha1 if `expected_sha1` is `Some`; size mismatch alone is not rejection.
+- `PendingWatcher` watches one instance's `mods/` at a time; `start_pending_watch` with a new slug replaces any prior watch.
+- `Instance.icon` is a relative filename, not an absolute path. Frontend constructs a `convertFileSrc` URL from `<data_dir>/instances/<slug>/<icon>`.
+- `JavaCfg.use_pack_settings == false` → use global settings default. `== true` → use per-instance override.
