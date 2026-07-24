@@ -169,6 +169,10 @@ blocks exit bookkeeping (runs after playtime recording).
 
 ## Change log
 
+- 2026-07-23 — CP-3 implemented (resolve_suspects, 11 tests). Rule-10 headline now skips
+  excluded loader ids (consistent with suspect chips); loader-only implication falls to
+  `generic`. Id→manifest matching is a normalize-and-compare heuristic vs `ModEntry.name`
+  (ModEntry has no loader-id field); `FolderMod` param accepted per signature, unused v1.
 - 2026-07-23 — CP-2 implemented (analyze + 11-rule table, 29 tests, 5 log fixtures).
   Rule-10 gate clarified: parsed ids/jars only, packages excluded (always populated).
 - 2026-07-23 — CP-1 implemented (`core/crash.rs`, 23 tests, 4 fixtures). Jar extraction

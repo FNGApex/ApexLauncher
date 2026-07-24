@@ -567,6 +567,44 @@ fn cp2_mod_crash_fallback_when_report_has_only_suspect_jars() {
     assert!(analysis.headline.contains("somelib-1.2.jar"));
 }
 
+#[test]
+fn cp3_mod_crash_headline_skips_excluded_loader_ids() {
+    let text = concat!(
+        "Description: d\n\n",
+        "com.example.Foo: boom\n",
+        "\tat TRANSFORMER/neoforge@21.1/net.neoforged.Hook.run(Hook.java:1) ~[?:?] {}\n",
+        "\tat TRANSFORMER/examplemod@1.0/com.example.Hook.run(Hook.java:2) ~[?:?] {}\n",
+    );
+    let report = parse_crash_report(text);
+    assert_eq!(report.suspect_mod_ids.first().map(String::as_str), Some("neoforge"));
+    let mut input = blank_input();
+    input.report = Some(&report);
+    input.report_text = Some(text);
+    let analysis = analyze(input);
+    assert_eq!(analysis.kind, "mod_crash");
+    assert!(
+        analysis.headline.contains("examplemod"),
+        "excluded loader id must not headline when a real mod id follows: {}",
+        analysis.headline
+    );
+}
+
+#[test]
+fn cp3_mod_crash_not_matched_when_only_excluded_ids_and_no_jars() {
+    let text = concat!(
+        "Description: d\n\n",
+        "com.example.Foo: boom\n",
+        "\tat TRANSFORMER/neoforge@21.1/net.neoforged.Hook.run(Hook.java:1) ~[?:?] {}\n",
+    );
+    let report = parse_crash_report(text);
+    assert!(report.suspect_jars.is_empty());
+    let mut input = blank_input();
+    input.report = Some(&report);
+    input.report_text = Some(text);
+    let analysis = analyze(input);
+    assert_eq!(analysis.kind, "generic", "loader-only implication must fall through to generic");
+}
+
 // ── Rule 11: generic ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -636,4 +674,148 @@ fn cp2_exception_field_none_when_no_report() {
     let input = blank_input();
     let analysis = analyze(input);
     assert_eq!(analysis.exception, None);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CP-3: suspect attribution (`resolve_suspects`)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use crate::core::instances::ModEntry;
+use std::collections::BTreeMap;
+
+fn mod_entry(file_name: &str, name: Option<&str>) -> ModEntry {
+    ModEntry {
+        provider: "modrinth".into(),
+        project_id: "proj-1".into(),
+        version_id: "ver-1".into(),
+        file_name: file_name.to_string(),
+        hashes: BTreeMap::new(),
+        enabled: true,
+        side: "unknown".into(),
+        from_pack: false,
+        name: name.map(|s| s.to_string()),
+        icon_url: None,
+        summary: None,
+    }
+}
+
+#[test]
+fn cp3_id_suspect_uses_report_own_mod_table_name_and_jar() {
+    let report = parse_crash_report(REPORT_NEOFORGE);
+    let suspects = resolve_suspects(&report, &[], &[]);
+
+    let s = suspects
+        .iter()
+        .find(|s| s.mod_id.as_deref() == Some("examplemod"))
+        .expect("examplemod suspect present via report's own mod table");
+    assert_eq!(s.display, "Example Mod");
+    assert_eq!(s.jar.as_deref(), Some("examplemod-1.0.0.jar"));
+
+    // "neoforge" is a loader id — excluded even though it's in suspect_mod_ids.
+    assert!(!suspects.iter().any(|s| s.mod_id.as_deref() == Some("neoforge")));
+}
+
+#[test]
+fn cp3_jar_matches_manifest_file_name_case_insensitive_disabled_tolerated() {
+    let report = ParsedReport {
+        suspect_jars: vec!["SomeLib-1.2.jar.disabled".to_string()],
+        ..Default::default()
+    };
+    let mods = vec![mod_entry("somelib-1.2.jar", Some("Some Lib"))];
+
+    let suspects = resolve_suspects(&report, &mods, &[]);
+    assert_eq!(suspects.len(), 1);
+    assert_eq!(suspects[0].display, "Some Lib");
+    assert_eq!(suspects[0].jar.as_deref(), Some("SomeLib-1.2.jar.disabled"));
+    assert_eq!(suspects[0].mod_id, None);
+}
+
+#[test]
+fn cp3_unmatched_jar_surfaces_with_jar_only_as_display() {
+    let report = ParsedReport { suspect_jars: vec!["mystery-1.0.jar".to_string()], ..Default::default() };
+    let suspects = resolve_suspects(&report, &[], &[]);
+    assert_eq!(suspects.len(), 1);
+    assert_eq!(suspects[0].display, "mystery-1.0.jar");
+    assert_eq!(suspects[0].jar.as_deref(), Some("mystery-1.0.jar"));
+}
+
+#[test]
+fn cp3_package_fallback_suspect_ranked_last() {
+    let report = ParsedReport {
+        suspect_mod_ids: vec!["realmod".to_string()],
+        suspect_packages: vec!["com.example.pkgone".to_string(), "com.example.pkgtwo".to_string()],
+        ..Default::default()
+    };
+    let suspects = resolve_suspects(&report, &[], &[]);
+    assert_eq!(suspects.len(), 3);
+    assert_eq!(suspects[0].mod_id.as_deref(), Some("realmod"));
+    assert_eq!(suspects[1].display, "com.example.pkgone");
+    assert_eq!(suspects[2].display, "com.example.pkgtwo");
+}
+
+#[test]
+fn cp3_dedup_by_mod_id_and_by_jar() {
+    let report = ParsedReport {
+        suspect_mod_ids: vec!["modid".to_string(), "modid".to_string()],
+        suspect_jars: vec!["modid-1.0.jar".to_string(), "modid-1.0.jar".to_string()],
+        mods: vec![ReportMod {
+            id: "modid".to_string(),
+            name: "Mod Name".to_string(),
+            version: "1.0".to_string(),
+            jar: Some("modid-1.0.jar".to_string()),
+        }],
+        ..Default::default()
+    };
+    let suspects = resolve_suspects(&report, &[], &[]);
+    assert_eq!(suspects.len(), 1, "duplicate id and the id's own jar (also in suspect_jars) must collapse to one");
+    assert_eq!(suspects[0].display, "Mod Name");
+    assert_eq!(suspects[0].jar.as_deref(), Some("modid-1.0.jar"));
+}
+
+#[test]
+fn cp3_excluded_ids_filtered() {
+    let report = ParsedReport {
+        suspect_mod_ids: vec![
+            "minecraft".to_string(),
+            "fabricloader".to_string(),
+            "forge".to_string(),
+            "neoforge".to_string(),
+            "fabric-rendering-fluids-v1".to_string(),
+            "realmod".to_string(),
+        ],
+        ..Default::default()
+    };
+    let suspects = resolve_suspects(&report, &[], &[]);
+    assert_eq!(suspects.len(), 1);
+    assert_eq!(suspects[0].mod_id.as_deref(), Some("realmod"));
+}
+
+#[test]
+fn cp3_cap_at_three_suspects() {
+    let report = ParsedReport {
+        suspect_mod_ids: vec!["mod1".to_string(), "mod2".to_string(), "mod3".to_string(), "mod4".to_string()],
+        ..Default::default()
+    };
+    let suspects = resolve_suspects(&report, &[], &[]);
+    assert_eq!(suspects.len(), 3, "must cap at 3 surfaced suspects even with 4 candidate ids");
+}
+
+#[test]
+fn cp3_id_falls_back_to_manifest_match_by_normalized_name() {
+    let report = ParsedReport { suspect_mod_ids: vec!["examplemod".to_string()], ..Default::default() };
+    let mods = vec![mod_entry("examplemod-1.0.jar", Some("Example Mod"))];
+    let suspects = resolve_suspects(&report, &mods, &[]);
+    assert_eq!(suspects.len(), 1);
+    assert_eq!(suspects[0].display, "Example Mod");
+    assert_eq!(suspects[0].jar.as_deref(), Some("examplemod-1.0.jar"));
+}
+
+#[test]
+fn cp3_id_with_no_match_anywhere_uses_id_alone_as_display() {
+    let report = ParsedReport { suspect_mod_ids: vec!["mysterymod".to_string()], ..Default::default() };
+    let suspects = resolve_suspects(&report, &[], &[]);
+    assert_eq!(suspects.len(), 1);
+    assert_eq!(suspects[0].display, "mysterymod");
+    assert_eq!(suspects[0].mod_id.as_deref(), Some("mysterymod"));
+    assert_eq!(suspects[0].jar, None);
 }

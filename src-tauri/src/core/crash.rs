@@ -6,12 +6,15 @@
 //! input never panics — fields simply come back `None`/empty.
 //!
 //! Downstream checkpoints build on this shape:
-//! - CP-2 (`analyze`) turns a [`ParsedReport`] + log tail into a [`CrashAnalysis`]
-//!   (not implemented yet — do not stub it here).
+//! - CP-2 (`analyze`) turns a [`ParsedReport`] + log tail into a [`CrashAnalysis`].
 //! - CP-3 (`resolve_suspects`) cross-references [`ParsedReport::mods`] and the
-//!   suspect vectors against the instance's mod manifest (not implemented yet).
+//!   suspect vectors against the instance's mod manifest (`ModEntry`/`FolderMod`,
+//!   imported from the sibling `instances` module — not a Tauri type, so the
+//!   "no Tauri types" rule above still holds).
 
 use std::collections::HashSet;
+
+use crate::core::instances::{FolderMod, ModEntry};
 
 /// Frame package-prefix exclusion list for the suspect-package fallback (spec §Attribution).
 /// A frame's package is skipped as a suspect candidate if it starts with any of these.
@@ -836,7 +839,14 @@ const MOD_CRASH_SUGGESTION_TEMPLATE: &str = "Try updating or disabling {} and re
 
 fn rule_mod_crash(input: &AnalyzeInput, _exception_line: Option<&str>) -> Option<RuleMatch> {
     let report = input.report?;
-    let suspect = report.suspect_mod_ids.first().or_else(|| report.suspect_jars.first())?;
+    // Excluded loader/vanilla ids never headline — keeps rule 10 consistent with
+    // resolve_suspects, whose chips filter the same ids. Jars pass through: unmatched
+    // loader jars do surface as suspects there too.
+    let suspect = report
+        .suspect_mod_ids
+        .iter()
+        .find(|id| !is_excluded_suspect_id(id))
+        .or_else(|| report.suspect_jars.first())?;
     Some(RuleMatch {
         kind: "mod_crash",
         headline: fmt1(MOD_CRASH_HEADLINE_TEMPLATE, suspect),
@@ -857,6 +867,135 @@ fn rule_generic(input: &AnalyzeInput, _exception_line: Option<&str>) -> Option<R
         None => GENERIC_HEADLINE_NO_CODE.to_string(),
     };
     Some(RuleMatch { kind: "generic", headline, suggestion: GENERIC_SUGGESTION.to_string(), detail: Vec::new() })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CP-3: suspect attribution (`resolve_suspects`)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Loader/vanilla mod ids never surfaced as crash suspects (spec §Attribution).
+const EXCLUDED_SUSPECT_IDS: &[&str] = &["minecraft", "fabricloader", "forge", "neoforge"];
+
+/// Fabric API module id prefix, also excluded (spec §Attribution: "any id starting `fabric-`").
+const EXCLUDED_SUSPECT_ID_PREFIX: &str = "fabric-";
+
+/// Maximum number of suspects surfaced (spec §Attribution: "≤3 suspects").
+const MAX_SUSPECTS: usize = 3;
+
+fn is_excluded_suspect_id(id: &str) -> bool {
+    EXCLUDED_SUSPECT_IDS.contains(&id) || id.starts_with(EXCLUDED_SUSPECT_ID_PREFIX)
+}
+
+/// Cross-reference a parsed crash report's suspect ids/jars/packages against the
+/// report's own mod table and the instance's mod manifest, producing a
+/// priority-ordered, deduplicated, capped list of [`CrashSuspect`]s (spec
+/// §Attribution). Priority: mod ids (`TRANSFORMER`/mixin annotations) > jars
+/// (`~[…]`) > package fallback, ranked last.
+///
+/// `folder` (the reconciled mods-folder listing) is accepted per the locked CP-3
+/// signature but not consulted by any current resolution rule — every rule that
+/// needs a display name resolves it from `report.mods` or `mods` (`ModEntry`
+/// carries `name`; `FolderMod` does not).
+pub fn resolve_suspects(report: &ParsedReport, mods: &[ModEntry], _folder: &[FolderMod]) -> Vec<CrashSuspect> {
+    let mut seen_ids = HashSet::new();
+    let mut seen_jars = HashSet::new();
+    let mut result = Vec::new();
+
+    for id in &report.suspect_mod_ids {
+        if result.len() >= MAX_SUSPECTS {
+            return result;
+        }
+        if is_excluded_suspect_id(id) || !seen_ids.insert(id.clone()) {
+            continue;
+        }
+        result.push(resolve_id_suspect(id, report, mods, &mut seen_jars));
+    }
+
+    for jar in &report.suspect_jars {
+        if result.len() >= MAX_SUSPECTS {
+            return result;
+        }
+        if !seen_jars.insert(normalize_jar_key(jar)) {
+            continue;
+        }
+        result.push(resolve_jar_suspect(jar, mods));
+    }
+
+    for pkg in &report.suspect_packages {
+        if result.len() >= MAX_SUSPECTS {
+            return result;
+        }
+        result.push(CrashSuspect { display: pkg.clone(), mod_id: None, jar: None });
+    }
+
+    result
+}
+
+/// Resolve a single suspect mod id: the report's own mod table first (display
+/// name + jar when present), then a best-effort instance-manifest match by
+/// normalized name, then the bare id as a last resort. Registers any jar found
+/// along the way into `seen_jars` so the jar pass doesn't re-add it (spec: "a
+/// suspect found via id AND jar appears once").
+fn resolve_id_suspect(
+    id: &str,
+    report: &ParsedReport,
+    mods: &[ModEntry],
+    seen_jars: &mut HashSet<String>,
+) -> CrashSuspect {
+    if let Some(rm) = report.mods.iter().find(|m| m.id == id) {
+        if let Some(jar) = &rm.jar {
+            seen_jars.insert(normalize_jar_key(jar));
+        }
+        return CrashSuspect { display: rm.name.clone(), mod_id: Some(id.to_string()), jar: rm.jar.clone() };
+    }
+
+    if let Some(entry) = find_manifest_match_by_id(id, mods) {
+        seen_jars.insert(normalize_jar_key(&entry.file_name));
+        return CrashSuspect {
+            display: entry.name.clone().unwrap_or_else(|| id.to_string()),
+            mod_id: Some(id.to_string()),
+            jar: Some(entry.file_name.clone()),
+        };
+    }
+
+    CrashSuspect { display: id.to_string(), mod_id: Some(id.to_string()), jar: None }
+}
+
+/// Best-effort fallback for the "else → instance manifest match" tier (spec
+/// §Attribution): compares the mod id against each `ModEntry`'s captured
+/// display `name`, both normalized (lowercased, non-alphanumeric stripped) —
+/// covers the common case where a mod's loader id and its display name agree
+/// once punctuation/casing/spacing is ignored (e.g. id `examplemod` / name
+/// `"Example Mod"`).
+fn find_manifest_match_by_id<'a>(id: &str, mods: &'a [ModEntry]) -> Option<&'a ModEntry> {
+    let norm_id = normalize_ident(id);
+    mods.iter().find(|m| m.name.as_deref().map(normalize_ident).as_deref() == Some(norm_id.as_str()))
+}
+
+fn normalize_ident(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// Resolve a single suspect jar: match against `ModEntry::file_name`
+/// case-insensitively (tolerating a `.disabled` suffix on either side) for the
+/// display name; an unmatched jar surfaces with the jar itself as the display.
+fn resolve_jar_suspect(jar: &str, mods: &[ModEntry]) -> CrashSuspect {
+    let jar_key = normalize_jar_key(jar);
+    if let Some(entry) = mods.iter().find(|m| normalize_jar_key(&m.file_name) == jar_key) {
+        return CrashSuspect {
+            display: entry.name.clone().unwrap_or_else(|| jar.to_string()),
+            mod_id: None,
+            jar: Some(jar.to_string()),
+        };
+    }
+    CrashSuspect { display: jar.to_string(), mod_id: None, jar: Some(jar.to_string()) }
+}
+
+/// Normalize a jar filename for matching/dedup purposes: lowercased, with a
+/// trailing `.disabled` suffix stripped (spec: "tolerating `.jar` vs `.jar.disabled`").
+fn normalize_jar_key(jar: &str) -> String {
+    let lower = jar.to_lowercase();
+    lower.strip_suffix(".disabled").map(str::to_string).unwrap_or(lower)
 }
 
 #[cfg(test)]
