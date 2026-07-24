@@ -128,7 +128,9 @@ Retires the standing `ipc.ts`/`store.ts` hand-mirror drift risk (CP-1→6, merge
   11-rule table → suspect attribution), CrashPanel + amber toast; zero network, zero
   watchers. `docs/spec/crash-log-help.md`. Dev smoke pending.
 - [ ] Code signing + auto-update.
-- [ ] IP-8 README installer docs.
+- [x] IP-8 README installer docs — README "Download & install" section: six artifacts + build
+  host per format, glibc floor, version single-sourcing, unsigned-artifact caveat
+  (SmartScreen/Gatekeeper). `docs/spec/phase7-installers.md` now complete (IP-1→IP-8).
 
 ## Cross-cutting — ✅ Done (maintenance ongoing)
 - [x] Generated TS types from Rust (tauri-specta) so IPC stays in sync — see the dedicated
@@ -141,7 +143,8 @@ Retires the standing `ipc.ts`/`store.ts` hand-mirror drift risk (CP-1→6, merge
 ---
 
 ### Suggested next action
-Phase 7 is mostly shipped: icons/themes, launcher import, installers, and cross-platform CI
-are all on `main`. Remaining slices, roughly in value order: **crash-log parsing/help** (last
-substantial user-facing feature), skin/cape preview (small), then release infrastructure
-(code signing, auto-update, IP-8 README installer docs) when a public release is near.
+Phase 7 is nearly shipped: icons/themes, launcher import, installers (IP-1→IP-8), cross-platform
+CI, and crash-log parsing/help are all on `main`. Remaining: **skin/cape preview** (small, last
+user-facing slice), then release infrastructure (**code signing + auto-update**) when a public
+release is near — the README now documents the unsigned-artifact caveat that signing removes.
+Dev smoke tests still pending for launcher import and crash-log help.

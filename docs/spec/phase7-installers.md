@@ -1,8 +1,9 @@
 # Phase 7a — Installers / distributable packaging (spec)
 
-Status: **Windows leg (IP-1→IP-4) implemented + verified on Windows** (commits cb44c9a,
-c659739). macOS/Linux bundle config blocks landed (IP-5/IP-7) but artifacts build later on
-their own hosts (`ip-f-mac` / `ip-f-linux`); IP-6 tarball-wrap step and IP-8 docs not started.
+Status: **Complete — IP-1→IP-8 all done.** Windows leg (IP-1→IP-4) implemented + verified on
+Windows (commits cb44c9a, c659739); macOS DMG ×2 + Linux AppImage/tarball (IP-5/IP-6/IP-7)
+built green in CI (`bundle.yml`), retiring the deferred `ip-f-mac` / `ip-f-linux` gates; IP-8
+docs landed in `README.md` ("Download & install").
 Design: `docs/design/phase7-installers.md`.
 
 Contract: configure the Tauri v2 bundler + build entrypoint to emit shippable artifacts per
@@ -53,6 +54,13 @@ is verified by `check`; mac/Linux artifact production + smoke-test are deferred 
 
 ## Change log
 
+- 2026-07-24 — **IP-8 shipped.** README gains a "Download & install" section: the six artifacts
+  (MSI, NSIS, 2× DMG, AppImage, tarball) with the runner OS that builds each, the no-cross-build
+  host rule, the Ubuntu 22.04 glibc floor, version single-sourcing (`tauri.conf.json` ⇄
+  `Cargo.toml`), and an explicit unsigned-artifact section covering SmartScreen/Gatekeeper
+  behaviour and the trust boundary. Signing/notarization/auto-update linked out as still-deferred.
+  No tagged release exists yet, so the section points at **Actions → Bundle** workflow artifacts.
+  Spec closed: **all checkpoints IP-1→IP-8 done.**
 - 2026-06-27 — **CI matrix shipped** (`docs/spec/ci-pipeline.md`): `bundle.yml` builds all
   installer formats on GitHub Actions; macOS DMG (dual-arch) + Linux AppImage/tarball first-built
   + verified green there, retiring the IP-5/6/7 "unverified on those OSes" risk. `native-tls`
