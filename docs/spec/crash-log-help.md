@@ -169,6 +169,11 @@ blocks exit bookkeeping (runs after playtime recording).
 
 ## Change log
 
+- 2026-07-23 — CP-4 implemented (detection wiring, 8 fake-child tests). Hook runs after
+  ALL exit bookkeeping incl. the `exited` emit (retry can't delay it). Manifest read is a
+  direct `instance.json` parse via public `Instance`/`ModEntry` DTOs — `load_manifest`
+  needs an `AppHandle` unavailable in Tauri-free `monitor_child`; `inst_dir` is the
+  already-resolved trusted path.
 - 2026-07-23 — CP-3 implemented (resolve_suspects, 11 tests). Rule-10 headline now skips
   excluded loader ids (consistent with suspect chips); loader-only implication falls to
   `generic`. Id→manifest matching is a normalize-and-compare heuristic vs `ModEntry.name`

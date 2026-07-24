@@ -2059,3 +2059,452 @@ fn a3_legacy_empty_jvm_args_plus_effective_java_valid() {
         assert!(!arg.contains("${"), "raw placeholder in legacy+effective argv: {arg}");
     }
 }
+
+// -----------------------------------------------------------------------
+// CP-4 (crash-log-help) — post-exit crash detection wiring in monitor_child
+// -----------------------------------------------------------------------
+
+/// Cross-platform process that exits with a specific code.
+#[cfg(windows)]
+fn exit_code_proc(code: i32) -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("cmd.exe"),
+        vec!["/c".to_string(), format!("exit {code}")],
+    )
+}
+#[cfg(not(windows))]
+fn exit_code_proc(code: i32) -> (PathBuf, Vec<String>) {
+    (PathBuf::from("sh"), vec!["-c".to_string(), format!("exit {code}")])
+}
+
+/// A minimal, well-formed crash-report text (parses to a plausible `ParsedReport`
+/// without matching any of the more specific rules — settles on `generic`).
+const SAMPLE_CRASH_REPORT: &str = "---- Minecraft Crash Report ----\n\
+// test\n\
+Time: 2024-01-01 00:00:00\n\
+Description: Test crash\n\
+\n\
+java.lang.RuntimeException: boom\n\
+\tat com.example.Foo.bar(Foo.java:10)\n\
+\n\
+-- System Details --\n\
+Details:\n\
+\tMinecraft Version: 1.21.1\n";
+
+/// Write `content` to `path` (creating parent dirs) and force its mtime.
+fn write_file_with_mtime(path: &std::path::Path, content: &[u8], mtime: SystemTime) {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let mut f = fs::File::create(path).unwrap();
+    f.write_all(content).unwrap();
+    f.set_modified(mtime).unwrap();
+}
+
+/// exit 1 + a fresh `crash-reports/*.txt` → `sink.crashed` fires, `RunState.crash`
+/// is set, and `report_path` names the file exactly.
+#[tokio::test]
+async fn cp4_crash_exit1_fresh_report_fires_crashed_and_sets_state_crash() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let slug = "crash-fresh-report".to_string();
+    let inst_dir = make_instance_dir_named(&tmp, &slug);
+    let game_dir = inst_dir.join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+
+    // mark_preparing installs `started_wall` before we write the report.
+    mark_preparing(&registry, &slug, &*sink);
+
+    let report_path = game_dir.join("crash-reports").join("x.txt");
+    write_file_with_mtime(&report_path, SAMPLE_CRASH_REPORT.as_bytes(), SystemTime::now());
+
+    let (java, argv) = exit_code_proc(1);
+    spawn_instance(
+        slug.clone(),
+        inst_dir,
+        game_dir,
+        java,
+        argv,
+        Arc::clone(&registry),
+        Arc::clone(&sink),
+    )
+    .await
+    .expect("spawn must succeed");
+
+    wait_until(&registry, 10, "instance reaches terminal after exit 1", |g| {
+        g.get(&slug).map(|s| s.status.is_terminal()).unwrap_or(false)
+    })
+    .await;
+
+    let crashes = sink.crashes.lock().unwrap();
+    assert_eq!(crashes.len(), 1, "sink.crashed must fire exactly once");
+    assert_eq!(crashes[0].0, slug);
+    assert_eq!(
+        crashes[0].1.report_path.as_deref(),
+        Some(report_path.to_string_lossy().as_ref()),
+        "report_path must name the fresh crash report"
+    );
+
+    let state_crash = registry.lock().unwrap().get(&slug).unwrap().crash.clone();
+    assert!(state_crash.is_some(), "RunState.crash must be set");
+}
+
+/// exit 0 (clean natural exit) with a crash report present → NOT fired.
+#[tokio::test]
+async fn cp4_crash_exit0_with_report_not_fired() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let slug = "crash-exit0".to_string();
+    let inst_dir = make_instance_dir_named(&tmp, &slug);
+    let game_dir = inst_dir.join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+
+    mark_preparing(&registry, &slug, &*sink);
+
+    let report_path = game_dir.join("crash-reports").join("x.txt");
+    write_file_with_mtime(&report_path, SAMPLE_CRASH_REPORT.as_bytes(), SystemTime::now());
+
+    let (java, argv) = exit_code_proc(0);
+    spawn_instance(
+        slug.clone(),
+        inst_dir,
+        game_dir,
+        java,
+        argv,
+        Arc::clone(&registry),
+        Arc::clone(&sink),
+    )
+    .await
+    .expect("spawn must succeed");
+
+    wait_until(&registry, 10, "instance reaches terminal after exit 0", |g| {
+        g.get(&slug).map(|s| s.status.is_terminal()).unwrap_or(false)
+    })
+    .await;
+
+    assert!(
+        sink.crashes.lock().unwrap().is_empty(),
+        "sink.crashed must NOT fire on a clean exit 0"
+    );
+    assert!(
+        registry.lock().unwrap().get(&slug).unwrap().crash.is_none(),
+        "RunState.crash must stay None on a clean exit 0"
+    );
+}
+
+/// A killed run → NOT fired, even though the process would otherwise look abnormal.
+#[tokio::test]
+async fn cp4_crash_killed_not_fired() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let slug = "crash-killed".to_string();
+    let inst_dir = make_instance_dir_named(&tmp, &slug);
+    let game_dir = inst_dir.join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+
+    mark_preparing(&registry, &slug, &*sink);
+
+    let (java, argv) = sleep_proc();
+    spawn_instance(
+        slug.clone(),
+        inst_dir,
+        game_dir,
+        java,
+        argv,
+        Arc::clone(&registry),
+        Arc::clone(&sink),
+    )
+    .await
+    .expect("spawn must succeed");
+
+    kill_instance(&registry, &slug).expect("kill must succeed");
+
+    wait_until(&registry, 10, "instance reaches terminal after kill", |g| {
+        g.get(&slug).map(|s| s.status.is_terminal()).unwrap_or(false)
+    })
+    .await;
+
+    assert!(
+        sink.crashes.lock().unwrap().is_empty(),
+        "sink.crashed must NOT fire for a killed run"
+    );
+    assert!(
+        registry.lock().unwrap().get(&slug).unwrap().crash.is_none(),
+        "RunState.crash must stay None for a killed run"
+    );
+}
+
+/// exit 1 + no report anywhere → fires (after the single 750ms retry) with a
+/// log-tail-only analysis (`report_path` stays `None`).
+#[tokio::test]
+async fn cp4_crash_exit1_no_report_fires_after_retry_log_tail_only() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let slug = "crash-no-report".to_string();
+    let inst_dir = make_instance_dir_named(&tmp, &slug);
+    let game_dir = inst_dir.join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+
+    mark_preparing(&registry, &slug, &*sink);
+    // No crash-reports dir/file created at all.
+
+    let (java, argv) = exit_code_proc(1);
+    spawn_instance(
+        slug.clone(),
+        inst_dir,
+        game_dir,
+        java,
+        argv,
+        Arc::clone(&registry),
+        Arc::clone(&sink),
+    )
+    .await
+    .expect("spawn must succeed");
+
+    // Allow enough time for the single 750ms retry to elapse.
+    wait_until(&registry, 10, "instance reaches terminal after exit 1 (no report)", |g| {
+        g.get(&slug).map(|s| s.status.is_terminal()).unwrap_or(false)
+    })
+    .await;
+    wait_until(&registry, 5, "sink.crashed fires after the retry window", |_| {
+        !sink.crashes.lock().unwrap().is_empty()
+    })
+    .await;
+
+    let crashes = sink.crashes.lock().unwrap();
+    assert_eq!(crashes.len(), 1, "sink.crashed must fire once");
+    assert_eq!(
+        crashes[0].1.report_path, None,
+        "report_path must be None with no report on disk"
+    );
+    assert!(
+        !crashes[0].1.kind.is_empty(),
+        "analysis must still resolve a rule kind from the log tail / exit code"
+    );
+}
+
+/// A pre-existing crash report with `mtime < started_wall - 2s` is stale and must
+/// be ignored — the run analyzes as if no report were present.
+#[tokio::test]
+async fn cp4_crash_stale_report_ignored() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let slug = "crash-stale-report".to_string();
+    let inst_dir = make_instance_dir_named(&tmp, &slug);
+    let game_dir = inst_dir.join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let stale_time = SystemTime::now() - std::time::Duration::from_secs(30);
+    let report_path = game_dir.join("crash-reports").join("old.txt");
+    write_file_with_mtime(&report_path, SAMPLE_CRASH_REPORT.as_bytes(), stale_time);
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+    // started_wall is "now" — well after the stale report's mtime.
+    mark_preparing(&registry, &slug, &*sink);
+
+    let (java, argv) = exit_code_proc(1);
+    spawn_instance(
+        slug.clone(),
+        inst_dir,
+        game_dir,
+        java,
+        argv,
+        Arc::clone(&registry),
+        Arc::clone(&sink),
+    )
+    .await
+    .expect("spawn must succeed");
+
+    wait_until(&registry, 10, "instance reaches terminal", |g| {
+        g.get(&slug).map(|s| s.status.is_terminal()).unwrap_or(false)
+    })
+    .await;
+    wait_until(&registry, 5, "sink.crashed fires after the retry window", |_| {
+        !sink.crashes.lock().unwrap().is_empty()
+    })
+    .await;
+
+    let crashes = sink.crashes.lock().unwrap();
+    assert_eq!(
+        crashes[0].1.report_path, None,
+        "stale pre-existing report must be ignored: {:?}",
+        crashes[0].1.report_path
+    );
+}
+
+/// `hs_err_pid123.log` directly in `mc/` → `jvm_error_path` set (and the
+/// `native_crash` rule fires, since it's flag-based on `jvm_error_path`).
+#[tokio::test]
+async fn cp4_crash_hs_err_sets_jvm_error_path() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let slug = "crash-hs-err".to_string();
+    let inst_dir = make_instance_dir_named(&tmp, &slug);
+    let game_dir = inst_dir.join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+
+    mark_preparing(&registry, &slug, &*sink);
+
+    let hs_err_path = game_dir.join("hs_err_pid123.log");
+    write_file_with_mtime(&hs_err_path, b"# fake hs_err content", SystemTime::now());
+
+    let (java, argv) = exit_code_proc(1);
+    spawn_instance(
+        slug.clone(),
+        inst_dir,
+        game_dir,
+        java,
+        argv,
+        Arc::clone(&registry),
+        Arc::clone(&sink),
+    )
+    .await
+    .expect("spawn must succeed");
+
+    wait_until(&registry, 10, "instance reaches terminal", |g| {
+        g.get(&slug).map(|s| s.status.is_terminal()).unwrap_or(false)
+    })
+    .await;
+    wait_until(&registry, 5, "sink.crashed fires after the retry window", |_| {
+        !sink.crashes.lock().unwrap().is_empty()
+    })
+    .await;
+
+    let crashes = sink.crashes.lock().unwrap();
+    assert_eq!(
+        crashes[0].1.jvm_error_path.as_deref(),
+        Some(hs_err_path.to_string_lossy().as_ref()),
+        "jvm_error_path must name the hs_err file"
+    );
+    assert_eq!(
+        crashes[0].1.kind, "native_crash",
+        "jvm_error_path presence must select the native_crash rule"
+    );
+}
+
+/// A crash report over 8 MiB is skipped (not read): analysis still resolves
+/// (log-only) but `report_path` is `None`.
+#[tokio::test]
+async fn cp4_crash_oversized_report_skipped_log_only() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let slug = "crash-oversized-report".to_string();
+    let inst_dir = make_instance_dir_named(&tmp, &slug);
+    let game_dir = inst_dir.join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+
+    mark_preparing(&registry, &slug, &*sink);
+
+    // > 8 MiB of filler content.
+    let oversized = vec![b'a'; 8 * 1024 * 1024 + 10];
+    let report_path = game_dir.join("crash-reports").join("huge.txt");
+    write_file_with_mtime(&report_path, &oversized, SystemTime::now());
+
+    let (java, argv) = exit_code_proc(1);
+    spawn_instance(
+        slug.clone(),
+        inst_dir,
+        game_dir,
+        java,
+        argv,
+        Arc::clone(&registry),
+        Arc::clone(&sink),
+    )
+    .await
+    .expect("spawn must succeed");
+
+    wait_until(&registry, 10, "instance reaches terminal", |g| {
+        g.get(&slug).map(|s| s.status.is_terminal()).unwrap_or(false)
+    })
+    .await;
+    wait_until(&registry, 5, "sink.crashed fires after the retry window", |_| {
+        !sink.crashes.lock().unwrap().is_empty()
+    })
+    .await;
+
+    let crashes = sink.crashes.lock().unwrap();
+    assert_eq!(
+        crashes[0].1.report_path, None,
+        "oversized report must be skipped: {:?}",
+        crashes[0].1.report_path
+    );
+    assert!(
+        !crashes[0].1.kind.is_empty(),
+        "analysis must still resolve a rule kind (log-only)"
+    );
+}
+
+/// A relaunch (`mark_preparing` again) yields a fresh `RunState` with `crash == None`,
+/// even after a prior run on the same slug set a crash analysis.
+#[tokio::test]
+async fn cp4_crash_relaunch_clears_crash() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let slug = "crash-relaunch".to_string();
+    let inst_dir = make_instance_dir_named(&tmp, &slug);
+    let game_dir = inst_dir.join("mc");
+    fs::create_dir_all(&game_dir).unwrap();
+
+    let registry = Arc::new(new_running_registry());
+    let sink = Arc::new(CapturingLaunchSink::new());
+
+    mark_preparing(&registry, &slug, &*sink);
+    let report_path = game_dir.join("crash-reports").join("x.txt");
+    write_file_with_mtime(&report_path, SAMPLE_CRASH_REPORT.as_bytes(), SystemTime::now());
+
+    let (java, argv) = exit_code_proc(1);
+    spawn_instance(
+        slug.clone(),
+        inst_dir,
+        game_dir,
+        java,
+        argv,
+        Arc::clone(&registry),
+        Arc::clone(&sink),
+    )
+    .await
+    .expect("spawn must succeed");
+
+    wait_until(&registry, 10, "instance reaches terminal", |g| {
+        g.get(&slug).map(|s| s.status.is_terminal()).unwrap_or(false)
+    })
+    .await;
+    wait_until(&registry, 5, "crash set on prior run", |g| {
+        g.get(&slug).map(|s| s.crash.is_some()).unwrap_or(false)
+    })
+    .await;
+
+    // Relaunch: mark_preparing installs a brand new RunState for this slug.
+    mark_preparing(&registry, &slug, &*sink);
+
+    let fresh_crash = registry.lock().unwrap().get(&slug).unwrap().crash.clone();
+    assert!(fresh_crash.is_none(), "relaunch must clear crash to None");
+}

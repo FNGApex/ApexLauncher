@@ -19,9 +19,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use crate::core::auth::{AccountStore, AuthError, AuthHttpClient};
+use crate::core::crash;
 use crate::core::resolver::LaunchMeta;
 
 // ---------------------------------------------------------------------------
@@ -510,6 +511,14 @@ pub trait LaunchSink: Send + Sync + 'static {
     /// Default no-op so existing sinks that only care about logs/exit need not
     /// implement it.
     fn status(&self, _instance_id: &str, _status: RunStatus, _exit_code: Option<i32>) {}
+
+    /// Called once a post-exit crash analysis has been computed (CP-4 detection
+    /// hook in `monitor_child`). Never fires for a killed run or a clean (exit 0)
+    /// natural exit — see the §Detection contract in `docs/spec/crash-log-help.md`.
+    ///
+    /// Default no-op so existing sinks that only care about logs/exit/status need
+    /// not implement it.
+    fn crashed(&self, _instance_id: &str, _analysis: &crash::CrashAnalysis) {}
 }
 
 
@@ -519,6 +528,7 @@ pub struct CapturingLaunchSink {
     pub lines: Mutex<Vec<(String, String, String)>>, // (instance_id, stream, line)
     pub exit_codes: Mutex<Vec<(String, Option<i32>)>>,
     pub statuses: Mutex<Vec<(String, RunStatus, Option<i32>)>>, // (instance_id, status, exit_code)
+    pub crashes: Mutex<Vec<(String, crash::CrashAnalysis)>>,    // (instance_id, analysis)
 }
 
 #[cfg(test)]
@@ -528,6 +538,7 @@ impl CapturingLaunchSink {
             lines: Mutex::new(Vec::new()),
             exit_codes: Mutex::new(Vec::new()),
             statuses: Mutex::new(Vec::new()),
+            crashes: Mutex::new(Vec::new()),
         }
     }
 }
@@ -551,6 +562,12 @@ impl LaunchSink for CapturingLaunchSink {
             .lock()
             .unwrap()
             .push((instance_id.to_owned(), status, exit_code));
+    }
+    fn crashed(&self, instance_id: &str, analysis: &crash::CrashAnalysis) {
+        self.crashes
+            .lock()
+            .unwrap()
+            .push((instance_id.to_owned(), analysis.clone()));
     }
 }
 
@@ -639,6 +656,16 @@ pub struct RunState {
     pub log_ring: std::collections::VecDeque<LogLine>,
     /// When the launch began (prep start). Used for playtime / elapsed reporting.
     pub started: Instant,
+    /// Wall-clock counterpart of `started` (set alongside it in `new_preparing`,
+    /// so it's fresh on every relaunch via `mark_preparing`). CP-4's post-exit
+    /// crash detection uses this — not `started` — to filter out stale
+    /// `crash-reports/*.txt` / `hs_err_pid*.log` files that predate this run
+    /// (mtime must be `>= started_wall - 2s` slack; see §Detection contract).
+    pub started_wall: SystemTime,
+    /// Best-effort crash analysis populated by CP-4's post-exit detection hook
+    /// in `monitor_child`. `None` on a fresh state — including immediately after
+    /// a relaunch, since `mark_preparing` always installs a fresh `RunState`.
+    pub crash: Option<crash::CrashAnalysis>,
 }
 
 impl RunState {
@@ -650,6 +677,8 @@ impl RunState {
             exit_code: None,
             log_ring: std::collections::VecDeque::new(),
             started: Instant::now(),
+            started_wall: SystemTime::now(),
+            crash: None,
         }
     }
 
@@ -867,21 +896,22 @@ pub async fn spawn_instance<S: LaunchSink>(
     // `Running` and installing the kill channel. Direct callers (tests) that
     // skipped `mark_preparing` get a fresh `Running` state. Lock is released
     // before the status emit (never hold across the sink call).
-    let started = {
+    let (started, started_wall) = {
         let mut guard = registry.lock().unwrap();
         match guard.get_mut(&slug) {
             Some(state) => {
                 state.status = RunStatus::Running;
                 state.kill_tx = Some(kill_tx);
-                state.started
+                (state.started, state.started_wall)
             }
             None => {
                 let mut state = RunState::new_preparing();
                 let started = state.started;
+                let started_wall = state.started_wall;
                 state.status = RunStatus::Running;
                 state.kill_tx = Some(kill_tx);
                 guard.insert(slug.clone(), state);
-                started
+                (started, started_wall)
             }
         }
     };
@@ -901,6 +931,7 @@ pub async fn spawn_instance<S: LaunchSink>(
             stderr,
             kill_rx,
             started,
+            started_wall,
             registry_clone,
             sink_clone,
         )
@@ -926,6 +957,7 @@ async fn monitor_child<S: LaunchSink>(
     stderr: tokio::process::ChildStderr,
     kill_rx: tokio::sync::oneshot::Receiver<()>,
     started: Instant,
+    started_wall: SystemTime,
     registry: Arc<RunningRegistry>,
     sink: Arc<S>,
 ) {
@@ -1058,9 +1090,206 @@ async fn monitor_child<S: LaunchSink>(
         }
     }
 
-    // Emit terminal status + the exit event.
+    // Emit terminal status.
     sink.status(&slug, terminal, exit_status);
+
+    // Emit the exit event.
     sink.exited(&slug, exit_status);
+
+    // CP-4 — post-exit crash detection (spec §Detection contract). Best-effort:
+    // any I/O error degrades to a log-only analysis; never panics. Runs after ALL
+    // exit bookkeeping (playtime, terminal status, exit emit) so the 750ms retry
+    // can never delay them.
+    detect_crash(&slug, &inst_dir, started_wall, was_killed, exit_status, &registry, &*sink).await;
+}
+
+// ---------------------------------------------------------------------------
+// CP-4 — post-exit crash detection
+// ---------------------------------------------------------------------------
+
+/// Reports larger than this are skipped (not read) — analysis degrades to
+/// log-tail-only (spec §Detection contract step 4: "report > 8 MiB → skip
+/// read, report `None`").
+const MAX_CRASH_REPORT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Slack applied to `started_wall` when filtering stale crash-report /
+/// hs_err files: a file must have `mtime >= started_wall - 2s` to count as
+/// "new" (spec §Detection contract step 2/3).
+const CRASH_FILE_MTIME_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Run the CP-4 detection hook: scan for a fresh crash report + hs_err file,
+/// analyze, attribute suspects against the instance manifest, and — if a
+/// natural non-zero (or unknown-code) exit — store the result on `state.crash`
+/// and notify the sink. Skips entirely for a killed run or a clean exit.
+///
+/// All I/O here is best-effort: any failure degrades to a log-only analysis
+/// (or, in the pathological case of the registry entry vanishing, no-ops)
+/// rather than panicking.
+async fn detect_crash<S: LaunchSink>(
+    slug: &str,
+    inst_dir: &Path,
+    started_wall: SystemTime,
+    was_killed: bool,
+    exit_status: Option<i32>,
+    registry: &RunningRegistry,
+    sink: &S,
+) {
+    // Step 1: skip when killed or a clean exit.
+    if was_killed || exit_status == Some(0) {
+        return;
+    }
+
+    let game_dir = inst_dir.join("mc");
+
+    // Step 2: scan for a fresh crash report; single 750ms retry if none found yet.
+    let mut report_path = find_new_crash_report(&game_dir, started_wall);
+    if report_path.is_none() {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        report_path = find_new_crash_report(&game_dir, started_wall);
+    }
+
+    // Step 3: scan for a fresh hs_err file.
+    let jvm_error_path = find_jvm_error_file(&game_dir, started_wall);
+
+    // Step 4: read + parse the report (best-effort; > 8 MiB → skip read, report `None`).
+    let (report_text, parsed_report) = match &report_path {
+        Some(p) => match fs::metadata(p) {
+            Ok(meta) if meta.len() <= MAX_CRASH_REPORT_BYTES => match fs::read_to_string(p) {
+                Ok(text) => {
+                    let parsed = crash::parse_crash_report(&text);
+                    (Some(text), Some(parsed))
+                }
+                Err(_) => (None, None),
+            },
+            _ => (None, None),
+        },
+        None => (None, None),
+    };
+    // A report that couldn't be read/parsed (or was too large) reports `None`
+    // even though a path was found — the analysis degrades to log-only.
+    if parsed_report.is_none() {
+        report_path = None;
+    }
+
+    // Last <=300 ring lines, cloned under lock; lock dropped before `analyze`.
+    let log_tail: Vec<String> = {
+        let guard = registry.lock().unwrap();
+        guard
+            .get(slug)
+            .map(|state| {
+                let len = state.log_ring.len();
+                let skip = len.saturating_sub(300);
+                state.log_ring.iter().skip(skip).map(|l| l.line.clone()).collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let input = crash::AnalyzeInput {
+        report: parsed_report.as_ref(),
+        report_text: report_text.as_deref(),
+        log_tail: &log_tail,
+        exit_code: exit_status,
+        report_path: report_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        jvm_error_path: jvm_error_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+    };
+    let mut analysis = crash::analyze(input);
+
+    // resolve_suspects against the instance manifest (best-effort: on error →
+    // empty mods slice). `instances::load_manifest` needs an `AppHandle`, which
+    // isn't available here (monitor_child is Tauri-free) — read `instance.json`
+    // directly instead via the same public `Instance` DTO.
+    let mods = load_crash_mods_best_effort(inst_dir);
+    let empty_report = crash::ParsedReport::default();
+    let report_for_suspects = parsed_report.as_ref().unwrap_or(&empty_report);
+    analysis.suspects = crash::resolve_suspects(report_for_suspects, &mods, &[]);
+
+    // Store on the retained RunState (lock released before the sink call).
+    {
+        let mut guard = registry.lock().unwrap();
+        if let Some(state) = guard.get_mut(slug) {
+            state.crash = Some(analysis.clone());
+        }
+    }
+    sink.crashed(slug, &analysis);
+}
+
+/// Scan `game_dir/crash-reports/*.txt` (non-recursive) for files with
+/// `mtime >= started_wall - 2s`, returning the newest match. `None` if the
+/// directory is absent or no file matches (best-effort — any I/O error on an
+/// individual entry just skips that entry).
+fn find_new_crash_report(game_dir: &Path, started_wall: SystemTime) -> Option<PathBuf> {
+    let threshold = started_wall
+        .checked_sub(CRASH_FILE_MTIME_SLACK)
+        .unwrap_or(started_wall);
+    let dir = game_dir.join("crash-reports");
+    let entries = fs::read_dir(&dir).ok()?;
+
+    let mut newest: Option<(PathBuf, SystemTime)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("txt") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(mtime) = meta.modified() else { continue };
+        if mtime < threshold {
+            continue;
+        }
+        let is_newer = newest.as_ref().map(|(_, best)| mtime > *best).unwrap_or(true);
+        if is_newer {
+            newest = Some((path, mtime));
+        }
+    }
+    newest.map(|(path, _)| path)
+}
+
+/// Scan `game_dir/hs_err_pid*.log` (non-recursive) for files with
+/// `mtime >= started_wall - 2s`, returning the newest match. `None` if the
+/// directory is absent or no file matches.
+fn find_jvm_error_file(game_dir: &Path, started_wall: SystemTime) -> Option<PathBuf> {
+    let threshold = started_wall
+        .checked_sub(CRASH_FILE_MTIME_SLACK)
+        .unwrap_or(started_wall);
+    let entries = fs::read_dir(game_dir).ok()?;
+
+    let mut newest: Option<(PathBuf, SystemTime)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        if !name.starts_with("hs_err_pid") || !name.ends_with(".log") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(mtime) = meta.modified() else { continue };
+        if mtime < threshold {
+            continue;
+        }
+        let is_newer = newest.as_ref().map(|(_, best)| mtime > *best).unwrap_or(true);
+        if is_newer {
+            newest = Some((path, mtime));
+        }
+    }
+    newest.map(|(path, _)| path)
+}
+
+/// Best-effort load of the instance manifest's `mods[]`, for CP-4's suspect
+/// attribution. Any I/O or parse error degrades to an empty mod list — this
+/// must never block exit bookkeeping. See `detect_crash`'s doc comment for
+/// why this reads `instance.json` directly rather than calling
+/// `instances::load_manifest` (which requires an `AppHandle`).
+fn load_crash_mods_best_effort(inst_dir: &Path) -> Vec<crate::core::instances::ModEntry> {
+    let path = inst_dir.join("instance.json");
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<crate::core::instances::Instance>(&raw).ok())
+        .map(|inst| inst.mods)
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
